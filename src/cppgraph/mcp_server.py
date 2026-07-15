@@ -31,7 +31,12 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from cppgraph.cli import SOURCE_EXTS, build_export_json, read_source_snippet
-from cppgraph.store import GraphStore, changed_files_since
+from cppgraph.store import (
+    GraphStore,
+    changed_files_since,
+    commits_behind,
+    staleness_verdict,
+)
 
 if TYPE_CHECKING:
     from cppgraph.model import Edge, Node
@@ -334,19 +339,28 @@ def status_report(store: GraphStore, root: str | None = None) -> dict[str, Any]:
         return result
     changed = [f for f in changes[0] if f.endswith(SOURCE_EXTS)]
     deleted = [f for f in changes[1] if f.endswith(SOURCE_EXTS)]
-    result["drift"] = {
+    behind = commits_behind(root, commit)
+    verdict = staleness_verdict(
+        len(changed), len(deleted), store.indexed_file_count(), commits_behind=behind
+    )
+    drift: dict[str, Any] = {
         "checked": True,
-        "up_to_date": not changed and not deleted,
+        "up_to_date": verdict["up_to_date"],
         "changed": changed[:DEFAULT_LIMIT],
         "deleted": deleted[:DEFAULT_LIMIT],
         "changed_total": len(changed),
         "deleted_total": len(deleted),
+        "commits_behind": behind,
     }
-    if not (changed and deleted):
-        # nothing more to say beyond the flag; keep the hint only when stale
-        pass
-    if changed or deleted:
-        result["drift"]["next"] = "run scripts/reindex.sh --update to refresh the graph"
+    if not verdict["up_to_date"]:
+        drift["changed_fraction"] = verdict.get("changed_fraction")
+        drift["recommend"] = verdict["recommend"]  # "update" | "rebuild"
+        drift["next"] = (
+            "run scripts/reindex.sh --update to refresh the graph"
+            if verdict["recommend"] == "update"
+            else "drift too large for incremental — re-index the whole target and rebuild"
+        )
+    result["drift"] = drift
     return result
 
 

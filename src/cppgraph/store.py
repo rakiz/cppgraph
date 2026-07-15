@@ -137,6 +137,56 @@ def changed_files_since(
     )
 
 
+def commits_behind(root: str | Path, base_commit: str) -> int | None:
+    """How many commits `root`'s HEAD is ahead of `base_commit` (the indexed
+    commit), i.e. `git rev-list --count base_commit..HEAD`. None if unknown."""
+    out = _git(Path(root), "rev-list", "--count", f"{base_commit}..HEAD")
+    if out is None:
+        return None
+    try:
+        return int(out)
+    except ValueError:
+        return None
+
+
+# At/above this share of indexed files changed, an incremental update stops
+# paying off (it re-indexes each changed TU) — recommend a full rebuild instead.
+REBUILD_FILE_FRACTION = 0.25
+
+
+def staleness_verdict(
+    changed: int,
+    deleted: int,
+    indexed_files: int,
+    commits_behind: int | None = None,
+) -> dict:
+    """Turn drift counts into a magnitude + a recommendation (pure/testable).
+
+    `changed`/`deleted` are the C++ file counts since the indexed commit;
+    `indexed_files` is the store's file count (the denominator). Recommends a
+    full `rebuild` once the changed fraction reaches `REBUILD_FILE_FRACTION`,
+    else an incremental `update`. `up_to_date` when nothing changed.
+    """
+    n = changed + deleted
+    verdict: dict = {
+        "up_to_date": n == 0,
+        "changed": changed,
+        "deleted": deleted,
+        "commits_behind": commits_behind,
+    }
+    if n == 0:
+        return verdict
+    fraction = n / indexed_files if indexed_files else None
+    verdict["indexed_files"] = indexed_files or None
+    verdict["changed_fraction"] = round(fraction, 3) if fraction is not None else None
+    verdict["recommend"] = (
+        "rebuild"
+        if fraction is not None and fraction >= REBUILD_FILE_FRACTION
+        else "update"
+    )
+    return verdict
+
+
 def project_root_path(project_root_uri: str) -> Path | None:
     """The local filesystem path behind a SCIP `Metadata.project_root`, which is
     a `file://` URI."""
@@ -382,6 +432,12 @@ class GraphStore:
         except sqlite3.OperationalError:
             return {}
         return dict(rows)
+
+    def indexed_file_count(self) -> int:
+        """Number of distinct files that contributed to the index — the
+        denominator for the staleness magnitude (what share changed)."""
+        (n,) = self._con.execute("SELECT COUNT(*) FROM files").fetchone()
+        return n
 
     def _symbols_for_ids(self, ids: set[int]) -> dict[int, str]:
         out: dict[int, str] = {}

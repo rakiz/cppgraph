@@ -120,12 +120,13 @@ Ordered. Check off as you go. Detail lives in `DESIGN.md`.
       Serena/clangd (compiler-grade but its whole-repo background index doesn't
       finish in interactive time on mongo: cross-TU references stuck at 1 after
       6 min). Verdict: cppgraph wins for exact + transitive + offline structure.
-- [ ] Staleness *magnitude*, not just binary. `status --root` today is
-      fresh/STALE on any single changed C++ file and always recommends the
-      incremental `reindex.sh --update`. Add a "how far behind" measure (e.g.
-      `git rev-list --count` of commits since the indexed one, or % of TUs
-      touched) and, past a threshold, recommend a full rebuild instead of an
-      incremental update (incremental stops paying off once most TUs changed).
+- [x] Staleness *magnitude*, not just binary. `status --root` now reports the
+      changed **fraction** of indexed files and **commits behind** (`git rev-list
+      --count`), and recommends a **full rebuild** once drift reaches
+      `REBUILD_FILE_FRACTION` (25%) — else the incremental `reindex.sh --update`.
+      Pure `store.staleness_verdict` (+ `commits_behind`, `indexed_file_count`),
+      surfaced by CLI `status` and MCP `status.drift` (`changed_fraction`,
+      `commits_behind`, `recommend`).
 
 ## Phase 4 — open-source / generalize
 

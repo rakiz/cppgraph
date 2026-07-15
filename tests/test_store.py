@@ -533,3 +533,40 @@ def test_implements_edges_are_stored(tmp_path: Path) -> None:
     # implements edges don't participate in call queries, but must round-trip.
     assert store.has_symbol("cxx . . $ mongo/Dog#sound(d1).")
     assert store.callers_of("cxx . . $ mongo/Animal#sound(a1).") == []
+
+
+def test_staleness_verdict_up_to_date() -> None:
+    from cppgraph.store import staleness_verdict
+    v = staleness_verdict(0, 0, indexed_files=1000)
+    assert v["up_to_date"] is True
+
+
+def test_staleness_verdict_small_drift_recommends_update() -> None:
+    from cppgraph.store import staleness_verdict
+    v = staleness_verdict(changed=10, deleted=2, indexed_files=1000, commits_behind=3)
+    assert v["up_to_date"] is False
+    assert v["recommend"] == "update"
+    assert v["changed_fraction"] == 0.012
+    assert v["commits_behind"] == 3
+
+
+def test_staleness_verdict_large_drift_recommends_rebuild() -> None:
+    from cppgraph.store import REBUILD_FILE_FRACTION, staleness_verdict
+    heavy = int(1000 * REBUILD_FILE_FRACTION) + 5
+    v = staleness_verdict(changed=heavy, deleted=0, indexed_files=1000)
+    assert v["recommend"] == "rebuild"
+
+
+def test_staleness_verdict_unknown_denominator_defaults_to_update() -> None:
+    from cppgraph.store import staleness_verdict
+    v = staleness_verdict(changed=5, deleted=0, indexed_files=0)
+    assert v["recommend"] == "update"
+    assert v["changed_fraction"] is None
+
+
+def test_indexed_file_count(tmp_path: Path) -> None:
+    graph = Graph()
+    graph.add_edge("calls", CALLER, METHOD, file="a.cpp", line=1)
+    graph.add_edge("calls", METHOD, OTHER, file="b.cpp", line=2)
+    store = _store(tmp_path, graph)
+    assert store.indexed_file_count() == 2

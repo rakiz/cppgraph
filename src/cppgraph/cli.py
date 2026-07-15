@@ -15,6 +15,8 @@ from cppgraph.store import (
     GraphStore,
     build_provenance,
     changed_files_since,
+    commits_behind,
+    staleness_verdict,
     update_store,
     write_sqlite,
 )
@@ -483,9 +485,14 @@ def main(argv: list[str] | None = None) -> int:
         if not changed and not deleted:
             print("  status: up to date")
             return 0
+        behind = commits_behind(args.root, commit)
+        verdict = staleness_verdict(
+            len(changed), len(deleted), store.indexed_file_count(), commits_behind=behind
+        )
+        behind_str = f", {behind} commit(s) behind" if behind is not None else ""
         print(
             f"  status: STALE - {len(changed)} changed, {len(deleted)} deleted "
-            f"since {commit[:12]}"
+            f"since {commit[:12]}{behind_str}"
         )
         for f in changed[:20]:
             print(f"    ~ {f}")
@@ -493,7 +500,16 @@ def main(argv: list[str] | None = None) -> int:
             print(f"    - {f}")
         if len(changed) + len(deleted) > 40:
             print(f"    ... and {len(changed) + len(deleted) - 40} more")
-        print(f"  next: scripts/reindex.sh --update {args.graph} <compile_commands.json>")
+        frac = verdict.get("changed_fraction")
+        if frac is not None:
+            print(f"  drift: {frac * 100:.0f}% of {verdict['indexed_files']} indexed files changed")
+        if verdict["recommend"] == "rebuild":
+            print("  recommendation: FULL REBUILD (drift too large for an incremental update)")
+            print("    re-index the whole target, then `cppgraph build --scip <index.scip> "
+                  f"--out {args.graph}`")
+        else:
+            print("  recommendation: incremental update")
+            print(f"    next: scripts/reindex.sh --update {args.graph} <compile_commands.json>")
         return 1
 
     if args.command == "explain":
