@@ -4,16 +4,42 @@ from __future__ import annotations
 
 import argparse
 import sys
+from pathlib import Path
 
 from cppgraph.builder import build_graph
 from cppgraph.model import Edge, Node
 from cppgraph.proto import scip_pb2
-from cppgraph.store import GraphStore, build_provenance, update_store, write_sqlite
+from cppgraph.store import (
+    GraphStore,
+    build_provenance,
+    project_root_path,
+    update_store,
+    write_sqlite,
+)
 
 
 def _print_node(node: Node) -> None:
     loc = f"{node.file}:{node.line + 1}" if node.file is not None and node.line is not None else "?"
     print(f"  {node.symbol}  ({node.display_name or '?'} @ {loc})")
+
+
+def read_source_snippet(
+    root: str | Path, rel_path: str, line0: int, *, context: int = 3
+) -> list[tuple[int, str]] | None:
+    """Read `line0` (0-indexed) ± `context` lines from `root/rel_path`.
+
+    Returns a list of `(0-indexed line number, text)`, or `None` if the file
+    can't be read — the checkout root is a runtime argument, so a missing file
+    is an expected, recoverable condition, not an error.
+    """
+    try:
+        text = (Path(root) / rel_path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    lines = text.splitlines()
+    start = max(0, line0 - context)
+    end = min(len(lines), line0 + context + 1)
+    return [(i, lines[i]) for i in range(start, end)]
 
 
 def _print_edge(edge: Edge, *, other: str) -> None:
@@ -90,6 +116,23 @@ def main(argv: list[str] | None = None) -> int:
     p_impact.add_argument("symbol", help="exact SCIP symbol string (see `find`)")
     p_impact.add_argument(
         "--depth", type=int, default=None, help="max call hops to walk backwards (default: unbounded)"
+    )
+
+    p_explain = sub.add_parser(
+        "explain",
+        help="summarize a symbol: definition site, source snippet, callers/callees",
+    )
+    p_explain.add_argument("--graph", required=True, help="path to a graph store built by `cppgraph build`")
+    p_explain.add_argument("symbol", help="exact SCIP symbol string (see `find`)")
+    p_explain.add_argument(
+        "--root", default=None,
+        help="checkout root to read source from (a runtime argument, never stored "
+        "in the graph — lets the same graph serve any local clone). Defaults to "
+        "the SCIP project_root recorded at build time, as a best-effort suggestion.",
+    )
+    p_explain.add_argument(
+        "--context", type=int, default=3, metavar="N",
+        help="lines of source context to show around the definition (default: 3)",
     )
 
     args = parser.parse_args(argv)
@@ -191,6 +234,61 @@ def main(argv: list[str] | None = None) -> int:
             node = store.get_node(symbol)
             if node is not None:
                 _print_node(node)
+        return 0
+
+    if args.command == "explain":
+        store = GraphStore(args.graph)
+        node = store.get_node(args.symbol)
+        if node is None:
+            parser.error(f"unknown symbol: {args.symbol} (use `cppgraph find` to look it up)")
+        callers = store.callers_of(args.symbol)
+        callees = store.callees_of(args.symbol)
+
+        loc = (
+            f"{node.file}:{node.line + 1}"
+            if node.file is not None and node.line is not None
+            else "?"
+        )
+        print(f"[cppgraph] {node.symbol}")
+        print(f"  name:       {node.display_name or '?'}")
+        print(f"  defined at: {loc}")
+
+        # Resolve the checkout root: explicit --root, else the stored project_root
+        # as a best-effort suggestion (never treated as an authoritative fact).
+        root = args.root
+        if root is None:
+            recorded = store.meta().get("project_root")
+            if recorded:
+                p = project_root_path(recorded)
+                root = str(p) if p is not None else None
+
+        if node.file is not None and node.line is not None:
+            snippet = (
+                read_source_snippet(root, node.file, node.line, context=args.context)
+                if root is not None
+                else None
+            )
+            if snippet is None:
+                where = f" at {root}/{node.file}" if root is not None else ""
+                print(f"  (source not found{where}; pass --root <checkout>)")
+            else:
+                print("  source:")
+                for lineno, text in snippet:
+                    marker = ">" if lineno == node.line else " "
+                    print(f"  {marker} {lineno + 1:>6} | {text}")
+
+        print(f"  {len(callers)} caller(s):")
+        for edge in callers[:10]:
+            line = edge.line + 1 if edge.line is not None else "?"
+            print(f"    {edge.src}  ({edge.file}:{line})")
+        if len(callers) > 10:
+            print(f"    ... and {len(callers) - 10} more")
+        print(f"  {len(callees)} callee(s):")
+        for edge in callees[:10]:
+            line = edge.line + 1 if edge.line is not None else "?"
+            print(f"    {edge.dst}  ({edge.file}:{line})")
+        if len(callees) > 10:
+            print(f"    ... and {len(callees) - 10} more")
         return 0
 
     parser.error(f"unknown command: {args.command}")

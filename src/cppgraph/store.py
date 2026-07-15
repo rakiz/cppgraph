@@ -93,7 +93,7 @@ def _git(root: Path, *args: str) -> str | None:
     return result.stdout.strip()
 
 
-def _project_root_path(project_root_uri: str) -> Path | None:
+def project_root_path(project_root_uri: str) -> Path | None:
     """The local filesystem path behind a SCIP `Metadata.project_root`, which is
     a `file://` URI."""
     if project_root_uri.startswith("file://"):
@@ -133,7 +133,7 @@ def build_provenance(
 
     commit = source_commit
     dirty = source_dirty
-    root = _project_root_path(md.project_root)
+    root = project_root_path(md.project_root)
     if commit is None and root is not None:
         commit = _git(root, "rev-parse", "HEAD")
         if commit is not None and dirty is None:

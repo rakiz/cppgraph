@@ -150,6 +150,67 @@ def test_update_applies_partial_reindex(
     assert store.meta()["source_commit"] == "newsha"
 
 
+@pytest.fixture
+def explain_graph(tmp_path: Path) -> Path:
+    """A graph whose symbol has a real definition site (file + line)."""
+    graph = Graph()
+    node = graph.add_node("cxx . . $ mongo/Foo#bar(a1).", display_name="bar")
+    node.file = "src/foo.cpp"
+    node.line = 3  # 0-indexed -> source line 4
+    # one caller and one callee so explain can summarize both directions
+    graph.add_edge("calls", "cxx . . $ mongo/Foo#caller(a2).",
+                   "cxx . . $ mongo/Foo#bar(a1).", file="src/foo.cpp", line=20)
+    graph.add_edge("calls", "cxx . . $ mongo/Foo#bar(a1).",
+                   "cxx . . $ mongo/Foo#callee(a3).", file="src/foo.cpp", line=5)
+    path = tmp_path / "graph.db"
+    write_sqlite(graph, path)
+    return path
+
+
+def _write_source(root: Path) -> None:
+    src = root / "src"
+    src.mkdir(parents=True)
+    (src / "foo.cpp").write_text(
+        "line0\nline1\nline2\nint Foo::bar() {\n  return callee();\n}\nline6\n"
+    )
+
+
+def test_explain_shows_definition_and_source_snippet(
+    explain_graph: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = tmp_path / "checkout"
+    _write_source(root)
+    exit_code = main(
+        ["explain", "--graph", str(explain_graph),
+         "cxx . . $ mongo/Foo#bar(a1).", "--root", str(root)]
+    )
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "src/foo.cpp:4" in out          # def location, 1-indexed
+    assert "int Foo::bar() {" in out        # the snippet line
+    assert "1 caller(s)" in out
+    assert "1 callee(s)" in out
+
+
+def test_explain_missing_source_is_graceful(
+    explain_graph: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # --root points nowhere useful: still reports location + counts, no crash.
+    exit_code = main(
+        ["explain", "--graph", str(explain_graph),
+         "cxx . . $ mongo/Foo#bar(a1).", "--root", str(tmp_path / "absent")]
+    )
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "src/foo.cpp:4" in out
+    assert "source not found" in out.lower()
+
+
+def test_explain_unknown_symbol_errors(explain_graph: Path) -> None:
+    with pytest.raises(SystemExit):
+        main(["explain", "--graph", str(explain_graph), "nonexistent", "--root", "/tmp"])
+
+
 def test_impact_lists_transitive_callers(graph_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     exit_code = main(
         ["impact", "--graph", str(graph_path), "cxx . . $ mongo/Foo#makeResumeToken(a1)."]
