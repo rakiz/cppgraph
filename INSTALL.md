@@ -15,7 +15,7 @@ uv pip install -e ".[dev]"
 Verify:
 
 ```bash
-.venv/bin/python -c "from cppgraph import scip_pb2; print(scip_pb2.Index())"
+.venv/bin/python -c "from cppgraph.proto import scip_pb2; print(scip_pb2.Index())"
 .venv/bin/python -m pytest --version
 ```
 
@@ -61,7 +61,7 @@ scratch/bin/scip-clang --version
 
 ## 3. `protoc` (optional — only if regenerating SCIP protobuf bindings)
 
-`src/cppgraph/scip_pb2.py` and `scip_pb2.pyi` are **generated and committed**
+`src/cppgraph/proto/scip_pb2.py` and `scip_pb2.pyi` are **generated and committed**
 to this repo specifically so that step 1 above is enough for normal
 development — you do not need to install `protoc` just to build or run
 cppgraph.
@@ -95,15 +95,15 @@ protoc --version   # libprotoc 35.1
 
    ```bash
    protoc --proto_path=src/cppgraph/proto \
-     --python_out=src/cppgraph --pyi_out=src/cppgraph \
+     --python_out=src/cppgraph/proto --pyi_out=src/cppgraph/proto \
      src/cppgraph/proto/scip.proto
    ```
 
 3. Verify and commit:
 
    ```bash
-   .venv/bin/python -c "from cppgraph import scip_pb2; print(scip_pb2.Index())"
-   git diff --stat src/cppgraph/scip_pb2.py src/cppgraph/scip_pb2.pyi
+   .venv/bin/python -c "from cppgraph.proto import scip_pb2; print(scip_pb2.Index())"
+   git diff --stat src/cppgraph/proto/scip_pb2.py src/cppgraph/proto/scip_pb2.pyi
    ```
 
    Both generated files start with `# ... DO NOT EDIT!` / are marked
@@ -116,5 +116,5 @@ protoc --version   # libprotoc 35.1
 | Python 3.13+ / `uv`       | Always                                | N/A (tool)          |
 | `scip-clang` binary       | Always (to produce a `.scip` index)   | No — `scratch/` (gitignored), fetched per machine |
 | `protoc`                  | Only to regenerate `scip_pb2.py`/`.pyi` | No — one-off dev tool |
-| `scip_pb2.py` / `.pyi`    | Always (imported by cppgraph)         | **Yes**, generated + committed |
+| `scip_pb2.py` / `.pyi`    | Always (imported by cppgraph)         | **Yes**, generated + committed (in `proto/`) |
 | `scip.proto`              | Source of truth for the above          | Yes, vendored at `src/cppgraph/proto/scip.proto` |

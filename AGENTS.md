@@ -35,11 +35,12 @@ MongoDB paths into the tool — only into scratch/tests.
 - Deps via `pyproject.toml`; a local `.venv` in the repo. Any Python you run
   MUST use that venv.
 - SCIP protobuf: `src/cppgraph/proto/scip.proto` is vendored from
-  `scip-code/scip`. `src/cppgraph/scip_pb2.py` / `.pyi` are **generated and
-  committed** (protoc self-marks them `DO NOT EDIT!`) — this avoids requiring
-  every contributor to install `protoc` just to run the tool. `protoc` is only
-  needed to *regenerate* the bindings after `scip.proto` changes. See
-  `INSTALL.md` for exact regeneration steps.
+  `scip-code/scip`, alongside the **generated and committed** bindings
+  `src/cppgraph/proto/scip_pb2.py` / `.pyi` (protoc self-marks them `DO NOT
+  EDIT!`) — this avoids requiring every contributor to install `protoc` just
+  to run the tool. `protoc` is only needed to *regenerate* the bindings after
+  `scip.proto` changes. See `src/cppgraph/proto/README.md` / `INSTALL.md` for
+  exact regeneration steps.
 - Tests with `pytest` under `tests/`. Prefer small fixtures (a tiny checked-in
   `.scip` or a synthetic one) over depending on a full MongoDB index.
 - CLI entry: `cppgraph` (see `src/cppgraph/cli.py`).
