@@ -4,6 +4,23 @@ _Last updated: 2026-07-15_
 
 ## Where we are
 
+Query surface completed for the LLM/MCP workflow: `cppgraph explain <symbol>`
+prints the definition site + the caller/callee summary, and — only if given a
+`--root` checkout (a query-time arg that never lives in the store) — a source
+snippet; omit `--root` for coordinates only, for callers that read files
+themselves. `--root` is the single snippet switch (no implicit project_root).
+`cppgraph status [--root R]` reports the graph's `source_commit` and, with a
+checkout, whether it has drifted (exit 1 if stale, C++-only file filter) — the
+"am I up to date?" check an LLM runs before trusting the graph, feeding
+`reindex.sh --update`. 65 tests green; all verified on the full mongo store.
+Decision on the declaration-context false-positive: closed as a fundamental
+scip-clang limitation (see "Known limitation"), tracked on upstream PR #504.
+
+Next: Phase 3 (MCP server wrapping these queries, token-budgeted), then enrich
+the graph with `references`/`inherits` edges (agreed useful, builder work).
+
+## Where we were (incremental update)
+
 Incremental update landed: `cppgraph update --graph <graph.db> --scip
 <partial.scip> [--deleted PATH ...] [--source-commit C]` applies a partial
 re-index (only the changed TUs) to an existing store **in place**, instead of
@@ -125,13 +142,18 @@ C++-general, MongoDB-first.
 
 ## Exact next step
 
-Phase 2 store + queries + incremental `update` are done (SQLite `GraphStore`,
-all five CLI queries, `cppgraph update`, `reindex.sh --update`). The
-declaration-context false-positive was investigated 2026-07-15 and closed as a
-fundamental scip-clang limitation (see "Known limitation" above): not fixable
-without `enclosing_range`, blocked on upstream PR #504. Remaining Phase 2 work
-in `TODO.md`: `explain` query + project-root runtime param when queries start
-returning source snippets. After that, Phase 3 (MCP server).
+Phase 2 is complete: SQLite `GraphStore`; the CLI queries `find`, `callers`,
+`callees`, `path`, `impact`, `explain`, `status`; incremental `cppgraph update`
++ `reindex.sh --update`. The declaration-context false-positive is closed as a
+fundamental scip-clang limitation (see "Known limitation"), tracked on PR #504.
+
+Next is **Phase 3 — the MCP server**: wrap the existing `GraphStore` queries as
+MCP tools with token-budgeted responses, so an LLM can call `impact`/`callers`/
+`path`/`explain`/`status` directly while reasoning about a change. `status` is
+the drift check, `explain` without `--root` the token-cheap coordinates mode.
+Design intent + the real-world workflow are in `DESIGN.md`. After the MCP
+server, enrich the graph with `references`/`inherits` edges (builder work,
+agreed useful for dependency reasoning beyond calls).
 
 ## Key reference symbols for the acceptance tests
 

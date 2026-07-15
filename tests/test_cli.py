@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -206,9 +208,111 @@ def test_explain_missing_source_is_graceful(
     assert "source not found" in out.lower()
 
 
+def test_explain_without_root_returns_coordinates_only(
+    explain_graph: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # No --root => coordinates only, source never read (the single switch).
+    exit_code = main(
+        ["explain", "--graph", str(explain_graph), "cxx . . $ mongo/Foo#bar(a1)."]
+    )
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "src/foo.cpp:4" in out        # coordinates still reported
+    assert "source:" not in out          # but no snippet section
+    assert "int Foo::bar()" not in out   # source text was not read
+    assert "1 caller(s)" in out
+    assert "1 callee(s)" in out
+    assert "tip:" not in out  # non-interactive (captured) => no human hint
+
+
+def test_explain_tip_shown_only_when_interactive(
+    explain_graph: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+    exit_code = main(
+        ["explain", "--graph", str(explain_graph), "cxx . . $ mongo/Foo#bar(a1)."]
+    )
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "tip: pass --root" in out
+
+
 def test_explain_unknown_symbol_errors(explain_graph: Path) -> None:
     with pytest.raises(SystemExit):
         main(["explain", "--graph", str(explain_graph), "nonexistent", "--root", "/tmp"])
+
+
+def _init_repo(root: Path) -> str:
+    """Init a git repo with one committed file; return the HEAD commit hash."""
+    root.mkdir(parents=True, exist_ok=True)
+
+    def git(*a: str) -> None:
+        subprocess.run(["git", "-C", str(root), *a], check=True, capture_output=True)
+
+    git("init", "-q")
+    git("config", "user.email", "t@example.com")
+    git("config", "user.name", "Test")
+    (root / "a.cpp").write_text("int a() { return 0; }\n")
+    git("add", "-A")
+    git("commit", "-q", "-m", "init")
+    return subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "HEAD"], capture_output=True, text=True
+    ).stdout.strip()
+
+
+def _store_at(tmp_path: Path, commit: str | None) -> Path:
+    graph = Graph()
+    graph.add_node("cxx . . $ mongo/Foo#a(a1).", display_name="a")
+    db = tmp_path / "graph.db"
+    meta = {"source_commit": commit} if commit else {}
+    write_sqlite(graph, db, meta=meta)
+    return db
+
+
+def test_status_reports_recorded_commit_without_root(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    db = _store_at(tmp_path, "deadbeefcafe")
+    assert main(["status", "--graph", str(db)]) == 0
+    assert "deadbeefcafe" in capsys.readouterr().out
+
+
+def test_status_up_to_date(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    root = tmp_path / "repo"
+    head = _init_repo(root)
+    db = _store_at(tmp_path, head)
+    assert main(["status", "--graph", str(db), "--root", str(root)]) == 0
+    assert "up to date" in capsys.readouterr().out.lower()
+
+
+def test_status_detects_stale_checkout(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = tmp_path / "repo"
+    head = _init_repo(root)
+    db = _store_at(tmp_path, head)
+    (root / "a.cpp").write_text("int a() { return 1; }\n")  # uncommitted edit
+    exit_code = main(["status", "--graph", str(db), "--root", str(root)])
+    out = capsys.readouterr().out
+    assert exit_code == 1  # nonzero so `status || reindex` works in a shell
+    assert "stale" in out.lower()
+    assert "a.cpp" in out
+
+
+def test_status_ignores_non_source_changes(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = tmp_path / "repo"
+    head = _init_repo(root)
+    db = _store_at(tmp_path, head)
+    # change only a non-C++ file, then commit it
+    (root / "README.md").write_text("docs\n")
+    subprocess.run(["git", "-C", str(root), "add", "-A"], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(root), "commit", "-q", "-m", "docs"], check=True, capture_output=True
+    )
+    assert main(["status", "--graph", str(db), "--root", str(root)]) == 0
+    assert "up to date" in capsys.readouterr().out.lower()
 
 
 def test_impact_lists_transitive_callers(graph_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

@@ -12,9 +12,19 @@ from cppgraph.proto import scip_pb2
 from cppgraph.store import (
     GraphStore,
     build_provenance,
-    project_root_path,
+    changed_files_since,
     update_store,
     write_sqlite,
+)
+
+
+# Extensions the graph is built from — drift in a non-C++ file (docs, build
+# config, settings) never changes the code graph, so `status` ignores it to keep
+# the staleness signal meaningful. (A build-flag change that alters an existing
+# TU is a structural case handled by a full rebuild, not this heuristic.)
+SOURCE_EXTS = (
+    ".cpp", ".cc", ".cxx", ".c", ".cu",
+    ".h", ".hpp", ".hh", ".hxx", ".ipp", ".inl", ".cuh",
 )
 
 
@@ -118,6 +128,18 @@ def main(argv: list[str] | None = None) -> int:
         "--depth", type=int, default=None, help="max call hops to walk backwards (default: unbounded)"
     )
 
+    p_status = sub.add_parser(
+        "status",
+        help="show the graph's source commit and, with --root, whether the checkout has drifted",
+    )
+    p_status.add_argument("--graph", required=True, help="path to a graph store built by `cppgraph build`")
+    p_status.add_argument(
+        "--root", default=None,
+        help="checkout root to compare against (runtime argument). With it, "
+        "reports whether the working tree has drifted from the graph's source "
+        "commit (exit 1 if stale) and lists the changed files.",
+    )
+
     p_explain = sub.add_parser(
         "explain",
         help="summarize a symbol: definition site, source snippet, callers/callees",
@@ -126,9 +148,10 @@ def main(argv: list[str] | None = None) -> int:
     p_explain.add_argument("symbol", help="exact SCIP symbol string (see `find`)")
     p_explain.add_argument(
         "--root", default=None,
-        help="checkout root to read source from (a runtime argument, never stored "
-        "in the graph — lets the same graph serve any local clone). Defaults to "
-        "the SCIP project_root recorded at build time, as a best-effort suggestion.",
+        help="checkout root to read a source snippet from (a runtime argument, "
+        "never stored in the graph — lets the same graph serve any local clone). "
+        "Omit it to get coordinates (file:line) only, e.g. when the caller already "
+        "has file access and will read the source itself.",
     )
     p_explain.add_argument(
         "--context", type=int, default=3, metavar="N",
@@ -236,6 +259,49 @@ def main(argv: list[str] | None = None) -> int:
                 _print_node(node)
         return 0
 
+    if args.command == "status":
+        store = GraphStore(args.graph)
+        m = store.meta()
+        commit = m.get("source_commit")
+        dirty = m.get("source_dirty") == "true"
+        print(f"[cppgraph] graph store: {args.graph}")
+        if commit:
+            print(f"  source commit: {commit}{' (dirty)' if dirty else ''}")
+        else:
+            print("  source commit: unknown (not recorded at build time)")
+        if m.get("project_root"):
+            print(f"  project_root:  {m['project_root']}")
+
+        if args.root is None:
+            if commit:
+                print("  (pass --root <checkout> to check drift against the working tree)")
+            return 0
+        if not commit:
+            print("  cannot check drift: no source commit recorded in the graph")
+            return 0
+
+        result = changed_files_since(args.root, commit)
+        if result is None:
+            print(f"  cannot check drift: {args.root} is not a git checkout (or git unavailable)")
+            return 0
+        changed = [f for f in result[0] if f.endswith(SOURCE_EXTS)]
+        deleted = [f for f in result[1] if f.endswith(SOURCE_EXTS)]
+        if not changed and not deleted:
+            print("  status: up to date")
+            return 0
+        print(
+            f"  status: STALE - {len(changed)} changed, {len(deleted)} deleted "
+            f"since {commit[:12]}"
+        )
+        for f in changed[:20]:
+            print(f"    ~ {f}")
+        for f in deleted[:20]:
+            print(f"    - {f}")
+        if len(changed) + len(deleted) > 40:
+            print(f"    ... and {len(changed) + len(deleted) - 40} more")
+        print(f"  next: scripts/reindex.sh --update {args.graph} <compile_commands.json>")
+        return 1
+
     if args.command == "explain":
         store = GraphStore(args.graph)
         node = store.get_node(args.symbol)
@@ -253,29 +319,23 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  name:       {node.display_name or '?'}")
         print(f"  defined at: {loc}")
 
-        # Resolve the checkout root: explicit --root, else the stored project_root
-        # as a best-effort suggestion (never treated as an authoritative fact).
-        root = args.root
-        if root is None:
-            recorded = store.meta().get("project_root")
-            if recorded:
-                p = project_root_path(recorded)
-                root = str(p) if p is not None else None
-
-        if node.file is not None and node.line is not None:
-            snippet = (
-                read_source_snippet(root, node.file, node.line, context=args.context)
-                if root is not None
-                else None
-            )
+        # --root is the sole snippet switch: given => read source, omitted =>
+        # coordinates only. We never fall back to the stored project_root, which
+        # is only a suggestion and may not exist on this machine (DESIGN.md:
+        # "project root is a query-time parameter, never stored").
+        if args.root is not None and node.file is not None and node.line is not None:
+            snippet = read_source_snippet(args.root, node.file, node.line, context=args.context)
             if snippet is None:
-                where = f" at {root}/{node.file}" if root is not None else ""
-                print(f"  (source not found{where}; pass --root <checkout>)")
+                print(f"  (source not found at {args.root}/{node.file})")
             else:
                 print("  source:")
                 for lineno, text in snippet:
                     marker = ">" if lineno == node.line else " "
                     print(f"  {marker} {lineno + 1:>6} | {text}")
+        elif args.root is None and node.file is not None and sys.stdout.isatty():
+            # Interactive human only: teach the affordance without spending tokens
+            # on every machine/LLM/MCP call (those learn --root from the schema).
+            print("  (tip: pass --root <checkout> to include a source snippet)")
 
         print(f"  {len(callers)} caller(s):")
         for edge in callers[:10]:

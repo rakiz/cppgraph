@@ -236,9 +236,16 @@ paths, kept in mind while designing the builder so this isn't a later rewrite:
 
 ## Serving
 
-- CLI: `build`, `update` (incremental), `callers`, `callees`, `path`,
-  `impact` (reverse blast-radius), `explain`.
-- MCP server (later): expose the same queries to an LLM, token-budgeted.
+- CLI: `build`, `update` (incremental), `find`, `callers`, `callees`, `path`,
+  `impact` (reverse blast-radius), `explain` (definition + neighbors; pass
+  `--root` to also get a source snippet, omit it for coordinates only),
+  `status` (source commit + drift check).
+- MCP server (later): expose the same queries to an LLM, token-budgeted. The
+  intended loop: `status` tells the LLM whether the graph is current (else
+  `reindex.sh --update`); then `impact`/`callers`/`path`/`explain` answer
+  "what does this change affect?" with compiler-exact edges — no grep guessing,
+  no loading files into context. `explain` without `--root` stays cheap
+  (coordinates only) when the caller can read source itself.
 - Export: optional graphify-compatible `graph.json` purely for visualization.
 
 ### Project root is a query-time parameter, never stored

@@ -93,6 +93,28 @@ def _git(root: Path, *args: str) -> str | None:
     return result.stdout.strip()
 
 
+def changed_files_since(
+    root: str | Path, base_commit: str
+) -> tuple[list[str], list[str]] | None:
+    """Files that differ in `root`'s working tree from `base_commit`.
+
+    Returns `(changed, deleted)` relative paths, or `None` if `root` isn't a
+    git checkout / git is unavailable. Diffs the working tree (not just HEAD)
+    against the commit, so uncommitted edits count too — this is exactly the
+    changed-file set an incremental `cppgraph update` would consume, mirroring
+    `reindex.sh --update`.
+    """
+    root = Path(root)
+    changed = _git(root, "diff", "--name-only", "--diff-filter=d", base_commit, "--")
+    deleted = _git(root, "diff", "--name-only", "--diff-filter=D", base_commit, "--")
+    if changed is None or deleted is None:
+        return None
+    return (
+        [ln for ln in changed.splitlines() if ln.strip()],
+        [ln for ln in deleted.splitlines() if ln.strip()],
+    )
+
+
 def project_root_path(project_root_uri: str) -> Path | None:
     """The local filesystem path behind a SCIP `Metadata.project_root`, which is
     a `file://` URI."""

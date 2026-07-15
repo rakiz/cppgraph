@@ -32,11 +32,17 @@ Ordered. Check off as you go. Detail lives in `DESIGN.md`.
 - [x] CLI queries: `find` (search by name), `callers`, `callees` — now served
       by `GraphStore` over the SQLite store, verified on the full mongo graph.
 - [x] CLI queries: `path A B`, `impact` (reverse blast radius) — also served by
-      `GraphStore` (id-space BFS over the indexed edges). `explain` still TODO.
-- [ ] Project root as a runtime parameter for query commands that need to
-      read actual source (see `DESIGN.md` § "Project root is a query-time
-      parameter, never stored") — not needed yet since `callers`/`callees`
-      only print symbol/file/line, no source snippets.
+      `GraphStore` (id-space BFS over the indexed edges).
+- [x] CLI query: `explain <symbol>` — definition site, caller/callee summary,
+      and (only with `--root`) a source snippet. `--root` is a query-time
+      argument, never stored, and is the *single* snippet switch: omit it for
+      coordinates only (callers with their own file access), realizing
+      `DESIGN.md` § "Project root is a query-time parameter" without any
+      implicit fallback to the recorded `project_root`. Verified on mongo.
+- [x] CLI query: `status [--root R]` — reports the graph's `source_commit` and,
+      with `--root`, whether the working tree has drifted (exit 1 if stale) and
+      which C++ files changed (non-source drift filtered out). This is the
+      LLM/MCP "am I up to date?" check → feeds `reindex.sh --update`.
 - [x] **Incremental update path** (`cppgraph update`, `store.update_store` /
       `GraphStore.apply_update`): re-index only changed TUs → apply the partial
       `.scip` to the store in place. The set of files whose old contributions
