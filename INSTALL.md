@@ -150,17 +150,20 @@ scripts/reindex.sh /Users/sebastien.mendez/code/mongo/compile_commands.json \
 scripts/reindex.sh /path/to/other/project/compile_commands.json
 ```
 
-Outputs land under `scratch/<name>.{compdb.json,scip,graph.json}` —
+Outputs land under `scratch/<name>.{compdb.json,scip,graph.db}` —
 gitignored, per-machine, never committed (see AGENTS.md "Large artifacts").
+The `graph.db` is the interned SQLite store queried by `cppgraph
+find/callers/callees/path/impact` (see DESIGN.md § Store).
 
 Verified timings on this machine (14-core arm64 Mac, `scip-clang` v0.4.0),
 indexing MongoDB:
 - `src/mongo/db/pipeline/` — 519 TUs, ~151s, 0 errors, 23 MB `.scip`.
 - All of `src/mongo/` — 6004 TUs, ~1253s (indexing 1228s + merging 19s),
-  0 errored TUs, 797 MB `.scip` → 1.19 GB `graph.json`
-  (643,967 nodes, 2,735,021 edges). This is the measurement that decides
-  Phase 2's storage: a 1.19 GB flat JSON confirms `DESIGN.md`'s expectation
-  that the full-codebase graph must move off flat JSON to SQLite.
+  0 errored TUs, 797 MB `.scip` → 323 MB `graph.db`
+  (643,967 nodes, 2,735,021 edges; ~23s to build the store). The same graph
+  as a flat JSON was 1.19 GB — the interned SQLite store is the Phase 2 move
+  that both shrinks it 3.7× and makes queries hit a B-tree index instead of
+  loading the whole file per query. See `DESIGN.md` § Store.
 
 **Gotcha** (already handled by the script, documented here so it isn't
 rediscovered on the next project): a build system's generated

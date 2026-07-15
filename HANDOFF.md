@@ -4,8 +4,26 @@ _Last updated: 2026-07-15_
 
 ## Where we are
 
-Phase 1 (POC) is functionally complete. `cppgraph build --scip <index.scip>
---out <graph.json>` works end-to-end. Both acceptance tests pass:
+Phase 2 store landed: the graph now persists as an **interned SQLite store**
+(`src/cppgraph/store.py`), not flat JSON. `cppgraph build --scip <index.scip>
+--out <graph.db>` writes it; all queries (`find`/`callers`/`callees`/`path`/
+`impact`) are served by `GraphStore` off B-tree indexes without loading the
+whole graph into RAM. Measured on the full `src/mongo` graph (643,967 nodes,
+2,735,021 edges): 1.19 GB flat JSON → **323 MB** store (3.7× smaller), build
+~23 s; `callers` query ~0.08 ms off `ix_dst` vs ~3.4 s to load the old JSON per
+query. Over-capture still holds at full scale: the `ChangeStreamEventTransformation`
+method `makeResumeToken` has 3 callers, the free-function helper 122 — two
+distinct nodes. Decision + numbers in `DESIGN.md` § Store. 49 tests green.
+
+The store also carries a `meta` provenance table: `project_root`, indexing
+tool + version, build timestamp, node/edge counts, and the **source commit**
+(`source_commit`/`source_dirty`) — captured at index time by `reindex.sh`
+(`--source-commit`), else auto-detected via git on `project_root`. That commit
+is the anchor for the still-TODO incremental `cppgraph update` (`git diff` the
+stored commit vs HEAD → exact changed-file set). `cppgraph build` prints it.
+
+Phase 1 (POC) remains complete. `cppgraph build` works end-to-end. Both
+acceptance tests pass:
 
 - **Test A (over-capture)**: `ChangeStreamEventTransformation::makeResumeToken`
   and `change_stream_test_helper::makeResumeToken` come out as two distinct
@@ -72,15 +90,19 @@ C++-general, MongoDB-first.
   not a prefix match, or you'll silently drop files like
   `change_stream_event_transform.cpp`.
 - `scip-clang` indexed 519 TUs under `src/mongo/db/pipeline` in ~151s, 0
-  errors. Output: `scratch/pipeline.scip` (23 MB), `scratch/pipeline.graph.json`
-  (~183 MB — CLI output, gitignored; SQLite store is a Phase 2 TODO if JSON
-  gets unwieldy at full-repo scale).
+  errors (`scratch/pipeline.scip`, 23 MB). Full `src/mongo`: 6004 TUs, ~1253s,
+  0 errored → `scratch/mongo_full.scip` (797 MB) → `scratch/mongo_full.graph.db`
+  (323 MB interned SQLite). All gitignored.
 
 ## Exact next step
 
-Phase 1 acceptance is done. Next up is Phase 2 from `TODO.md`: index all of
-`src/mongo`, move the store off flat JSON (SQLite), and add the `callers` /
-`callees` / `path` / `impact` CLI queries.
+Phase 2 store + queries are done (SQLite `GraphStore`, all five CLI queries).
+Remaining Phase 2 work in `TODO.md`: (a) the declaration-context
+false-positive refinement in the builder heuristic (known limitation above),
+(b) the incremental update path (`cppgraph update`: merge partial `.scip` +
+`drop_file` + re-insert — design in `DESIGN.md` § "Keeping the graph up to
+date"), (c) `explain` query + project-root runtime param when queries start
+returning source snippets.
 
 ## Key reference symbols for the acceptance tests
 

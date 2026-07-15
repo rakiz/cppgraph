@@ -17,6 +17,7 @@ compile_commands.json
 # outputs: the SCIP index and any graph we derive from it
 *.scip
 *.graph.json
+*.graph.db
 graph.db
 graph.sqlite
 scratch/

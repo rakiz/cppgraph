@@ -64,10 +64,104 @@ independent of how the caller is attributed.
 
 ## Store
 
-Start simple: in-memory graph + a single-file store (SQLite via stdlib `sqlite3`,
-or a compact JSON). Scale target is modest for the pipeline subsystem alone
-(162k nodes / 395k edges after dedup) — full `src/mongo` will be much larger;
-measure before picking JSON vs SQLite for Phase 2.
+**Phase 1 (shipped):** in-memory graph + a flat `graph.json` (`Graph.save_json`
+in `model.py`). Every query does `load_json` → the entire file is parsed into
+Python dicts in RAM before answering.
+
+**Phase 2 decision — measured, not guessed.** Indexing all of `src/mongo`
+(6004 TUs) produced **643,967 nodes / 2,735,021 edges → a 1.19 GB `graph.json`**.
+That settles JSON vs SQLite: flat JSON does not scale. The redundancy is the
+**symbol strings** — they average **127 characters** and each is referenced
+**~8.5×** in the edge set alone, because edges store `src`/`dst` as full symbol
+strings (`model.py`). That is ~700 MB of repeated strings out of the 1.19 GB.
+But the decisive cost isn't disk: `load_json` pulls the whole 1.19 GB into RAM
+**per query** just to answer one `callers_of`.
+
+### Storage architecture: hot topology raw, cold payload as-is
+
+The guiding principle — and the maintainer's constraint: **shrink storage
+meaningfully without hurting query performance**:
+
+> **Keep the hot data raw and indexed; keep the cold payload separate (and
+> compressible later if ever needed).**
+
+- **Hot = the graph topology** (who-calls-who) that traversal walks millions of
+  times. All-integer, indexed, never string-keyed on the hot path.
+- **Cold = what the topology points to** (the 127-char symbol strings, file
+  paths, display names) — materialized only for the handful of results actually
+  shown.
+
+The one move that does the work is **symbol interning (dictionary encoding)**:
+assign each distinct symbol an integer id; edges reference ids, not 127-char
+strings. This *both* shrinks storage *and speeds up queries* (integer
+comparison/join beats string ops) — the opposite of blind whole-file
+compression, which would kill perf by forcing a full decompress per query and is
+explicitly rejected.
+
+**Measured on the full graph** (prototype conversion of the real 1.19 GB
+`graph.json`; throwaway script, not committed):
+
+| Representation | Size | vs Phase 1 |
+| --- | --- | --- |
+| flat JSON, `indent=2` (Phase 1 today) | 1249 MB | — |
+| compact JSON (drop `indent=2` alone) | 1085 MB | 1.2× |
+| **SQLite, interned, plain TEXT** | **338 MB** | **3.7×** |
+
+Query timing on that SQLite: `callers_of(makeResumeToken)` returns in
+**0.08 ms** off the B-tree index — versus ~3.4 s just to `load_json` the JSON
+into RAM today, per query, at 4–6 GB RSS.
+
+**Decision: ship Phase 2 as interned SQLite, plain TEXT, no compression codec.**
+3.7× smaller is enough, and the *major* wins are the bounded memory and the
+per-query speed, not maximal shrinkage. Two things that made `indent=2` removal
+and codec compression not worth it up front:
+
+- Dropping `indent=2` alone is only 1.2× — the symbols dwarf the whitespace, so
+  it's irrelevant next to interning.
+- **zstd on the symbol column is deferred, not adopted.** It would push size
+  toward ~8× but (a) adds a non-stdlib dependency, (b) costs a per-row decode at
+  display time, and (c) **breaks `find`**: `Graph.find` (`model.py`) does a
+  substring match on `symbol`/`display_name`, which SQL does with `LIKE` on
+  plain TEXT but *cannot* do on a compressed blob without a separate full-text
+  index or a plaintext copy. Only revisit if 338 MB ever becomes a real problem.
+
+Phase 2 target schema (stdlib `sqlite3`):
+
+```sql
+-- COLD: payload, read only to materialize the results shown
+files(id INTEGER PRIMARY KEY, path TEXT)
+symbols(id INTEGER PRIMARY KEY, symbol TEXT, display_name TEXT, file_id INT, line INT)
+CREATE INDEX ix_sym ON symbols(symbol);   -- keeps `find`'s LIKE substring search
+-- HOT: topology walked by traversal — indexed, all-integer, never compressed
+edges(kind TEXT, src_id INT, dst_id INT, file_id INT, line INT)
+CREATE INDEX ix_src ON edges(src_id);     -- callees_of via B-tree, no full load
+CREATE INDEX ix_dst ON edges(dst_id);     -- callers_of via B-tree, no full load
+-- PROVENANCE: what was indexed (self-describing after the .scip is discarded)
+meta(key TEXT PRIMARY KEY, value TEXT)    -- source_commit, project_root, ...
+```
+
+### Provenance: recording *what* was indexed
+
+The `meta` table (key/value) records the build's provenance so the store is
+self-describing without the `.scip`: `project_root` and the indexing tool +
+version (copied from SCIP `Metadata`), `built_at`, `node_count`/`edge_count`,
+`cppgraph_version`, and — the one thing SCIP doesn't carry — the **source
+commit** (`source_commit` + `source_dirty`). It's captured best-effort:
+`reindex.sh` reads `git rev-parse HEAD` at *index* time (the accurate moment —
+the state scip-clang actually reads) and passes it to `build --source-commit`;
+absent that, `build` auto-detects via git on `project_root`, which is exact
+when index→build run back-to-back. Non-git projects simply record no commit
+(the tool stays general, `git`-optional). This commit is the **anchor for
+incremental updates** — see below.
+
+Cost accepted with this move (deliberately, over the flat-JSON simplicity):
+the artifact is no longer greppable/`jq`-able or textually diffable, and the
+write path + the document-local incremental rebuild (see below) become row
+management (delete by `file_id`, keep the symbol table consistent) instead of a
+one-line `json.dump`. Worth it for the memory and speed gains.
+
+The `.scip` input (797 MB) is read once at build, disposable, gitignored —
+left uncompressed; gzipping it saves nothing measurable on the build path.
 
 ## Keeping the graph up to date
 
@@ -79,7 +173,12 @@ paths, kept in mind while designing the builder so this isn't a later rewrite:
    level: only the changed TUs need to go through `scip-clang` again (a filtered
    compdb subset), producing a partial `.scip` — no need to touch
    `compile_commands.json` itself unless the *build structure* changed (new
-   files/targets/includes; see `INSTALL.md`/`AGENTS.md`).
+   files/targets/includes; see `INSTALL.md`/`AGENTS.md`). *Which* files changed
+   comes for free from the stored `source_commit`: `git diff --name-only
+   <meta.source_commit>..HEAD` is the exact changed-file set, no mtime/hash
+   guessing — this is why the commit is recorded in `meta` (see § Store). A
+   dirty stored commit (`source_dirty`) means the diff base is approximate, so
+   `update` should fall back to a full rebuild or warn.
 2. **Merging + graph rebuild** is where the design choice matters. A partial
    `.scip`'s documents replace the corresponding `relative_path` entries in the
    full `Index`. The graph builder is deliberately kept **document-local**:

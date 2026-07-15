@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Index any C++ project's compile_commands.json into a SCIP index + a
-# cppgraph graph.json. Generic — cppgraph works on any project that provides
+# cppgraph graph store (SQLite). Generic — cppgraph works on any project that provides
 # a compile_commands.json (MongoDB is only our current test target, see
 # AGENTS.md; never hard-code a project's paths here). Wraps the three steps
 # documented in INSTALL.md as one command — also the script to hand to an
@@ -36,7 +36,7 @@ set -euo pipefail
 # "Large artifacts"):
 #   scratch/<OUT_NAME>.compdb.json   filtered compile_commands.json subset
 #   scratch/<OUT_NAME>.scip          scip-clang index
-#   scratch/<OUT_NAME>.graph.json    cppgraph build output
+#   scratch/<OUT_NAME>.graph.db      cppgraph build output (interned SQLite)
 #
 # GOTCHA (cost a debugging session the first time on MongoDB's compdb — kept
 # here so it isn't rediscovered on the next project): some build systems'
@@ -68,7 +68,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCIP_CLANG="$REPO_ROOT/scratch/bin/scip-clang"
 OUT_COMPDB="$REPO_ROOT/scratch/${OUT_NAME}.compdb.json"
 OUT_SCIP="$REPO_ROOT/scratch/${OUT_NAME}.scip"
-OUT_GRAPH="$REPO_ROOT/scratch/${OUT_NAME}.graph.json"
+OUT_GRAPH="$REPO_ROOT/scratch/${OUT_NAME}.graph.db"
 
 if [[ ! -x "$SCIP_CLANG" ]]; then
   echo "error: $SCIP_CLANG not found/executable. See INSTALL.md section 2." >&2
@@ -95,6 +95,19 @@ with open(out_path, "w") as f:
 print(f"  {len(filtered)} of {len(data)} compdb entries matched")
 PYEOF
 
+# Capture the source commit NOW, before indexing — this is the accurate moment
+# (the state scip-clang actually reads), and it becomes the store's provenance
+# anchor for incremental updates. Best-effort: silently skipped if PROJECT_ROOT
+# isn't a git checkout (cppgraph stays general, not git-only).
+BUILD_PROVENANCE=()
+if SRC_COMMIT="$(git -C "$PROJECT_ROOT" rev-parse HEAD 2>/dev/null)"; then
+  BUILD_PROVENANCE+=(--source-commit "$SRC_COMMIT")
+  if [[ -n "$(git -C "$PROJECT_ROOT" status --porcelain 2>/dev/null)" ]]; then
+    BUILD_PROVENANCE+=(--source-dirty)
+  fi
+  echo "  source commit: $SRC_COMMIT"
+fi
+
 JOBS="$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 4)"
 echo "[2/3] Running scip-clang (-j $JOBS, cwd=$PROJECT_ROOT) ..."
 (
@@ -107,7 +120,8 @@ echo "[2/3] Running scip-clang (-j $JOBS, cwd=$PROJECT_ROOT) ..."
 )
 
 echo "[3/3] Building the cppgraph graph ..."
-"$REPO_ROOT/.venv/bin/cppgraph" build --scip "$OUT_SCIP" --out "$OUT_GRAPH"
+"$REPO_ROOT/.venv/bin/cppgraph" build --scip "$OUT_SCIP" --out "$OUT_GRAPH" \
+  ${BUILD_PROVENANCE[@]+"${BUILD_PROVENANCE[@]}"}
 
 echo "Done."
 echo "  $OUT_COMPDB"

@@ -6,6 +6,8 @@ import pytest
 
 from cppgraph.cli import main
 from cppgraph.model import Graph
+from cppgraph.proto import scip_pb2
+from cppgraph.store import GraphStore, write_sqlite
 
 
 @pytest.fixture
@@ -19,8 +21,8 @@ def graph_path(tmp_path: Path) -> Path:
         file="foo.cpp",
         line=9,
     )
-    path = tmp_path / "graph.json"
-    graph.save_json(path)
+    path = tmp_path / "graph.db"
+    write_sqlite(graph, path)
     return path
 
 
@@ -85,6 +87,33 @@ def test_path_no_path_returns_nonzero(graph_path: Path) -> None:
         ]
     )
     assert exit_code == 1
+
+
+def test_build_records_source_commit_provenance(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Minimal synthetic .scip: a callable definition, so the graph is non-empty.
+    index = scip_pb2.Index()
+    index.metadata.project_root = "file:///some/repo"
+    doc = index.documents.add(relative_path="foo.cpp")
+    occ = doc.occurrences.add(symbol="cxx . . $ mongo/Foo#bar(a1).",
+                              symbol_roles=scip_pb2.SymbolRole.Definition)
+    occ.range.extend([0, 0, 3])
+    scip_path = tmp_path / "index.scip"
+    scip_path.write_bytes(index.SerializeToString())
+    out = tmp_path / "graph.db"
+
+    exit_code = main(
+        ["build", "--scip", str(scip_path), "--out", str(out),
+         "--source-commit", "cafebabe", "--source-dirty"]
+    )
+    assert exit_code == 0
+    assert "cafebabe" in capsys.readouterr().out
+
+    meta = GraphStore(out).meta()
+    assert meta["source_commit"] == "cafebabe"
+    assert meta["source_dirty"] == "true"
+    assert meta["project_root"] == "file:///some/repo"
 
 
 def test_impact_lists_transitive_callers(graph_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

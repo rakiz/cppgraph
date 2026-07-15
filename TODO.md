@@ -24,11 +24,15 @@ Ordered. Check off as you go. Detail lives in `DESIGN.md`.
 
 ## Phase 2 — scale + store + query
 
-- [ ] Index all of `src/mongo` (measure time; scip-clang is parallel).
-- [ ] Persistent store (sqlite via stdlib, or compact json). Measure size.
-- [x] CLI queries: `find` (search by name), `callers`, `callees` — working
-      against `graph.json`, verified on the real pipeline graph.
-- [ ] CLI queries: `path A B`, `impact` (reverse blast radius), `explain`.
+- [x] Index all of `src/mongo` (6004 TUs, ~1253s, 0 errored; see `INSTALL.md`).
+- [x] Persistent store: interned SQLite (`src/cppgraph/store.py`, stdlib
+      `sqlite3`). Measured on the full graph: 1.19 GB flat JSON → 323 MB store
+      (3.7×); `callers_of` off the `ix_dst` B-tree in 0.08 ms vs ~3.4 s to
+      load the JSON per query. Decision + measurements in `DESIGN.md` § Store.
+- [x] CLI queries: `find` (search by name), `callers`, `callees` — now served
+      by `GraphStore` over the SQLite store, verified on the full mongo graph.
+- [x] CLI queries: `path A B`, `impact` (reverse blast radius) — also served by
+      `GraphStore` (id-space BFS over the indexed edges). `explain` still TODO.
 - [ ] Project root as a runtime parameter for query commands that need to
       read actual source (see `DESIGN.md` § "Project root is a query-time
       parameter, never stored") — not needed yet since `callers`/`callees`
@@ -39,10 +43,16 @@ Ordered. Check off as you go. Detail lives in `DESIGN.md`.
       documents into the full index by `relative_path` → rebuild only the
       edges/nodes whose `Edge.file`/definition-site is one of the changed
       files. The document-local caller-attribution design already makes this
-      possible without cross-file analysis; what's missing is (a) a merge
-      function for partial `Index` → full `Index`, (b) a `Graph.drop_file(path)`
-      to invalidate before re-inserting, (c) wiring a `cppgraph update` CLI
-      command around this instead of always re-running `build` from scratch.
+      possible without cross-file analysis.
+      - [x] Provenance anchor in place: `meta.source_commit` (+`source_dirty`)
+            is recorded at build (`store.build_provenance`, captured at index
+            time by `reindex.sh`). `git diff --name-only <source_commit>..HEAD`
+            now gives the exact changed-file set — the input to the update.
+      - [ ] Still missing: (a) a merge function for partial `Index` → full
+            `Index`, (b) a `Graph.drop_file(path)` / row-delete-by-file_id to
+            invalidate before re-inserting, (c) a `cppgraph update` CLI command
+            wiring commit-diff → filtered re-index → merge → partial rebuild,
+            instead of always re-running `build` from scratch.
 
 ## Phase 3 — serve to LLMs
 
