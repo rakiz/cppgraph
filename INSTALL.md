@@ -118,3 +118,57 @@ protoc --version   # libprotoc 35.1
 | `protoc`                  | Only to regenerate `scip_pb2.py`/`.pyi` | No — one-off dev tool |
 | `scip_pb2.py` / `.pyi`    | Always (imported by cppgraph)         | **Yes**, generated + committed (in `proto/`) |
 | `scip.proto`              | Source of truth for the above          | Yes, vendored at `src/cppgraph/proto/scip.proto` |
+
+## 4. Indexing a project (any C++ project with a compile_commands.json)
+
+`scripts/reindex.sh` wraps the whole compdb-filter → scip-clang →
+cppgraph-build pipeline in one command. It is **generic** — cppgraph works on
+any project that provides a `compile_commands.json` (see `AGENTS.md`); the
+script takes that path as its first argument, with no project-specific
+defaults baked in. This is also the script to hand to an LLM/agent if you
+want it to redo or adjust an indexing run, since it embeds the one
+non-obvious gotcha inline (see below) instead of relying on the agent to
+rediscover it.
+
+```bash
+scripts/reindex.sh COMPDB_PATH [SRC_FILTER] [OUT_NAME] [PROJECT_ROOT]
+```
+
+MongoDB is our current test target (see `AGENTS.md`), not something the tool
+or this script know about — these are example invocations, not defaults:
+
+```bash
+# All of src/mongo (excludes third_party):
+scripts/reindex.sh /Users/sebastien.mendez/code/mongo/compile_commands.json \
+  src/mongo/ mongo_full
+
+# One subsystem instead (fast, good for iterating):
+scripts/reindex.sh /Users/sebastien.mendez/code/mongo/compile_commands.json \
+  src/mongo/db/pipeline/ pipeline
+
+# Any other C++ project, indexing everything in its compdb:
+scripts/reindex.sh /path/to/other/project/compile_commands.json
+```
+
+Outputs land under `scratch/<name>.{compdb.json,scip,graph.json}` —
+gitignored, per-machine, never committed (see AGENTS.md "Large artifacts").
+
+Verified timings on this machine (14-core arm64 Mac, `scip-clang` v0.4.0),
+indexing MongoDB:
+- `src/mongo/db/pipeline/` — 519 TUs, ~151s, 0 errors, 23 MB `.scip`.
+- All of `src/mongo/` — 6004 TUs, ~1253s (indexing 1228s + merging 19s),
+  0 errored TUs, 797 MB `.scip` → 1.19 GB `graph.json`
+  (643,967 nodes, 2,735,021 edges). This is the measurement that decides
+  Phase 2's storage: a 1.19 GB flat JSON confirms `DESIGN.md`'s expectation
+  that the full-codebase graph must move off flat JSON to SQLite.
+
+**Gotcha** (already handled by the script, documented here so it isn't
+rediscovered on the next project): a build system's generated
+`compile_commands.json` is not guaranteed to format the `file` field
+uniformly — MongoDB's Bazel-generated compdb mixes an absolute bazel-out path
+for most entries with a bare relative path for a handful of the same kind of
+location. A `SRC_FILTER` that requires a leading `/` would silently drop the
+bare-relative ones (and, on MongoDB specifically, those happened to be the
+exact files cppgraph's own acceptance tests depend on). `scripts/reindex.sh`
+does a plain substring match, with no anchoring, to stay robust to this on
+any project.
