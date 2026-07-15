@@ -26,8 +26,23 @@ Ordered. Check off as you go. Detail lives in `DESIGN.md`.
 
 - [ ] Index all of `src/mongo` (measure time; scip-clang is parallel).
 - [ ] Persistent store (sqlite via stdlib, or compact json). Measure size.
-- [ ] CLI queries: `callers`, `callees`, `path A B`, `impact` (reverse blast
-      radius), `explain`.
+- [x] CLI queries: `find` (search by name), `callers`, `callees` — working
+      against `graph.json`, verified on the real pipeline graph.
+- [ ] CLI queries: `path A B`, `impact` (reverse blast radius), `explain`.
+- [ ] Project root as a runtime parameter for query commands that need to
+      read actual source (see `DESIGN.md` § "Project root is a query-time
+      parameter, never stored") — not needed yet since `callers`/`callees`
+      only print symbol/file/line, no source snippets.
+- [ ] **Incremental update path** (design already sketched in `DESIGN.md` §
+      "Keeping the graph up to date" — don't lose this while building the
+      full-repo store): re-index only changed TUs → merge partial `.scip`
+      documents into the full index by `relative_path` → rebuild only the
+      edges/nodes whose `Edge.file`/definition-site is one of the changed
+      files. The document-local caller-attribution design already makes this
+      possible without cross-file analysis; what's missing is (a) a merge
+      function for partial `Index` → full `Index`, (b) a `Graph.drop_file(path)`
+      to invalidate before re-inserting, (c) wiring a `cppgraph update` CLI
+      command around this instead of always re-running `build` from scratch.
 
 ## Phase 3 — serve to LLMs
 

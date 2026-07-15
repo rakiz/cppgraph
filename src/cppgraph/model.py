@@ -54,6 +54,14 @@ class Graph:
     def callees_of(self, symbol: str) -> list[Edge]:
         return [e for e in self.edges if e.kind == "calls" and e.src == symbol]
 
+    def find(self, query: str) -> list[Node]:
+        """Nodes whose symbol or display name contains `query` (substring, case-sensitive).
+
+        SCIP symbol strings aren't memorable — this is how a user locates the
+        exact symbol to pass to `callers_of`/`callees_of`.
+        """
+        return [n for n in self.nodes.values() if query in n.symbol or query in n.display_name]
+
     def to_dict(self) -> dict:
         return {
             "nodes": [
