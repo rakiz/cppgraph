@@ -4,6 +4,30 @@ _Last updated: 2026-07-15_
 
 ## Where we are
 
+Phase 3 MCP server landed (`src/cppgraph/mcp_server.py`, console script
+`cppgraph-mcp`, optional `[mcp]` extra). FastMCP over stdio, launched with
+`--graph <db> [--root <checkout>]` so the graph path is fixed once and tools
+never re-pass it. Seven tools wrap the `GraphStore` query surface — `find`,
+`who_calls`, `what_it_calls`, `path`, `impact_of`, `explain_symbol`, `status` —
+each returning a *token-budgeted* JSON dict: fan-out lists capped
+(`DEFAULT_LIMIT=25`, `EXPLAIN_LIMIT=10`) with an explicit `total` + `truncated`,
+and `explain` giving coordinates only unless `include_source=True` *and* a
+`--root` was given (an LLM caller usually has file access, so coordinates are
+the cheap default). The substance is a pure `(store, …) -> dict` layer
+(`find_symbols`/`callers`/`callees`/`call_path`/`impact`/`explain`/
+`status_report`), unit-tested independently of the transport (17 tests, 83
+total green); verified in-process end-to-end on the full mongo graph — the two
+`makeResumeToken` symbols come back distinct through MCP, `status` reports
+up-to-date, `explain --include_source` yields the snippet at line 235. Realizes
+the target loop: `status` (trust the graph?) → `impact_of`/`who_calls`/`path`
+→ `explain_symbol`.
+
+Next: enrich the graph with `references`/`inherits` edges (builder work, agreed
+useful for dependency reasoning beyond calls). Then compare against Serena on a
+real design question (TODO Phase 3 item 2).
+
+## Where we were (query surface)
+
 Query surface completed for the LLM/MCP workflow: `cppgraph explain <symbol>`
 prints the definition site + the caller/callee summary, and — only if given a
 `--root` checkout (a query-time arg that never lives in the store) — a source
@@ -142,18 +166,23 @@ C++-general, MongoDB-first.
 
 ## Exact next step
 
-Phase 2 is complete: SQLite `GraphStore`; the CLI queries `find`, `callers`,
-`callees`, `path`, `impact`, `explain`, `status`; incremental `cppgraph update`
-+ `reindex.sh --update`. The declaration-context false-positive is closed as a
-fundamental scip-clang limitation (see "Known limitation"), tracked on PR #504.
+Phases 2 and 3 are complete: SQLite `GraphStore`; the CLI queries `find`,
+`callers`, `callees`, `path`, `impact`, `explain`, `status`; incremental
+`cppgraph update` + `reindex.sh --update`; the `cppgraph-mcp` server exposing
+all of it to an LLM (see "Where we are"). The declaration-context false-positive
+is closed as a fundamental scip-clang limitation (see "Known limitation"),
+tracked on PR #504.
 
-Next is **Phase 3 — the MCP server**: wrap the existing `GraphStore` queries as
-MCP tools with token-budgeted responses, so an LLM can call `impact`/`callers`/
-`path`/`explain`/`status` directly while reasoning about a change. `status` is
-the drift check, `explain` without `--root` the token-cheap coordinates mode.
-Design intent + the real-world workflow are in `DESIGN.md`. After the MCP
-server, enrich the graph with `references`/`inherits` edges (builder work,
-agreed useful for dependency reasoning beyond calls).
+Next is **`references`/`inherits` edges** (builder work). Today the graph has
+`calls` (+ `implements`); `references` (any use of a symbol, not just a call)
+and `inherits` (class → base) let an LLM reason about *data*/type dependencies
+and hierarchy impact, not just the call graph. This is a `builder.py` change
+(new SCIP occurrence-role handling) + store/query plumbing; the MCP tools then
+surface them the same way. After that: the Serena comparison (TODO Phase 3
+item 2), then Phase 4 (generalize / open-source).
+
+To run the MCP server:
+`.venv/bin/cppgraph-mcp --graph scratch/mongo_full.graph.db --root /Users/sebastien.mendez/code/mongo`
 
 ## Key reference symbols for the acceptance tests
 

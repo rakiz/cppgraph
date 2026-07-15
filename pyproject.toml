@@ -12,9 +12,15 @@ dependencies = [
 dev = [
     "pytest>=8.0",
 ]
+# The MCP server (Phase 3) is optional: the core build/query CLI works without
+# it. Install with `pip install -e .[mcp]` to expose the graph to an LLM.
+mcp = [
+    "mcp>=1.2",
+]
 
 [project.scripts]
 cppgraph = "cppgraph.cli:main"
+cppgraph-mcp = "cppgraph.mcp_server:main"
 
 [build-system]
 requires = ["hatchling"]

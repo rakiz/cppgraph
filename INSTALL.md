@@ -23,6 +23,15 @@ This installs the committed, pre-generated protobuf bindings' runtime
 dependency (`protobuf`) — you do **not** need `protoc` for this step. See
 §3 for when `protoc` actually is needed.
 
+To also run the MCP server (`cppgraph-mcp`, exposes the graph to an LLM),
+install the optional `mcp` extra — it's not needed for the core build/query CLI:
+
+```bash
+uv pip install -e ".[dev,mcp]"
+# then, pointed at a built graph:
+.venv/bin/cppgraph-mcp --graph scratch/mongo_full.graph.db --root /path/to/checkout
+```
+
 ## 2. `scip-clang` (required, every machine — NOT committed to this repo)
 
 `scip-clang` is a large external binary (~68 MB). It is never vendored in

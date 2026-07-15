@@ -74,7 +74,18 @@ Ordered. Check off as you go. Detail lives in `DESIGN.md`.
 
 ## Phase 3 — serve to LLMs
 
-- [ ] MCP server exposing the queries, token-budgeted retrieval.
+- [x] MCP server exposing the queries, token-budgeted retrieval
+      (`src/cppgraph/mcp_server.py`, console script `cppgraph-mcp`, optional
+      `[mcp]` extra). FastMCP over stdio; the graph is fixed at launch
+      (`--graph`, optional `--root`) so tools never re-pass a path. Tools:
+      `find`, `who_calls`, `what_it_calls`, `path`, `impact_of`,
+      `explain_symbol`, `status`. Every fan-out reply is capped (`DEFAULT_LIMIT`
+      / `EXPLAIN_LIMIT`) with an explicit `total` + `truncated` flag; `explain`
+      returns coordinates only unless `include_source=True` *and* `--root` was
+      given. Pure `(store) -> dict` layer is unit-tested (17 tests); verified
+      in-process end-to-end on the full mongo graph (both `makeResumeToken`
+      symbols come back distinct through MCP). Target loop realized:
+      status → impact/who_calls/path → explain.
 - [ ] Compare usefulness against Serena on a real design question.
 
 ## Phase 4 — open-source / generalize

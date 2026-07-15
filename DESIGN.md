@@ -240,12 +240,27 @@ paths, kept in mind while designing the builder so this isn't a later rewrite:
   `impact` (reverse blast-radius), `explain` (definition + neighbors; pass
   `--root` to also get a source snippet, omit it for coordinates only),
   `status` (source commit + drift check).
-- MCP server (later): expose the same queries to an LLM, token-budgeted. The
-  intended loop: `status` tells the LLM whether the graph is current (else
-  `reindex.sh --update`); then `impact`/`callers`/`path`/`explain` answer
-  "what does this change affect?" with compiler-exact edges — no grep guessing,
-  no loading files into context. `explain` without `--root` stays cheap
-  (coordinates only) when the caller can read source itself.
+- MCP server (`cppgraph-mcp`, `src/cppgraph/mcp_server.py`): exposes the same
+  queries to an LLM, token-budgeted. FastMCP over stdio; the graph store is
+  fixed at launch (`--graph <db>`, optional `--root <checkout>`) so tools never
+  take — and the LLM never has to guess or repeat — a filesystem path. Tools:
+  `find`, `who_calls`, `what_it_calls`, `path`, `impact_of`, `explain_symbol`,
+  `status`. The intended loop: `status` tells the LLM whether the graph is
+  current (else `reindex.sh --update`); then `impact_of`/`who_calls`/`path`/
+  `explain_symbol` answer "what does this change affect?" with compiler-exact
+  edges — no grep guessing, no loading files into context.
+  - *Token budgeting*: every fan-out reply is capped (`DEFAULT_LIMIT=25`,
+    `EXPLAIN_LIMIT=10`) and carries an explicit `total` + `truncated`, so a hub
+    symbol with hundreds of callers never floods the model's context; the caller
+    can raise the cap per query and always sees the true count.
+  - *Cheap by default*: `explain_symbol` returns coordinates (`file:line`) only
+    unless `include_source=True` **and** the server was launched with `--root`.
+    The premise is that an LLM calling these tools already has file access, so
+    coordinates suffice and cost far fewer tokens than pasted source.
+  - *Testable core*: the substance is a pure `(store, …) -> dict` layer
+    (unit-tested without a transport); the FastMCP decorators are thin wiring
+    over it. Errors (unknown symbol) come back as an `{"error": …}` dict
+    pointing at `find`, not an exception.
 - Export: optional graphify-compatible `graph.json` purely for visualization.
 
 ### Project root is a query-time parameter, never stored
