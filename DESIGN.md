@@ -40,13 +40,27 @@ Edges:
 
 ## Building calls from SCIP
 
-SCIP gives occurrences (symbol, range, roles). A call edge is derived by:
-1. finding reference occurrences of a callee symbol,
-2. attributing each to the **definition symbol whose range encloses** the
-   occurrence's position → that enclosing symbol is the caller.
+SCIP gives occurrences (symbol, range, roles). The original plan was to
+attribute each reference to the definition symbol whose `enclosing_range`
+contains it — but `scip-clang` v0.4.0 never populates `enclosing_range` (nor
+`SymbolInformation.kind`), verified against real MongoDB data. Implemented
+fallback (`src/cppgraph/builder.py`):
 
-This is where semantic identity pays off: the callee is the *exact* symbol, so
-the two `makeResumeToken` never mix.
+1. Callability is read off the SCIP symbol string's own grammar: a
+   method/constructor descriptor always ends in `).` — no reliance on
+   `kind`.
+2. A call edge's caller is the nearest preceding callable-symbol
+   *definition* in the same document, by start line (no range containment
+   available, so line order is the next best signal). Verified to correctly
+   recover both real callers of `ChangeStreamEventTransformation::makeResumeToken`.
+3. Known limitation: this misattributes references that occur in
+   declaration-only contexts (e.g. a pure-virtual method's own header
+   declaration, sitting after a sibling method's declaration) to that
+   sibling. Function-body call sites are unaffected. See `HANDOFF.md`.
+
+This is where semantic identity still pays off even with this fallback: the
+callee is the *exact* symbol, so the two `makeResumeToken` never mix,
+independent of how the caller is attributed.
 
 ## Store
 
