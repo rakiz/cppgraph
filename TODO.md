@@ -138,6 +138,17 @@ Ordered. Check off as you go. Detail lives in `DESIGN.md`.
 - [x] Bundled offline viewer: `viz/cppgraph-viz.html` (our own code, MIT) with
       vis-network vendored locally (`viz/vendor/`, MIT/Apache-2.0). Loads a
       graph.json via picker / drag-drop / `?graph=` (http). See `viz/README.md`.
+- [x] One-shot `cppgraph view <symbol>` + MCP `visualize` tool: build the
+      neighbourhood, write a *self-contained* HTML (data + vis-network inlined,
+      `src/cppgraph/viz_html.py`) to a temp dir, open the browser. Works under
+      file:// and offline; page still accepts another graph via picker/drop.
+- [x] `--mode usage` (export/view) + `exclude_tests`/`--no-tests`: symbol→file
+      usage graph from exact references (right view for a type), test files
+      filterable (`export.is_test_file`). Shared builder `cli.build_export_json`.
+- [ ] `usage` at *symbol* granularity (type → functions that use it) — needs
+      scip-clang `enclosing_range` (PR #504); today references have no enclosing
+      attribution by design, so usage is file-granular only. Upgrade when #504
+      lands (same blocker as the A/B reference-edge work).
 - [x] LICENSE — project is MIT (`LICENSE`, `pyproject` license field).
 - [ ] Contributing notes, CI (lint + pytest), publish.
 

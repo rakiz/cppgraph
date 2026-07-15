@@ -18,7 +18,7 @@
   #bar b { color: #9ecbff; }
   #bar .legend span { padding: 1px 7px; border-radius: 3px; margin-left: 4px; }
   .calls { background: #2d4a63; } .inherits { background: #4a3a63; }
-  .implements { background: #63472d; }
+  .implements { background: #63472d; } .references { background: #2f4a2f; }
   #net { width: 100%; height: calc(100% - 90px); }
   #drop { position: absolute; inset: 90px 0 0 0; display: flex;
     align-items: center; justify-content: center; color: #6b7280;
@@ -37,6 +37,7 @@
     <span class="calls">calls</span>
     <span class="inherits">inherits</span>
     <span class="implements">implements</span>
+    <span class="references">references (→file)</span>
   </span>
 </div>
 <div id="net"></div>
@@ -44,23 +45,38 @@
   or append <code>?graph=&lt;url&gt;</code> when served over http</div>
 <script src="./vendor/vis-network.min.js"></script>
 <script>
-const EDGE_COLORS = { calls: "#4b7bab", inherits: "#7d5fb0", implements: "#b07d4b" };
+const EDGE_COLORS = { calls: "#4b7bab", inherits: "#7d5fb0",
+  implements: "#b07d4b", references: "#5a8a5a" };
 
-// A SCIP symbol ending in "#" is a type; ").":  a callable. Colour nodes by that.
+// A SCIP symbol ending in "#" is a type; ").":  a callable; "file:" a file node
+// (usage graph). Colour nodes by that. Keep the background dark on hover/select
+// (only brighten the border) so the light label stays readable — vis-network's
+// default hover lightens the fill and washes the text out.
 function nodeColor(id) {
-  if (id.endsWith("#")) return { background: "#3a2f52", border: "#7d5fb0" };
-  if (id.endsWith(").")) return { background: "#1f3547", border: "#4b7bab" };
-  return { background: "#2a2e37", border: "#4b5563" };
+  let bg, border;
+  if (id.startsWith("file:")) { bg = "#26361f"; border = "#5a8a5a"; }
+  else if (id.endsWith("#")) { bg = "#3a2f52"; border = "#7d5fb0"; }
+  else if (id.endsWith(").")) { bg = "#1f3547"; border = "#4b7bab"; }
+  else { bg = "#2a2e37"; border = "#4b5563"; }
+  const bright = "#cbd3df";
+  return {
+    background: bg, border: border,
+    highlight: { background: bg, border: bright },
+    hover: { background: bg, border: bright },
+  };
 }
 
+let NETWORK = null;
 function render(graph) {
   const meta = document.getElementById("meta");
   meta.textContent = `${graph.nodes.length} nodes · ${graph.links.length} edges`;
   document.getElementById("drop").style.display = "none";
+  if (NETWORK) { NETWORK.destroy(); NETWORK = null; }  // allow loading another graph
 
   const nodes = new vis.DataSet(graph.nodes.map(n => ({
     id: n.id,
     label: n.label || n.id,
+    shape: n.kind === "file" ? "box" : "dot",
     color: nodeColor(n.id),
     title: (n.source_file ? n.source_file : "") +
            (n.source_location ? ":" + n.source_location.replace(/^L/, "") : ""),
@@ -68,10 +84,12 @@ function render(graph) {
   const edges = new vis.DataSet(graph.links.map((e, i) => ({
     id: i, from: e.source, to: e.target, arrows: "to",
     color: { color: EDGE_COLORS[e.relation] || "#6b7280" },
-    title: e.relation,
+    // usage edges carry a weight (how many use sites in that file) -> thickness
+    width: e.weight ? Math.min(1 + e.weight / 4, 8) : 1,
+    title: e.relation + (e.weight ? ` (${e.weight})` : ""),
   })));
 
-  new vis.Network(document.getElementById("net"), { nodes, edges }, {
+  NETWORK = new vis.Network(document.getElementById("net"), { nodes, edges }, {
     nodes: { shape: "dot", size: 10, font: { color: "#d7dae0", size: 12 } },
     edges: { smooth: { type: "continuous" }, width: 1 },
     physics: { stabilization: { iterations: 150 },
@@ -95,12 +113,18 @@ document.body.addEventListener("drop", e => {
   if (f) f.text().then(loadText);
 });
 
-// Optional: ?graph=<url> auto-load (works when served over http/https; browsers
-// block fetch() of local files under file://, so use the picker/drop there).
-const url = new URLSearchParams(location.search).get("graph");
-if (url) fetch(url).then(r => r.text()).then(loadText)
-  .catch(e => document.getElementById("meta").textContent =
-    "could not fetch " + url + " (" + e.message + ") — use the file picker under file://");
+// A standalone export inlines its data as window.GRAPH — render it immediately
+// (this is the "open and it just works" path, no fetch, works under file://).
+if (window.GRAPH) {
+  render(window.GRAPH);
+} else {
+  // Otherwise, ?graph=<url> auto-load (works over http/https; browsers block
+  // fetch() of local files under file://, so use the picker/drop there).
+  const url = new URLSearchParams(location.search).get("graph");
+  if (url) fetch(url).then(r => r.text()).then(loadText)
+    .catch(e => document.getElementById("meta").textContent =
+      "could not fetch " + url + " (" + e.message + ") — use the file picker under file://");
+}
 </script>
 </body>
 </html>

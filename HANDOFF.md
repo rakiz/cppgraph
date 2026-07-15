@@ -4,6 +4,28 @@ _Last updated: 2026-07-15_
 
 ## Where we are
 
+**Visualization loop is now end-to-end for an LLM.** Beyond `cppgraph export`
+there's `cppgraph view <symbol>` (build the neighbourhood → write a
+*self-contained* HTML to a temp dir → open the browser; renders immediately, no
+picker/fetch) and the MCP **`visualize`** tool doing the same in-session, so an
+LLM can pop a graph open on request. The standalone HTML inlines both the data
+(`window.GRAPH`) and vis-network (`src/cppgraph/viz_html.py`), so it works under
+`file://` and offline; the page still takes another graph via picker/drag-drop
+(re-render destroys the previous network). Export has two views: `--mode deps`
+(call/inherit subgraph, `--depth`/`--direction`) and `--mode usage` (symbol→file
+graph from the exact references — the right view for a *type*, which has no call
+edges). `--no-tests` (CLI) / `exclude_tests` (MCP) drops test/test-support files
+(`is_test_file`: `_test`/`_tests`/`_unittest` suffix, `test_` prefix, `_test_`
+infix, `test/`|`tests/` dir) for a production-only view — verified on
+`ResumeTokenData` (41 → 27 files). Hover keeps the label readable (dark fill
+kept, only the border brightens). Graph-building is one shared helper
+`cli.build_export_json`; 132 tests green.
+
+Parked (needs scip-clang `enclosing_range` / PR #504): a `usage` view at
+*symbol* granularity (type → the functions that use it) instead of file
+granularity — the reference→enclosing-symbol attribution we deliberately avoid
+today. Tracked in TODO.
+
 **Phase 4 started: export + viz + LICENSE (MIT).** `cppgraph export '<symbol>'
 --graph <db> --depth N --direction in|out|both --out graph.json` writes the
 bounded neighbourhood around a symbol (the full graph is far too big to render)

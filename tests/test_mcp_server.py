@@ -276,3 +276,26 @@ def test_status_detects_stale(tmp_path: Path) -> None:
     assert result["drift"]["up_to_date"] is False
     assert "a.cpp" in result["drift"]["changed"]
     assert "notes.md" not in result["drift"]["changed"]
+
+
+def test_make_export_deps_returns_subgraph(store: GraphStore) -> None:
+    g = mcp_server.make_export(store, FOO, mode="deps", depth=1, direction="in")
+    ids = {n["id"] for n in g["nodes"]}
+    assert FOO in ids and MID in ids  # depth-1 in-neighbour
+    assert any(l["relation"] == "calls" for l in g["links"])
+
+
+def test_make_export_usage_returns_file_graph(tmp_path: Path) -> None:
+    sym = "cxx . . $ mongo/ResumeTokenData#"
+    graph = Graph()
+    graph.nodes[sym] = Node(symbol=sym, display_name="ResumeTokenData")
+    graph.add_reference(sym, "a/foo.cpp", 1)
+    graph.add_reference(sym, "b/bar.h", 3)
+    path = tmp_path / "refs.db"
+    write_sqlite(graph, path)
+    g = mcp_server.make_export(GraphStore(path), sym, mode="usage")
+    assert {l["target"] for l in g["links"]} == {"file:a/foo.cpp", "file:b/bar.h"}
+
+
+def test_make_export_unknown_symbol_is_none(store: GraphStore) -> None:
+    assert mcp_server.make_export(store, "nope") is None

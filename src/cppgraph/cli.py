@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 
 from cppgraph.builder import build_graph
-from cppgraph.export import to_graphify_graph
+from cppgraph.export import is_test_file, to_file_usage_graph, to_graphify_graph
 from cppgraph.model import Edge, Node
 from cppgraph.proto import scip_pb2
 from cppgraph.store import (
@@ -57,6 +57,40 @@ def read_source_snippet(
 def _print_edge(edge: Edge, *, other: str) -> None:
     line = edge.line + 1 if edge.line is not None else "?"
     print(f"  {other}  ({edge.file}:{line})")
+
+
+def build_export_json(
+    store: GraphStore,
+    symbol: str,
+    *,
+    mode: str = "deps",
+    depth: int = 2,
+    direction: str = "both",
+    exclude_tests: bool = False,
+) -> dict | None:
+    """The graph.json for a symbol, or None if the symbol is unknown.
+
+    `mode="deps"` = the bounded call/inherit dependency subgraph (uses
+    `depth`/`direction`); `mode="usage"` = a symbol->file graph of where the
+    symbol is used, from its exact references (the right view for a type, which
+    has no call edges). `exclude_tests` drops test / test-support files (usage)
+    or symbols defined in them (deps) — production view only. Shared by the
+    `export`/`view` CLI commands and the MCP.
+    """
+    if not store.has_symbol(symbol):
+        return None
+    if mode == "usage":
+        node = store.get_node(symbol)
+        refs = store.references_of(symbol)
+        if exclude_tests:
+            refs = [r for r in refs if not is_test_file(r.file)]
+        return to_file_usage_graph(symbol, node.display_name if node else "", refs)
+    nodes, edges = store.subgraph(symbol, depth=depth, direction=direction)
+    if exclude_tests:
+        kept = {n.symbol for n in nodes if not is_test_file(n.file)}
+        nodes = [n for n in nodes if n.symbol in kept]
+        edges = [e for e in edges if e.src in kept and e.dst in kept]
+    return to_graphify_graph(nodes, edges)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -220,9 +254,40 @@ def main(argv: list[str] | None = None) -> int:
         "reaches it), or 'both' (default)",
     )
     p_export.add_argument(
+        "--mode", choices=("deps", "usage"), default="deps",
+        help="'deps' (default): the call/inherit dependency subgraph around the "
+        "symbol (uses --depth/--direction). 'usage': a symbol->file graph of "
+        "where the symbol is used, from its exact reference locations — the right "
+        "view for a type ('used in these N files'). 'usage' needs a graph built "
+        "with references.",
+    )
+    p_export.add_argument(
+        "--no-tests", action="store_true",
+        help="drop test / test-support files (usage) or symbols defined in them "
+        "(deps) — show production usage only",
+    )
+    p_export.add_argument(
         "--out", default="graph.json", metavar="PATH",
         help="output path for the graph.json (default: ./graph.json)",
     )
+
+    p_view = sub.add_parser(
+        "view",
+        help="one-shot visualize: build the subgraph, write a self-contained "
+        "HTML to a temp dir, and open it in your browser",
+    )
+    p_view.add_argument("--graph", required=True, help="path to a graph store built by `cppgraph build`")
+    p_view.add_argument("symbol", help="exact SCIP symbol string to center on (see `find`)")
+    p_view.add_argument("--mode", choices=("deps", "usage"), default="deps",
+                        help="'deps' (call/inherit subgraph) or 'usage' (symbol->file usage graph)")
+    p_view.add_argument("--depth", type=int, default=2, metavar="N",
+                        help="neighbourhood radius for --mode deps (default: 2)")
+    p_view.add_argument("--direction", choices=("in", "out", "both"), default="both",
+                        help="edge direction for --mode deps (default: both)")
+    p_view.add_argument("--no-tests", action="store_true",
+                        help="drop test / test-support files (production view only)")
+    p_view.add_argument("--no-open", action="store_true",
+                        help="write the HTML but don't launch the browser (just print the path)")
 
     args = parser.parse_args(argv)
 
@@ -482,19 +547,44 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "export":
         store = GraphStore(args.graph)
-        if not store.has_symbol(args.symbol):
-            parser.error(f"unknown symbol: {args.symbol} (use `cppgraph find` to look it up)")
-        nodes, edges = store.subgraph(
-            args.symbol, depth=args.depth, direction=args.direction
+        graph_json = build_export_json(
+            store, args.symbol, mode=args.mode, depth=args.depth,
+            direction=args.direction, exclude_tests=args.no_tests,
         )
-        graph_json = to_graphify_graph(nodes, edges)
+        if graph_json is None:
+            parser.error(f"unknown symbol: {args.symbol} (use `cppgraph find` to look it up)")
         with open(args.out, "w", encoding="utf-8") as f:
             json.dump(graph_json, f, indent=1)
-        print(
-            f"[cppgraph] exported {len(nodes)} nodes, {len(edges)} edges "
-            f"(depth {args.depth}, {args.direction}) -> {args.out}"
+        n_nodes, n_links = len(graph_json["nodes"]), len(graph_json["links"])
+        if args.mode == "usage":
+            print(f"[cppgraph] exported usage graph: {n_links} file(s) used -> {args.out}")
+            if n_links == 0:
+                print("  (0 references — was the graph built with references? see `status`)")
+        else:
+            print(f"[cppgraph] exported {n_nodes} nodes, {n_links} edges "
+                  f"(depth {args.depth}, {args.direction}) -> {args.out}")
+        print(f"  open viz/cppgraph-viz.html and load {args.out} "
+              f"(or use `cppgraph view` for a one-shot open)")
+        return 0
+
+    if args.command == "view":
+        store = GraphStore(args.graph)
+        graph_json = build_export_json(
+            store, args.symbol, mode=args.mode, depth=args.depth,
+            direction=args.direction, exclude_tests=args.no_tests,
         )
-        print(f"  open it with: viz/cppgraph-viz.html?graph={args.out}")
+        if graph_json is None:
+            parser.error(f"unknown symbol: {args.symbol} (use `cppgraph find` to look it up)")
+        from cppgraph.viz_html import open_in_browser, write_temp_html
+
+        html_path = write_temp_html(graph_json)
+        n_nodes, n_links = len(graph_json["nodes"]), len(graph_json["links"])
+        print(f"[cppgraph] {n_nodes} nodes, {n_links} edges -> {html_path}")
+        if args.no_open:
+            print(f"  open it with: open {html_path}")
+        else:
+            ok, cmd = open_in_browser(html_path)
+            print(f"  {'opened in your browser' if ok else 'open it with'}: {cmd} {html_path}")
         return 0
 
     parser.error(f"unknown command: {args.command}")

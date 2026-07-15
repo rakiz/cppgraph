@@ -12,7 +12,30 @@ Node ids are the SCIP symbol strings (already globally unique and stable), so
 
 from __future__ import annotations
 
-from .model import Edge, Node
+from collections import Counter
+
+from .model import Edge, Node, Reference
+
+
+def is_test_file(path: str | None) -> bool:
+    """Heuristic: is `path` a C++ test / test-support file?
+
+    Covers the common conventions (and MongoDB's): a `_test` / `_tests` /
+    `_unittest` suffix, a `test_` prefix, a `_test_` infix (catches
+    `*_test_helpers.cpp`), or a `test/` / `tests/` directory in the path. Used
+    by `--no-tests` to show production usage only.
+    """
+    if not path:
+        return False
+    p = path.replace("\\", "/").lower()
+    if "/test/" in p or "/tests/" in p:
+        return True
+    stem = p.rsplit("/", 1)[-1].rsplit(".", 1)[0]
+    return (
+        stem.startswith("test_")
+        or stem.endswith(("_test", "_tests", "_unittest"))
+        or "_test_" in stem
+    )
 
 
 def _loc(line: int | None) -> str | None:
@@ -49,3 +72,42 @@ def to_graphify_graph(nodes: list[Node], edges: list[Edge]) -> dict:
             for e in edges
         ],
     }
+
+
+def to_file_usage_graph(
+    symbol: str, label: str, references: list[Reference]
+) -> dict:
+    """A drawable ``symbol -> file`` usage graph from a symbol's references.
+
+    cppgraph records references as exact *locations* (``file:line``) with no
+    enclosing-symbol attribution (the deliberate "C" design), so a type's usage
+    isn't a symbol graph. We can still draw it exactly at *file* granularity:
+    one edge ``symbol -> file`` per distinct file, weighted by how many use
+    sites live there. 100% exact, zero heuristic — every reference carries a
+    real file. (When scip-clang emits ``enclosing_range`` we can upgrade this to
+    ``symbol -> enclosing symbol`` edges; see TODO / DESIGN.md § Graph model.)
+    """
+    counts = Counter(r.file for r in references if r.file)
+    nodes: list[dict] = [{"id": symbol, "label": label or symbol, "_origin": "cppgraph"}]
+    links: list[dict] = []
+    for path, n in sorted(counts.items()):
+        file_id = f"file:{path}"
+        nodes.append(
+            {
+                "id": file_id,
+                "label": path.rsplit("/", 1)[-1],
+                "source_file": path,
+                "kind": "file",
+                "_origin": "cppgraph",
+            }
+        )
+        links.append(
+            {
+                "source": symbol,
+                "target": file_id,
+                "relation": "references",
+                "weight": n,
+                "_origin": "cppgraph",
+            }
+        )
+    return {"nodes": nodes, "links": links}

@@ -423,3 +423,41 @@ def test_export_writes_graphify_json(graph_path: Path, tmp_path: Path, capsys: p
 def test_export_unknown_symbol_errors(graph_path: Path) -> None:
     with pytest.raises(SystemExit):
         main(["export", "--graph", str(graph_path), "nope", "--out", "/tmp/x.json"])
+
+
+def test_export_usage_mode_emits_file_graph(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    import json as _json
+
+    from cppgraph.model import Graph
+
+    sym = "cxx . . $ mongo/ResumeTokenData#"
+    graph = Graph()
+    graph.add_node(sym, display_name="ResumeTokenData")
+    graph.add_reference(sym, "a/foo.cpp", 1)
+    graph.add_reference(sym, "a/foo.cpp", 8)
+    graph.add_reference(sym, "b/bar.h", 3)
+    db = tmp_path / "refs.db"
+    write_sqlite(graph, db)
+
+    out = tmp_path / "usage.json"
+    rc = main(["export", "--graph", str(db), sym, "--mode", "usage", "--out", str(out)])
+    assert rc == 0
+    data = _json.loads(out.read_text())
+    files = {l["target"] for l in data["links"]}
+    assert files == {"file:a/foo.cpp", "file:b/bar.h"}
+    assert "usage graph" in capsys.readouterr().out
+
+
+def test_view_no_open_writes_standalone_html(graph_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    rc = main([
+        "view", "--graph", str(graph_path),
+        "cxx . . $ mongo/Foo#makeResumeToken(a1).",
+        "--depth", "1", "--no-open",
+    ])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "open it with" in out and ".html" in out
+    # the printed path should be a real self-contained file
+    html_path = Path(out.split("open it with: open ")[1].strip())
+    assert html_path.exists()
+    assert "window.GRAPH" in html_path.read_text(encoding="utf-8")

@@ -30,7 +30,7 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from cppgraph.cli import SOURCE_EXTS, read_source_snippet
+from cppgraph.cli import SOURCE_EXTS, build_export_json, read_source_snippet
 from cppgraph.store import GraphStore, changed_files_since
 
 if TYPE_CHECKING:
@@ -350,6 +350,22 @@ def status_report(store: GraphStore, root: str | None = None) -> dict[str, Any]:
     return result
 
 
+def make_export(
+    store: GraphStore,
+    symbol: str,
+    mode: str = "deps",
+    depth: int = 2,
+    direction: str = "both",
+    exclude_tests: bool = False,
+) -> dict[str, Any] | None:
+    """Build the graph.json dict for a symbol, or None if unknown (see
+    `cppgraph.cli.build_export_json`)."""
+    return build_export_json(
+        store, symbol, mode=mode, depth=depth,
+        direction=direction, exclude_tests=exclude_tests,
+    )
+
+
 def build_server(graph_path: str | Path, root: str | None = None) -> Any:
     """A FastMCP server bound to one graph store (opened once, reused per call).
 
@@ -436,6 +452,45 @@ def build_server(graph_path: str | Path, root: str | None = None) -> Any:
         checkout? Run first — if `drift.up_to_date` is false, re-index before
         trusting the topology."""
         return status_report(store, root=root)
+
+    @mcp.tool()
+    def visualize(
+        symbol: str,
+        mode: str = "deps",
+        depth: int = 2,
+        direction: str = "both",
+        exclude_tests: bool = False,
+        open_browser: bool = True,
+    ) -> dict[str, Any]:
+        """Render a small graph around `symbol` as a self-contained HTML in a temp
+        dir and (by default) open it in the user's browser — the "show me the
+        dependency graph of X" tool. Keep it small: a big neighbourhood is an
+        unreadable hairball, so prefer depth 1-2. mode="deps" (default) = the
+        call/inherit subgraph; mode="usage" = a symbol->file graph of where the
+        symbol is used (the right view for a type, which has no call edges). Set
+        exclude_tests=True to drop test files and show production usage only.
+        Returns the HTML path and the command to open it (in case the browser
+        didn't launch)."""
+        from cppgraph.viz_html import open_in_browser, write_temp_html
+
+        graph_json = make_export(
+            store, symbol, mode=mode, depth=depth,
+            direction=direction, exclude_tests=exclude_tests,
+        )
+        if graph_json is None:
+            return {"error": _UNKNOWN.format(symbol=symbol)}
+        html_path = write_temp_html(graph_json)
+        result: dict[str, Any] = {
+            "path": str(html_path),
+            "mode": mode,
+            "nodes": len(graph_json["nodes"]),
+            "edges": len(graph_json["links"]),
+            "open_command": f"open {html_path}",
+        }
+        if open_browser:
+            launched, _ = open_in_browser(html_path)
+            result["opened"] = launched
+        return result
 
     return mcp
 
