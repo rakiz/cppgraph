@@ -15,10 +15,12 @@ graph's nodes/edges (`_bulk_intern`), then GCs orphaned symbols (undefined +
 unreferenced) so `find` stays clean — all in one transaction, indexes
 maintained incrementally. Verified on the full mongo store: a 519-TU partial
 (3833 documents, ~400k edges replaced) in ~10 s, `makeResumeToken` over-capture
-preserved (3 callers). 57 tests green. Remaining glue: a `reindex.sh --update`
-mode wiring `git diff <meta.source_commit>..HEAD` → filtered compdb → partial
-`.scip` → `cppgraph update` (the Python primitive is done). See `DESIGN.md` §
-"Keeping the graph up to date".
+preserved (3 callers). 57 tests green. The shell glue is also done:
+`scripts/reindex.sh --update GRAPH_DB COMPDB [FILTER] [ROOT]` diffs the working
+tree against the store's `meta.source_commit`, filters the compdb to the
+changed TUs, re-indexes just those, and calls `cppgraph update` — verified
+end-to-end on a throwaway git repo (edit a .cpp → only its edges change, the
+unchanged file's edges stay). See `DESIGN.md` § "Keeping the graph up to date".
 
 ## Where we were (Phase 2 store)
 
@@ -115,12 +117,11 @@ C++-general, MongoDB-first.
 ## Exact next step
 
 Phase 2 store + queries + incremental `update` are done (SQLite `GraphStore`,
-all five CLI queries, `cppgraph update`). Remaining Phase 2 work in `TODO.md`:
-(a) the declaration-context false-positive refinement in the builder heuristic
-(known limitation above), (b) the `reindex.sh --update` shell glue on top of
-the `cppgraph update` primitive (git-diff → filtered re-index → update),
-(c) `explain` query + project-root runtime param when queries start returning
-source snippets.
+all five CLI queries, `cppgraph update`, `reindex.sh --update`). Remaining
+Phase 2 work in `TODO.md`: (a) the declaration-context false-positive
+refinement in the builder heuristic (known limitation above), (b) `explain`
+query + project-root runtime param when queries start returning source
+snippets.
 
 ## Key reference symbols for the acceptance tests
 

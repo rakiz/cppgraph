@@ -55,13 +55,16 @@ Ordered. Check off as you go. Detail lives in `DESIGN.md`.
             is recorded at build (`store.build_provenance`, captured at index
             time by `reindex.sh`). `git diff --name-only <source_commit>..HEAD`
             gives the exact changed-file set — the input to the update.
-      - [ ] Still to wire: a `reindex.sh --update <graph.db>` mode that runs
-            `git diff` from `meta.source_commit`, filters the compdb to the
-            changed TUs, re-indexes just those into a partial `.scip`, and calls
-            `cppgraph update` (with `--deleted` for removed files). The Python
-            primitive (`cppgraph update`) is done; this is the shell glue.
-            A dirty stored commit (`source_dirty`) means the diff base is
-            approximate → warn or fall back to a full rebuild.
+      - [x] Shell glue: `scripts/reindex.sh --update GRAPH_DB COMPDB [FILTER]
+            [ROOT]` diffs the project's working tree against the store's
+            `meta.source_commit`, filters the compdb to the changed TUs,
+            re-indexes just those into a partial `.scip`, and calls `cppgraph
+            update` (passing `--deleted` for removed files, and the new HEAD as
+            the refreshed anchor). Verified end-to-end on a throwaway git repo:
+            edit `lib.cpp` (compute→other), update re-indexed 1 TU, replaced its
+            edge, and left the unchanged `main.cpp` edge intact. Warns when the
+            diff contains headers (only refreshed if a re-indexed TU includes
+            them → prefer a full rebuild for widely-included header changes).
 
 ## Phase 3 — serve to LLMs
 
