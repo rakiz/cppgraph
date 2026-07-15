@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -53,6 +54,64 @@ class Graph:
 
     def callees_of(self, symbol: str) -> list[Edge]:
         return [e for e in self.edges if e.kind == "calls" and e.src == symbol]
+
+    def _calls_adjacency(self) -> dict[str, list[Edge]]:
+        adjacency: dict[str, list[Edge]] = {}
+        for e in self.edges:
+            if e.kind == "calls":
+                adjacency.setdefault(e.src, []).append(e)
+        return adjacency
+
+    def shortest_call_path(self, src: str, dst: str) -> list[Edge] | None:
+        """Shortest chain of `calls` edges from `src` to `dst`, BFS (unweighted).
+
+        Returns `[]` if src == dst, `None` if no path exists or either symbol
+        is unknown.
+        """
+        if src not in self.nodes or dst not in self.nodes:
+            return None
+        if src == dst:
+            return []
+        adjacency = self._calls_adjacency()
+        visited = {src}
+        queue: deque[tuple[str, list[Edge]]] = deque([(src, [])])
+        while queue:
+            node, path = queue.popleft()
+            for edge in adjacency.get(node, []):
+                if edge.dst == dst:
+                    return path + [edge]
+                if edge.dst not in visited:
+                    visited.add(edge.dst)
+                    queue.append((edge.dst, path + [edge]))
+        return None
+
+    def impact(self, symbol: str, max_depth: int | None = None) -> set[str]:
+        """Symbols that transitively call `symbol` (reverse blast-radius).
+
+        `max_depth` bounds the number of `calls` hops walked backwards;
+        `None` means unbounded.
+        """
+        if symbol not in self.nodes:
+            return set()
+        reverse_adjacency: dict[str, list[str]] = {}
+        for e in self.edges:
+            if e.kind == "calls":
+                reverse_adjacency.setdefault(e.dst, []).append(e.src)
+
+        visited = {symbol}
+        frontier = [symbol]
+        depth = 0
+        while frontier and (max_depth is None or depth < max_depth):
+            next_frontier = []
+            for node in frontier:
+                for caller in reverse_adjacency.get(node, []):
+                    if caller not in visited:
+                        visited.add(caller)
+                        next_frontier.append(caller)
+            frontier = next_frontier
+            depth += 1
+        visited.discard(symbol)
+        return visited
 
     def find(self, query: str) -> list[Node]:
         """Nodes whose symbol or display name contains `query` (substring, case-sensitive).

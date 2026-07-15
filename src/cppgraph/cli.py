@@ -43,6 +43,18 @@ def main(argv: list[str] | None = None) -> int:
     p_callees.add_argument("--graph", required=True, help="path to a graph.json built by `cppgraph build`")
     p_callees.add_argument("symbol", help="exact SCIP symbol string (see `find`)")
 
+    p_path = sub.add_parser("path", help="shortest call chain from one symbol to another")
+    p_path.add_argument("--graph", required=True, help="path to a graph.json built by `cppgraph build`")
+    p_path.add_argument("src", help="exact SCIP symbol string (see `find`)")
+    p_path.add_argument("dst", help="exact SCIP symbol string (see `find`)")
+
+    p_impact = sub.add_parser("impact", help="reverse blast-radius: everything that transitively calls a symbol")
+    p_impact.add_argument("--graph", required=True, help="path to a graph.json built by `cppgraph build`")
+    p_impact.add_argument("symbol", help="exact SCIP symbol string (see `find`)")
+    p_impact.add_argument(
+        "--depth", type=int, default=None, help="max call hops to walk backwards (default: unbounded)"
+    )
+
     args = parser.parse_args(argv)
 
     if args.command == "build":
@@ -82,6 +94,33 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[cppgraph] {len(edges)} callee(s) of {args.symbol}")
         for edge in edges:
             _print_edge(edge, other=edge.dst)
+        return 0
+
+    if args.command == "path":
+        graph = Graph.load_json(args.graph)
+        if args.src not in graph.nodes:
+            parser.error(f"unknown symbol: {args.src} (use `cppgraph find` to look it up)")
+        if args.dst not in graph.nodes:
+            parser.error(f"unknown symbol: {args.dst} (use `cppgraph find` to look it up)")
+        chain = graph.shortest_call_path(args.src, args.dst)
+        if chain is None:
+            print(f"[cppgraph] no call path from {args.src} to {args.dst}")
+            return 1
+        print(f"[cppgraph] {len(chain)} hop(s) from {args.src} to {args.dst}")
+        print(f"  {args.src}")
+        for edge in chain:
+            line = edge.line + 1 if edge.line is not None else "?"
+            print(f"  -> {edge.dst}  ({edge.file}:{line})")
+        return 0
+
+    if args.command == "impact":
+        graph = Graph.load_json(args.graph)
+        if args.symbol not in graph.nodes:
+            parser.error(f"unknown symbol: {args.symbol} (use `cppgraph find` to look it up)")
+        affected = graph.impact(args.symbol, max_depth=args.depth)
+        print(f"[cppgraph] {len(affected)} symbol(s) transitively call {args.symbol}")
+        for symbol in affected:
+            _print_node(graph.nodes[symbol])
         return 0
 
     parser.error(f"unknown command: {args.command}")
