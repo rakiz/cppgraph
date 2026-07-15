@@ -8,10 +8,6 @@ dist/
 build/
 .pytest_cache/
 
-# generated protobuf bindings
-src/cppgraph/scip_pb2.py
-src/cppgraph/scip_pb2.pyi
-
 .serena/
 .claude/
 

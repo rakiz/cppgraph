@@ -4,10 +4,17 @@ _Last updated: 2026-07-15_
 
 ## Where we are
 
-Project scaffolded. Direction decided. **No builder code yet.** Next concrete
-action is installing `scip-clang` and indexing one MongoDB subsystem.
+Project scaffolded and pushed to a private GitHub repo (`rakiz/cppgraph`).
+Direction decided. Tooling for Phase 1 is now installed and verified (see
+`INSTALL.md`): `scip-clang` v0.4.0 (`scratch/bin/scip-clang`, gitignored),
+`scip.proto` vendored at `src/cppgraph/proto/scip.proto`, and the generated
+Python bindings `src/cppgraph/scip_pb2.py`/`.pyi` are committed (protoc is
+only needed to regenerate them, not for normal development). Local `.venv`
+created via `uv`. **No builder code yet** — next concrete action is indexing
+one MongoDB subsystem with `scip-clang`.
 
-Read order for a fresh session: `AGENTS.md` → this file → `DESIGN.md` → `TODO.md`.
+Read order for a fresh session: `AGENTS.md` → this file → `DESIGN.md` →
+`TODO.md`. For setting up a new machine, `INSTALL.md`.
 
 ## The decision, in one paragraph
 
@@ -33,9 +40,7 @@ open-source project, C++-general, MongoDB-first. Graphify not used as a store
 
 ## Exact next step
 
-1. Install scip-clang for darwin arm64 from
-   https://github.com/sourcegraph/scip-clang/releases (latest). Put the binary on
-   PATH or in the repo; record version + path here.
+1. ~~Install scip-clang~~ done — `scratch/bin/scip-clang` (v0.4.0, darwin arm64).
 2. Index just the change_stream subsystem to keep the POC fast. Start from
    `src/mongo/db/pipeline`. Output the `.scip` into `scratch/`.
 3. Then implement the SCIP parser + graph builder (TODO Phase 1) and run

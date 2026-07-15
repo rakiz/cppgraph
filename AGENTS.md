@@ -34,8 +34,12 @@ MongoDB paths into the tool — only into scratch/tests.
 - Python 3.13, type hints everywhere, `from __future__ import annotations`.
 - Deps via `pyproject.toml`; a local `.venv` in the repo. Any Python you run
   MUST use that venv.
-- SCIP protobuf: vendor `scip.proto`, generate `scip_pb2.py` (gitignored) with
-  `protoc`. Do not commit generated bindings.
+- SCIP protobuf: `src/cppgraph/proto/scip.proto` is vendored from
+  `scip-code/scip`. `src/cppgraph/scip_pb2.py` / `.pyi` are **generated and
+  committed** (protoc self-marks them `DO NOT EDIT!`) — this avoids requiring
+  every contributor to install `protoc` just to run the tool. `protoc` is only
+  needed to *regenerate* the bindings after `scip.proto` changes. See
+  `INSTALL.md` for exact regeneration steps.
 - Tests with `pytest` under `tests/`. Prefer small fixtures (a tiny checked-in
   `.scip` or a synthetic one) over depending on a full MongoDB index.
 - CLI entry: `cppgraph` (see `src/cppgraph/cli.py`).

@@ -4,9 +4,10 @@ Ordered. Check off as you go. Detail lives in `DESIGN.md`.
 
 ## Phase 1 — POC (prove the thesis on one subsystem)
 
-- [ ] Install `scip-clang` (GitHub release, darwin arm64). Record exact version
-      + install path in `HANDOFF.md`.
-- [ ] Vendor `scip.proto`; generate `scip_pb2.py` via `protoc` (gitignored).
+- [x] Install `scip-clang` (GitHub release, darwin arm64). Recorded version
+      + install path in `HANDOFF.md` / `INSTALL.md`.
+- [x] Vendor `scip.proto`; generate `scip_pb2.py`/`.pyi` via `protoc` (committed,
+      not gitignored — see `INSTALL.md`).
 - [ ] Index a single MongoDB subsystem into SCIP.
       Candidate: `src/mongo/db/pipeline` (change_stream lives here).
       Command shape: `scip-clang --compdb-path <mongo>/compile_commands.json ...`

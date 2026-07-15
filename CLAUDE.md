@@ -3,7 +3,8 @@
 ## Session start
 
 Read `HANDOFF.md` (current state + exact next command) before doing anything.
-Then `DESIGN.md` (architecture) and `TODO.md` (ordered tasks).
+Then `DESIGN.md` (architecture) and `TODO.md` (ordered tasks). For setting up a
+new machine (installing `scip-clang`, `protoc`, the venv), see `INSTALL.md`.
 
 ## Large artifacts
 
