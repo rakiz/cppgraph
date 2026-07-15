@@ -12,8 +12,15 @@ build/
 src/cppgraph/scip_pb2.py
 src/cppgraph/scip_pb2.pyi
 
-# indexes / graph outputs
+.serena/
+.claude/
+
+# large artifacts — inputs and outputs, never versioned
+# input: the target project's compilation database (can be hundreds of MB)
+compile_commands.json
+# outputs: the SCIP index and any graph we derive from it
 *.scip
 *.graph.json
 graph.db
+graph.sqlite
 scratch/
