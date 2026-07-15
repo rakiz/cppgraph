@@ -87,7 +87,11 @@ Ordered. Check off as you go. Detail lives in `DESIGN.md`.
 - Templates & header-only: how instantiations appear in SCIP; whether to collapse
   instantiations to the primary template node.
 - Whether to keep graphify at all, even just for viz, or ship our own viz.
-- Phase 2: the nearest-preceding-definition heuristic misattributes
-  declaration-only references (see `HANDOFF.md`) — refine before scaling to
-  all of `src/mongo`, e.g. skip attribution for occurrences in a class body
-  with no matching out-of-line definition in the same TU.
+- ~~Phase 2: refine the nearest-preceding-definition misattribution of
+  declaration-only references~~ **resolved (won't-fix heuristically,
+  2026-07-15)**: proven a fundamental scip-clang v0.4.0 limitation — an
+  in-class declaration and a genuine inline-body call are structurally
+  identical (no `kind`/`syntax_kind`/`enclosing_range`), so every suppression
+  rule drops 15–20% genuine edges. Kept as safe-direction over-capture. Clean
+  fix blocked on `enclosing_range` (scip-clang PR #504, not yet merged);
+  revisit on merge+release. Details in `HANDOFF.md` / `DESIGN.md`.

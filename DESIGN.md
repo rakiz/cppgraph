@@ -53,10 +53,35 @@ fallback (`src/cppgraph/builder.py`):
    *definition* in the same document, by start line (no range containment
    available, so line order is the next best signal). Verified to correctly
    recover both real callers of `ChangeStreamEventTransformation::makeResumeToken`.
-3. Known limitation: this misattributes references that occur in
-   declaration-only contexts (e.g. a pure-virtual method's own header
-   declaration, sitting after a sibling method's declaration) to that
-   sibling. Function-body call sites are unaffected. See `HANDOFF.md`.
+3. Known limitation (investigated 2026-07-15 — a *fundamental* limit of
+   scip-clang v0.4.0, not a bug to refine): the nearest-preceding-definition
+   proxy over-extends a definition's "territory" up to the next definition,
+   so it misattributes references that occur in a *class body* rather than a
+   function body — most visibly a member's own declaration sitting after a
+   sibling definition (e.g. the base `makeResumeToken` declaration in
+   `change_stream_event_transform.h`, or `ProcessId::asLongLong` /
+   `WriteRarelyRWMutex::_lock` declarations). It shows up as spurious extra
+   `calls` edges sourced at the preceding definition.
+
+   This cannot be fixed correctly with scip-clang's current output. Measured
+   on the pipeline index: a member's in-class *declaration* and a genuine
+   inline-body *call* to that same member are both role-`0` occurrences with
+   identical structure — proven by `WriteRarelyRWMutex::_lock`, declared at
+   `rwmutex.h:192` and genuinely called at `rwmutex.h:150`, indistinguishable
+   in SCIP. Every candidate suppression rule therefore also drops genuine
+   edges (measured 15–20% collateral, mostly real inline-body calls). No
+   separating signal exists: `SymbolInformation.kind`, `syntax_kind`, and
+   `enclosing_range` are all unpopulated, and definition `range`s cover only
+   the identifier, never the body. So we keep the over-capture — it is in the
+   *safe* direction (an extra caller, never a dropped real call).
+
+   The clean fix is `enclosing_range` (attribute a reference to a definition
+   iff it is contained in that definition's body range). scip-clang does not
+   emit it (issue sourcegraph/scip-clang#323 was closed *not planned*), but
+   PR sourcegraph/scip-clang#504 implements it. When #504 merges + releases,
+   replace the nearest-preceding proxy with a range-containment test → exact
+   attribution, zero collateral. Tracked, not scheduled — nothing depends on
+   it today.
 
 This is where semantic identity still pays off even with this fallback: the
 callee is the *exact* symbol, so the two `makeResumeToken` never mix,

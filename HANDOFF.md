@@ -90,15 +90,24 @@ C++-general, MongoDB-first.
   (identical file/line/symbol/roles) once per TU after scip-clang merges
   partial indexes — verified on `change_stream_event_transform.h` (included
   by 3 TUs). Edges are deduped by `(kind, src, dst, file, line)`.
-- **Known limitation**: the nearest-preceding-definition heuristic can
-  misattribute a reference that appears in a *declaration-only* context
-  (e.g. a pure-virtual method's header declaration sitting right after a
-  sibling method's declaration) to that sibling as a false "caller". Real
-  function-body call sites are unaffected — seen on the real pipeline data as
-  one spurious 3rd caller edge for the base `makeResumeToken` declaration in
-  the header, alongside its two genuine `.cpp` callers. Deferred to Phase 2
-  (e.g. skip attribution for occurrences inside a class body that has no
-  matching out-of-line definition in the same TU).
+- **Known limitation (fundamental — investigated & closed 2026-07-15, will
+  NOT be fixed heuristically)**: the nearest-preceding-definition proxy
+  over-extends a definition's line span to the next definition, so a
+  reference sitting in a *class body* (not a function body) is misattributed
+  to the preceding definition — most visibly a member's own declaration
+  (e.g. the base `makeResumeToken` declaration in the header → one spurious
+  3rd caller alongside its two genuine `.cpp` callers). Real function-body
+  call sites are unaffected. **This is not refinable with scip-clang v0.4.0**:
+  a member's in-class *declaration* and a genuine inline-body *call* to that
+  member are structurally identical (both role-`0`, no `kind`/`syntax_kind`/
+  `enclosing_range`, definition `range`s are identifier-only). Proven by
+  `WriteRarelyRWMutex::_lock` — declared `rwmutex.h:192`, genuinely called
+  `rwmutex.h:150`, indistinguishable. Every suppression rule tried also drops
+  genuine edges (15–20% collateral measured, mostly real inline-body calls),
+  so we keep the over-capture — it is in the *safe* direction. The clean fix
+  needs `enclosing_range`, which scip-clang doesn't emit (issue
+  sourcegraph/scip-clang#323 closed *not planned*) but PR #504 implements;
+  revisit when #504 merges + releases. See `DESIGN.md` § "Building calls".
 
 ## Environment facts (verified)
 
@@ -117,11 +126,12 @@ C++-general, MongoDB-first.
 ## Exact next step
 
 Phase 2 store + queries + incremental `update` are done (SQLite `GraphStore`,
-all five CLI queries, `cppgraph update`, `reindex.sh --update`). Remaining
-Phase 2 work in `TODO.md`: (a) the declaration-context false-positive
-refinement in the builder heuristic (known limitation above), (b) `explain`
-query + project-root runtime param when queries start returning source
-snippets.
+all five CLI queries, `cppgraph update`, `reindex.sh --update`). The
+declaration-context false-positive was investigated 2026-07-15 and closed as a
+fundamental scip-clang limitation (see "Known limitation" above): not fixable
+without `enclosing_range`, blocked on upstream PR #504. Remaining Phase 2 work
+in `TODO.md`: `explain` query + project-root runtime param when queries start
+returning source snippets. After that, Phase 3 (MCP server).
 
 ## Key reference symbols for the acceptance tests
 
