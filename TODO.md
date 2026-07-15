@@ -130,8 +130,16 @@ Ordered. Check off as you go. Detail lives in `DESIGN.md`.
 ## Phase 4 — open-source / generalize
 
 - [ ] Remove any MongoDB-specific assumptions from the tool core.
-- [ ] Optional `graph.json` export (graphify-compatible) for visualization.
-- [ ] LICENSE, contributing notes, CI, publish.
+- [x] `graph.json` export (graphify-compatible) for visualization. `cppgraph
+      export <symbol> --depth N --direction in|out|both` exports the bounded
+      neighbourhood around a symbol (full graph is too large to render) as the
+      graphify `nodes`/`links` schema, so it opens in our own viewer *and* in
+      graphify. `src/cppgraph/export.py` (pure mapper) + `GraphStore.subgraph`.
+- [x] Bundled offline viewer: `viz/cppgraph-viz.html` (our own code, MIT) with
+      vis-network vendored locally (`viz/vendor/`, MIT/Apache-2.0). Loads a
+      graph.json via picker / drag-drop / `?graph=` (http). See `viz/README.md`.
+- [x] LICENSE — project is MIT (`LICENSE`, `pyproject` license field).
+- [ ] Contributing notes, CI (lint + pytest), publish.
 
 ## Open questions (decide when reached)
 

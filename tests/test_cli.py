@@ -400,3 +400,26 @@ def test_impact_kind_inherits_walks_hierarchy(
     assert "2 symbol(s) transitively inherit from" in out
     assert "mongo/Derived#" in out
     assert "mongo/Leaf#" in out
+
+
+def test_export_writes_graphify_json(graph_path: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    import json as _json
+
+    out = tmp_path / "g.json"
+    rc = main([
+        "export", "--graph", str(graph_path),
+        "cxx . . $ mongo/Foo#makeResumeToken(a1).",
+        "--depth", "1", "--out", str(out),
+    ])
+    assert rc == 0
+    data = _json.loads(out.read_text())
+    ids = {n["id"] for n in data["nodes"]}
+    assert "cxx . . $ mongo/Foo#makeResumeToken(a1)." in ids
+    assert "cxx . . $ mongo/Foo#caller(a2)." in ids  # depth-1 in-neighbour
+    assert any(l["relation"] == "calls" for l in data["links"])
+    assert "exported" in capsys.readouterr().out
+
+
+def test_export_unknown_symbol_errors(graph_path: Path) -> None:
+    with pytest.raises(SystemExit):
+        main(["export", "--graph", str(graph_path), "nope", "--out", "/tmp/x.json"])

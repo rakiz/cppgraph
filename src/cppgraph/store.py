@@ -602,6 +602,82 @@ class GraphStore:
         visited.discard(start_id)
         return set(self._symbols_for_ids(visited).values())
 
+    def subgraph(
+        self, symbol: str, depth: int = 2, direction: str = "both"
+    ) -> tuple[list[Node], list[Edge]]:
+        """A viewable neighbourhood around `symbol`, for export/visualization.
+
+        BFS up to `depth` hops over *all* edge kinds (calls/inherits/implements)
+        in id-space; `direction` picks which way to walk: ``"out"`` (things the
+        node reaches), ``"in"`` (things that reach it), or ``"both"``. Returns
+        the visited nodes and the edges *induced* on them (both endpoints
+        visited), resolved to `Node`/`Edge`. Unknown symbol → `([], [])`.
+
+        The full graph is far too large to render; a bounded neighbourhood is
+        the unit a human or an LLM actually wants to look at.
+        """
+        start_id = self._symbol_id(symbol)
+        if start_id is None:
+            return [], []
+
+        visited = {start_id}
+        frontier = [start_id]
+        d = 0
+        while frontier and d < depth:
+            next_frontier: list[int] = []
+            for node_id in frontier:
+                neighbours: list[int] = []
+                if direction in ("out", "both"):
+                    neighbours += [
+                        r[0]
+                        for r in self._con.execute(
+                            "SELECT dst_id FROM edges WHERE src_id = ?", (node_id,)
+                        ).fetchall()
+                    ]
+                if direction in ("in", "both"):
+                    neighbours += [
+                        r[0]
+                        for r in self._con.execute(
+                            "SELECT src_id FROM edges WHERE dst_id = ?", (node_id,)
+                        ).fetchall()
+                    ]
+                for m in neighbours:
+                    if m not in visited:
+                        visited.add(m)
+                        next_frontier.append(m)
+            frontier = next_frontier
+            d += 1
+
+        placeholders = ",".join("?" * len(visited))
+        ids = list(visited)
+        nodes = [
+            Node(symbol=sym, display_name=name or "", file=path, line=line)
+            for sym, name, path, line in self._con.execute(
+                f"""
+                SELECT s.symbol, s.display_name, f.path, s.line
+                FROM symbols s
+                LEFT JOIN files f ON f.id = s.file_id
+                WHERE s.id IN ({placeholders})
+                """,
+                ids,
+            ).fetchall()
+        ]
+        edges = [
+            Edge(kind=kind, src=src, dst=dst, file=path, line=line)
+            for kind, src, dst, path, line in self._con.execute(
+                f"""
+                SELECT e.kind, s.symbol, d.symbol, f.path, e.line
+                FROM edges e
+                JOIN symbols s ON s.id = e.src_id
+                JOIN symbols d ON d.id = e.dst_id
+                LEFT JOIN files f ON f.id = e.file_id
+                WHERE e.src_id IN ({placeholders}) AND e.dst_id IN ({placeholders})
+                """,
+                ids + ids,
+            ).fetchall()
+        ]
+        return nodes, edges
+
     # --- incremental update ------------------------------------------------
 
     def _bulk_intern(self, table: str, col: str, values: Iterable[str]) -> dict[str, int]:

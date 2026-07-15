@@ -49,6 +49,7 @@ Full write-up with numbers and reproduction steps: **[COMPARISON.md](COMPARISON.
 | [DESIGN.md](DESIGN.md) | Architecture, edge model, the call-attribution heuristic + its known limitation |
 | [COMPARISON.md](COMPARISON.md) | Measured comparison vs graphify and Serena on a real design question |
 | [INSTALL.md](INSTALL.md) | Setting up a new machine (`scip-clang`, `protoc`, the venv) |
+| [viz/README.md](viz/README.md) | The bundled graph viewer + `cppgraph export` graph.json format |
 | [TODO.md](TODO.md) | Ordered task list / roadmap |
 | [HANDOFF.md](HANDOFF.md) | Current state + exact next command (for resuming work) |
 
@@ -58,6 +59,15 @@ Full write-up with numbers and reproduction steps: **[COMPARISON.md](COMPARISON.
 - Being a linter or a refactoring engine. This is about *understanding structure*
   (who calls what, impact/blast-radius, inheritance) for humans and LLMs.
 
+## Visualize
+
+`cppgraph export '<symbol>' --graph <graph.db> --depth 2 --out graph.json` writes
+a bounded neighbourhood in a [graphify](https://github.com/Graphify-Labs/graphify)-compatible
+`graph.json`. Open it in the bundled viewer (`viz/cppgraph-viz.html`, our own
+code + a vendored copy of vis-network, fully offline) — or, since the container
+format is shared, in graphify itself. Details: [viz/README.md](viz/README.md).
+
 ## License
 
-TBD (open-source intended).
+[MIT](LICENSE). The bundled viewer vendors [vis-network](https://github.com/visjs/vis-network)
+(MIT / Apache-2.0); see [viz/README.md](viz/README.md#third-party-notices).

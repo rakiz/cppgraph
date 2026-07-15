@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<!--
+  cppgraph-viz — a small, self-contained viewer for cppgraph's graph.json.
+  Our own code (MIT, same as the project). Renders with the vendored
+  vis-network library (vendor/vis-network.min.js, © vis.js contributors,
+  dual MIT / Apache-2.0). No graphify code is used or required. See README.md.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>cppgraph — graph viewer</title>
+<style>
+  :root { color-scheme: dark; }
+  html, body { margin: 0; height: 100%; background: #14161a; color: #d7dae0;
+    font: 13px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; }
+  #bar { padding: 8px 12px; background: #1b1e24; border-bottom: 1px solid #2a2e37;
+    display: flex; gap: 14px; align-items: center; flex-wrap: wrap; }
+  #bar b { color: #9ecbff; }
+  #bar .legend span { padding: 1px 7px; border-radius: 3px; margin-left: 4px; }
+  .calls { background: #2d4a63; } .inherits { background: #4a3a63; }
+  .implements { background: #63472d; }
+  #net { width: 100%; height: calc(100% - 90px); }
+  #drop { position: absolute; inset: 90px 0 0 0; display: flex;
+    align-items: center; justify-content: center; color: #6b7280;
+    pointer-events: none; text-align: center; }
+  input[type=file] { color: #9ecbff; }
+  #meta { color: #6b7280; }
+  a { color: #9ecbff; }
+</style>
+</head>
+<body>
+<div id="bar">
+  <b>cppgraph</b>
+  <label>graph.json: <input id="file" type="file" accept=".json" /></label>
+  <span id="meta"></span>
+  <span class="legend">edges:
+    <span class="calls">calls</span>
+    <span class="inherits">inherits</span>
+    <span class="implements">implements</span>
+  </span>
+</div>
+<div id="net"></div>
+<div id="drop">drop a <code>graph.json</code> here, pick one above,
+  or append <code>?graph=&lt;url&gt;</code> when served over http</div>
+<script src="./vendor/vis-network.min.js"></script>
+<script>
+const EDGE_COLORS = { calls: "#4b7bab", inherits: "#7d5fb0", implements: "#b07d4b" };
+
+// A SCIP symbol ending in "#" is a type; ").":  a callable. Colour nodes by that.
+function nodeColor(id) {
+  if (id.endsWith("#")) return { background: "#3a2f52", border: "#7d5fb0" };
+  if (id.endsWith(").")) return { background: "#1f3547", border: "#4b7bab" };
+  return { background: "#2a2e37", border: "#4b5563" };
+}
+
+function render(graph) {
+  const meta = document.getElementById("meta");
+  meta.textContent = `${graph.nodes.length} nodes · ${graph.links.length} edges`;
+  document.getElementById("drop").style.display = "none";
+
+  const nodes = new vis.DataSet(graph.nodes.map(n => ({
+    id: n.id,
+    label: n.label || n.id,
+    color: nodeColor(n.id),
+    title: (n.source_file ? n.source_file : "") +
+           (n.source_location ? ":" + n.source_location.replace(/^L/, "") : ""),
+  })));
+  const edges = new vis.DataSet(graph.links.map((e, i) => ({
+    id: i, from: e.source, to: e.target, arrows: "to",
+    color: { color: EDGE_COLORS[e.relation] || "#6b7280" },
+    title: e.relation,
+  })));
+
+  new vis.Network(document.getElementById("net"), { nodes, edges }, {
+    nodes: { shape: "dot", size: 10, font: { color: "#d7dae0", size: 12 } },
+    edges: { smooth: { type: "continuous" }, width: 1 },
+    physics: { stabilization: { iterations: 150 },
+      barnesHut: { gravitationalConstant: -6000, springLength: 120 } },
+    interaction: { hover: true, tooltipDelay: 120 },
+  });
+}
+
+function loadText(text) {
+  try { render(JSON.parse(text)); }
+  catch (e) { document.getElementById("meta").textContent = "invalid graph.json: " + e.message; }
+}
+
+document.getElementById("file").addEventListener("change", ev => {
+  const f = ev.target.files[0];
+  if (f) f.text().then(loadText);
+});
+["dragover", "drop"].forEach(t => document.body.addEventListener(t, e => e.preventDefault()));
+document.body.addEventListener("drop", e => {
+  const f = e.dataTransfer.files[0];
+  if (f) f.text().then(loadText);
+});
+
+// Optional: ?graph=<url> auto-load (works when served over http/https; browsers
+// block fetch() of local files under file://, so use the picker/drop there).
+const url = new URLSearchParams(location.search).get("graph");
+if (url) fetch(url).then(r => r.text()).then(loadText)
+  .catch(e => document.getElementById("meta").textContent =
+    "could not fetch " + url + " (" + e.message + ") — use the file picker under file://");
+</script>
+</body>
+</html>

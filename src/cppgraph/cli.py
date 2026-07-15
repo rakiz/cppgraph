@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
 from cppgraph.builder import build_graph
+from cppgraph.export import to_graphify_graph
 from cppgraph.model import Edge, Node
 from cppgraph.proto import scip_pb2
 from cppgraph.store import (
@@ -197,6 +199,29 @@ def main(argv: list[str] | None = None) -> int:
     p_explain.add_argument(
         "--context", type=int, default=3, metavar="N",
         help="lines of source context to show around the definition (default: 3)",
+    )
+
+    p_export = sub.add_parser(
+        "export",
+        help="export a viewable subgraph around a symbol as graphify-compatible "
+        "graph.json (open it in viz/ or in graphify)",
+    )
+    p_export.add_argument("--graph", required=True, help="path to a graph store built by `cppgraph build`")
+    p_export.add_argument("symbol", help="exact SCIP symbol string to center the view on (see `find`)")
+    p_export.add_argument(
+        "--depth", type=int, default=2, metavar="N",
+        help="neighbourhood radius in hops around the symbol (default: 2). The "
+        "full graph is too large to render; a bounded neighbourhood is the unit "
+        "you actually view.",
+    )
+    p_export.add_argument(
+        "--direction", choices=("in", "out", "both"), default="both",
+        help="which way to walk edges: 'out' (what it reaches), 'in' (what "
+        "reaches it), or 'both' (default)",
+    )
+    p_export.add_argument(
+        "--out", default="graph.json", metavar="PATH",
+        help="output path for the graph.json (default: ./graph.json)",
     )
 
     args = parser.parse_args(argv)
@@ -453,6 +478,23 @@ def main(argv: list[str] | None = None) -> int:
             print(f"    {edge.dst}  ({edge.file}:{line})")
         if len(callees) > 10:
             print(f"    ... and {len(callees) - 10} more")
+        return 0
+
+    if args.command == "export":
+        store = GraphStore(args.graph)
+        if not store.has_symbol(args.symbol):
+            parser.error(f"unknown symbol: {args.symbol} (use `cppgraph find` to look it up)")
+        nodes, edges = store.subgraph(
+            args.symbol, depth=args.depth, direction=args.direction
+        )
+        graph_json = to_graphify_graph(nodes, edges)
+        with open(args.out, "w", encoding="utf-8") as f:
+            json.dump(graph_json, f, indent=1)
+        print(
+            f"[cppgraph] exported {len(nodes)} nodes, {len(edges)} edges "
+            f"(depth {args.depth}, {args.direction}) -> {args.out}"
+        )
+        print(f"  open it with: viz/cppgraph-viz.html?graph={args.out}")
         return 0
 
     parser.error(f"unknown command: {args.command}")

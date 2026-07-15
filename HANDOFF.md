@@ -4,6 +4,25 @@ _Last updated: 2026-07-15_
 
 ## Where we are
 
+**Phase 4 started: export + viz + LICENSE (MIT).** `cppgraph export '<symbol>'
+--graph <db> --depth N --direction in|out|both --out graph.json` writes the
+bounded neighbourhood around a symbol (the full graph is far too big to render)
+in the **graphify-compatible** `nodes`/`links` schema — so the same file opens in
+our own viewer *and*, as a bonus, in graphify. Pure mapper `src/cppgraph/export.py`
+(`to_graphify_graph`) + `GraphStore.subgraph(symbol, depth, direction)` (induced
+subgraph, all edge kinds). Node ids = SCIP symbol strings. Verified on the real
+pipeline graph: depth-2 both around `makeResumeToken` = 190 nodes / 1996 edges.
+The viewer is **our own** (`viz/cppgraph-viz.html`, MIT) with **vis-network
+vendored locally** (`viz/vendor/vis-network.min.js`, MIT/Apache-2.0) so it's
+fully offline — no graphify install, no CDN. Loads a graph.json via file
+picker / drag-drop / `?graph=` (http only). `viz/README.md` documents it +
+third-party notice. Project is now **MIT** (`LICENSE`, `pyproject` license
+field). Chosen deliberately over vendoring graphify's viewer (which would drag in
+networkx + 4 files + a CDN dep). 120 tests green.
+
+Still open in Phase 4: strip any MongoDB-specific assumptions from the core;
+contributing notes + CI + publish.
+
 **Tool comparison done** (`COMPARISON.md`, linked from README's new Documentation
 map). Ran the real design question — "what calls
 `ChangeStreamEventTransformation::makeResumeToken`?" — through three tools on the

@@ -3,6 +3,8 @@ name = "cppgraph"
 version = "0.0.1"
 description = "Semantically accurate code-graph for C++ from a compiler index (SCIP)."
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.13"
 dependencies = [
     "protobuf>=5.0",
