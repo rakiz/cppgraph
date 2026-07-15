@@ -10,10 +10,19 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
+import pytest
+
 from cppgraph.builder import build_graph
 from cppgraph.model import Graph, Node
 from cppgraph.proto import scip_pb2
-from cppgraph.store import GraphStore, build_provenance, update_store, write_sqlite
+from cppgraph.store import (
+    SCHEMA_VERSION,
+    GraphStore,
+    IncompatibleStoreError,
+    build_provenance,
+    update_store,
+    write_sqlite,
+)
 
 METHOD = "cxx . . $ mongo/Foo#makeResumeToken(a1)."
 CALLER = "cxx . . $ mongo/Foo#caller(a2)."
@@ -154,6 +163,45 @@ def test_impact_unknown_symbol_returns_empty(tmp_path: Path) -> None:
 
 
 # --- inheritance queries ---------------------------------------------------
+
+# --- schema versioning -----------------------------------------------------
+
+
+def test_write_stamps_schema_version(tmp_path: Path) -> None:
+    store = _sample(tmp_path)
+    assert store.meta()["schema_version"] == str(SCHEMA_VERSION)
+    assert store.schema_version() == SCHEMA_VERSION
+
+
+def test_open_rejects_a_newer_schema(tmp_path: Path) -> None:
+    db = tmp_path / "future.db"
+    write_sqlite(_graph_with_edge(), db)
+    # simulate a store written by a future cppgraph
+    con = sqlite3.connect(db)
+    con.execute("UPDATE meta SET value = ? WHERE key = 'schema_version'",
+                (str(SCHEMA_VERSION + 1),))
+    con.commit()
+    con.close()
+    with pytest.raises(IncompatibleStoreError):
+        GraphStore(db)
+
+
+def test_legacy_store_without_version_opens(tmp_path: Path) -> None:
+    db = tmp_path / "legacy.db"
+    write_sqlite(_graph_with_edge(), db)
+    con = sqlite3.connect(db)
+    con.execute("DELETE FROM meta WHERE key = 'schema_version'")
+    con.commit()
+    con.close()
+    store = GraphStore(db)  # must not raise
+    assert store.schema_version() is None
+
+
+def _graph_with_edge() -> Graph:
+    graph = Graph()
+    graph.add_edge("calls", CALLER, METHOD, file="foo.cpp", line=1)
+    return graph
+
 
 BASE = "cxx . . $ mongo/Base#"
 DERIVED = "cxx . . $ mongo/Derived#"

@@ -86,6 +86,18 @@ CREATE INDEX ix_refs ON refs(symbol_id);  -- references_of a symbol
 # Chunk `IN (...)` id lists well under that.
 _ID_CHUNK = 900
 
+# On-disk store format version, stamped into `meta.schema_version` at build.
+# Bump when the schema changes incompatibly (new/renamed tables or columns);
+# then a migration can branch on the stored value. A store with no
+# `schema_version` predates versioning (treated as the oldest, still readable).
+# `GraphStore` refuses to open a store whose version is *newer* than this — an
+# old binary must not silently misread a format it doesn't understand.
+SCHEMA_VERSION = 1
+
+
+class IncompatibleStoreError(RuntimeError):
+    """Raised opening a store written by a newer cppgraph than this one."""
+
 
 def _git(root: Path, *args: str) -> str | None:
     """Best-effort `git -C root <args>`; None if git is missing, times out, or
@@ -232,6 +244,7 @@ def write_sqlite(
         ]
 
         all_meta = dict(meta or {})
+        all_meta["schema_version"] = str(SCHEMA_VERSION)
         all_meta.setdefault("node_count", str(len(graph.nodes)))
         all_meta.setdefault("edge_count", str(len(graph.edges)))
         if graph.references:
@@ -307,6 +320,38 @@ class GraphStore:
 
     def __init__(self, path: str | Path) -> None:
         self._con = sqlite3.connect(Path(path))
+        self._check_schema_compat()
+
+    def _check_schema_compat(self) -> None:
+        """Refuse a store whose format is newer than this binary understands.
+
+        An older/unversioned store is fine (backward compatible — missing tables
+        are handled by the individual queries). A *newer* one is not: reading it
+        with an old schema could silently return wrong results.
+        """
+        raw = self.meta().get("schema_version")
+        if raw is None:
+            return  # predates versioning; readable as legacy
+        try:
+            version = int(raw)
+        except ValueError:
+            return  # unparseable; treat as legacy rather than hard-fail
+        if version > SCHEMA_VERSION:
+            self._con.close()
+            raise IncompatibleStoreError(
+                f"graph store schema v{version} is newer than this cppgraph "
+                f"(supports v{SCHEMA_VERSION}); upgrade cppgraph or rebuild the graph"
+            )
+
+    def schema_version(self) -> int | None:
+        """The store's on-disk format version, or None if it predates versioning."""
+        raw = self.meta().get("schema_version")
+        if raw is None:
+            return None
+        try:
+            return int(raw)
+        except ValueError:
+            return None
 
     def close(self) -> None:
         self._con.close()

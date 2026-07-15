@@ -4,6 +4,17 @@ _Last updated: 2026-07-15_
 
 ## Where we are
 
+Store now stamps a **`schema_version`** (meta, currently 1) — the on-disk format
+version, distinct from `cppgraph_version` (the writing code). It's the migration
+enabler: a future incompatible schema change bumps it, and migration code
+branches on the stored value. `GraphStore` refuses to open a store *newer* than
+it understands (`IncompatibleStoreError`); an unversioned store is read as
+legacy. `status` (CLI + MCP) now surfaces `built_at`, indexing tool+version,
+schema/cppgraph version, and counts — "when/how was this indexed?" without the
+`.scip`. 113 tests green.
+
+## Where we were (references location index)
+
 `references` landed as an exact **location index** (approach "C", on by default;
 opt out with `cppgraph build --no-references`). Every non-local, non-definition
 occurrence is recorded as `symbol → file:line` with *no* enclosing attribution —

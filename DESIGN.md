@@ -188,6 +188,8 @@ CREATE INDEX ix_src ON edges(src_id);     -- callees_of via B-tree, no full load
 CREATE INDEX ix_dst ON edges(dst_id);     -- callers_of via B-tree, no full load
 -- PROVENANCE: what was indexed (self-describing after the .scip is discarded)
 meta(key TEXT PRIMARY KEY, value TEXT)    -- source_commit, project_root, ...
+-- schema_version: on-disk format version, so a future migration can branch;
+-- GraphStore refuses to open a store newer than the running binary.
 ```
 
 ### Provenance: recording *what* was indexed
@@ -203,6 +205,16 @@ absent that, `build` auto-detects via git on `project_root`, which is exact
 when index→build run back-to-back. Non-git projects simply record no commit
 (the tool stays general, `git`-optional). This commit is the **anchor for
 incremental updates** — see below.
+
+The `meta` table also carries a **`schema_version`** (currently 1): the on-disk
+*format* version, distinct from `cppgraph_version` (the code that wrote it).
+It's the enabler for format migrations — a future schema change bumps it, and
+migration code can branch on the stored value. `GraphStore` refuses to open a
+store whose `schema_version` is *newer* than the running binary supports (an old
+binary silently misreading a new format would give wrong answers); an
+unversioned store predates this and is read as legacy. `status` surfaces it
+alongside `built_at` and the indexing tool/version, so "when/how was this
+indexed?" is answerable without the `.scip`.
 
 Cost accepted with this move (deliberately, over the flat-JSON simplicity):
 the artifact is no longer greppable/`jq`-able or textually diffable, and the

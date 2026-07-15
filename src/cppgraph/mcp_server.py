@@ -309,8 +309,16 @@ def status_report(store: GraphStore, root: str | None = None) -> dict[str, Any]:
             "source_commit": commit,
             "source_dirty": m.get("source_dirty") == "true",
             "project_root": m.get("project_root"),
+            "built_at": m.get("built_at"),
+            "indexed_with": " ".join(
+                v for v in (m.get("index_tool"), m.get("index_tool_version")) if v
+            ) or None,
+            "schema_version": m.get("schema_version"),
+            "cppgraph_version": m.get("cppgraph_version"),
+            "has_references": m.get("has_references") == "true",
             "node_count": m.get("node_count"),
             "edge_count": m.get("edge_count"),
+            "ref_count": m.get("ref_count"),
         },
         "source_commit": commit,
         "drift": {"checked": False},

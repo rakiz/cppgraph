@@ -361,6 +361,20 @@ def main(argv: list[str] | None = None) -> int:
             print("  source commit: unknown (not recorded at build time)")
         if m.get("project_root"):
             print(f"  project_root:  {m['project_root']}")
+        if m.get("built_at"):
+            print(f"  built at:      {m['built_at']}")
+        tool = m.get("index_tool")
+        if tool:
+            ver = m.get("index_tool_version")
+            print(f"  indexed with:  {tool}{' ' + ver if ver else ''}")
+        print(
+            f"  nodes/edges:   {m.get('node_count', '?')} / {m.get('edge_count', '?')}"
+            + (f" (+{m['ref_count']} refs)" if m.get("ref_count") else "")
+        )
+        print(
+            f"  format:        schema v{m.get('schema_version', '0 (legacy)')}"
+            f", cppgraph {m.get('cppgraph_version', '?')}"
+        )
 
         if args.root is None:
             if commit:
