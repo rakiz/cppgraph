@@ -94,13 +94,26 @@ Ordered. Check off as you go. Detail lives in `DESIGN.md`.
       MCP `base_classes`/`subclasses`) and `impact --kind inherits` (transitive
       subclasses). Verified on the real pipeline index (30445 inherits / 11950
       implements; `ServerParameter#` → 3 subclasses with def sites).
-- [ ] `references` edges (any non-call use of a symbol). DEFERRED pending a
-      scope decision: measured ~778k new edges on the pipeline subsystem alone
-      (~3× the store at full-mongo scale), and attribution reuses the same
-      nearest-preceding proxy as `calls` (with its known class-body limitation).
-      Options when picked up: (a) type-references only, (b) all references,
-      (c) store references as locations, not symbol→symbol edges. See DESIGN.md
-      § Graph model.
+- [x] `references` as an exact **location index** (approach "C"): every
+      non-local reference occurrence recorded as `symbol -> [file:line]` (no
+      enclosing attribution, so zero heuristic and 100% exact), on by default
+      (opt out with `--no-references`). Query returns coordinates, or — with
+      `--root` — the tool reads the sources and returns snippets itself (reusing
+      `read_source_snippet`, same dual mode as `explain`). Answers "where is this
+      type/symbol used?" — the dependency the call graph is blind to. Verified on
+      the real pipeline graph: `ResumeTokenData#` (a struct, 0 callers) → 155
+      exact use sites, `--root` serving the parameter-type usages. CLI
+      `references`, MCP `find_references`; incremental `update` refreshes the
+      index too. Cost (full mongo): 5.3M deduped locations, store 323→468 MB
+      (+45%), build ~40 s — modest, so default-on.
+  - [ ] When scip-clang emits `enclosing_range` (PR #504, tracked), we can
+        additionally offer *attributed* reference **edges** — approach "A"
+        (type→type only) and "B" (all references), symbol→symbol and
+        traversable, exact because containment replaces the nearest-preceding
+        proxy. Make these an opt-in at indexing (they're big, and only worth it
+        once attribution is exact). Until #504, edges would be heuristic-noisy
+        exactly where references live (class bodies), so we deliberately do
+        locations-only. See DESIGN.md § Graph model.
 - [ ] Compare usefulness against Serena on a real design question.
 
 ## Phase 4 — open-source / generalize

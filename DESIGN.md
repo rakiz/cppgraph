@@ -39,11 +39,29 @@ Edges (implemented unless marked planned):
 - `implements` override-method → overridden-method (the method→method
                `is_implementation` relationships; the class→class ones are
                `inherits`)
-- `references` symbol → symbol, non-call use (planned — measured cost:
-               ~778k new edges on the pipeline subsystem alone, ~3× the store
-               at full-mongo scale, and attribution leans on the same
-               nearest-preceding proxy as `calls`; scope TBD)
 - `defines` / `contains`  file/namespace/class → member, structural (planned)
+
+References are **not** edges. They are stored as an exact **location index**
+(the "C" approach), on by default (opt out with `cppgraph build
+--no-references`): every non-local, non-definition occurrence recorded as
+`symbol → file:line`, with no
+attribution to an enclosing symbol. Rationale: a reference edge's `src` ("who
+references") would need the same nearest-preceding proxy as `calls`, but
+references live disproportionately in *class bodies* (field/param/return types),
+exactly where that proxy fails — so attributing them would concentrate the
+known misattribution. Locations sidestep it entirely: the position is 100%
+exact, and the `references` query returns coordinates or — with `--root` — the
+snippet the tool reads itself (same dual mode as `explain`). This answers "where
+is this type/symbol used?" — a dependency the call graph can't express (e.g.
+`ResumeTokenData#`, a plain struct: 0 callers, 155 exact use sites across the
+pipeline subsystem). Measured cost is modest — full mongo: 5.3M deduped
+locations, store 323 MB → 468 MB (+45%), build ~40 s vs ~23 s — so it's on by
+default; `--no-references` gives the leaner store when the index isn't wanted.
+
+When scip-clang emits `enclosing_range` (PR #504), *attributed* reference
+**edges** (symbol → symbol, traversable) become exact via a containment test —
+worth adding then as an opt-in, type-only ("A") or all ("B"). Until then,
+locations-only. See TODO.md.
 
 ## Building calls from SCIP
 
@@ -246,16 +264,17 @@ paths, kept in mind while designing the builder so this isn't a later rewrite:
 - CLI: `build`, `update` (incremental), `find`, `callers`, `callees`, `path`,
   `bases` / `subtypes` (direct inheritance neighbours of a type), `impact`
   (reverse blast-radius; `--kind calls` = transitive callers, `--kind inherits`
-  = all transitive subclasses), `explain` (definition + neighbors; pass
-  `--root` to also get a source snippet, omit it for coordinates only),
-  `status` (source commit + drift check).
+  = all transitive subclasses), `references` (exact use sites, present unless the
+  graph was built `--no-references`; `--root` for snippets, else coordinates), `explain`
+  (definition + neighbors; pass `--root` to also get a source snippet, omit it
+  for coordinates only), `status` (source commit + drift check).
 - MCP server (`cppgraph-mcp`, `src/cppgraph/mcp_server.py`): exposes the same
   queries to an LLM, token-budgeted. FastMCP over stdio; the graph store is
   fixed at launch (`--graph <db>`, optional `--root <checkout>`) so tools never
   take — and the LLM never has to guess or repeat — a filesystem path. Tools:
-  `find`, `who_calls`, `what_it_calls`, `base_classes`, `subclasses`, `path`,
-  `impact_of` (`kind` = calls|inherits), `explain_symbol`, `status`. The
-  intended loop: `status` tells the LLM whether the graph is
+  `find`, `who_calls`, `what_it_calls`, `base_classes`, `subclasses`,
+  `find_references`, `path`, `impact_of` (`kind` = calls|inherits),
+  `explain_symbol`, `status`. The intended loop: `status` tells the LLM whether the graph is
   current (else `reindex.sh --update`); then `impact_of`/`who_calls`/`path`/
   `explain_symbol` answer "what does this change affect?" with compiler-exact
   edges — no grep guessing, no loading files into context.

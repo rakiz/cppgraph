@@ -147,6 +147,51 @@ def subtypes(store: GraphStore, symbol: str, limit: int = DEFAULT_LIMIT) -> dict
     }
 
 
+def references(
+    store: GraphStore,
+    symbol: str,
+    root: str | None = None,
+    include_source: bool = False,
+    context: int = 0,
+    limit: int = DEFAULT_LIMIT,
+) -> dict[str, Any]:
+    """Exact use sites of `symbol` (the `--references` location index).
+
+    Answers "where is this type/symbol used?" — the dependency the call graph
+    can't express (a plain struct has no callers). Positions are exact (no
+    enclosing-attribution heuristic). Coordinates only by default; with
+    `include_source=True` *and* a `root`, each site also carries a snippet the
+    tool reads itself. `available` is False (not an error) when the graph was
+    built with `--no-references`, so the caller knows to rebuild.
+    """
+    if not store.has_symbol(symbol):
+        return {"error": _UNKNOWN.format(symbol=symbol)}
+    refs = store.references_of(symbol)
+    if not refs and store.meta().get("has_references") != "true":
+        return {
+            "symbol": symbol,
+            "available": False,
+            "reason": "graph built with --no-references (no location index)",
+        }
+    shown, truncated = _capped(refs, limit)
+    items: list[dict[str, Any]] = []
+    for ref in shown:
+        entry: dict[str, Any] = {"file": ref.file, "line": _line1(ref.line)}
+        if include_source and root is not None and ref.file is not None and ref.line is not None:
+            snippet = read_source_snippet(root, ref.file, ref.line, context=context)
+            entry["source"] = (
+                None if snippet is None else [{"line": n + 1, "text": t} for n, t in snippet]
+            )
+        items.append(entry)
+    return {
+        "symbol": symbol,
+        "available": True,
+        "total": len(refs),
+        "truncated": truncated,
+        "uses": items,
+    }
+
+
 def call_path(store: GraphStore, src: str, dst: str) -> dict[str, Any]:
     """Shortest `calls` chain from `src` to `dst`, as an ordered node list.
 
@@ -338,6 +383,17 @@ def build_server(graph_path: str | Path, root: str | None = None) -> Any:
         """Direct subclasses of a type (one inheritance hop). For the whole
         subtree use `impact_of` with kind="inherits"."""
         return subtypes(store, symbol, limit=limit)
+
+    @mcp.tool()
+    def find_references(
+        symbol: str, include_source: bool = False, context: int = 0, limit: int = DEFAULT_LIMIT
+    ) -> dict[str, Any]:
+        """Exact use sites of a symbol ("where is this type/symbol used?") — the
+        dependency the call graph can't show (a struct has no callers). Needs a
+        graph unless built --no-references. Coordinates only unless include_source=True
+        and the server was launched with --root."""
+        return references(store, symbol, root=root, include_source=include_source,
+                          context=context, limit=limit)
 
     @mcp.tool()
     def path(src: str, dst: str) -> dict[str, Any]:

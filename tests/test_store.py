@@ -10,6 +10,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
+from cppgraph.builder import build_graph
 from cppgraph.model import Graph, Node
 from cppgraph.proto import scip_pb2
 from cppgraph.store import GraphStore, build_provenance, update_store, write_sqlite
@@ -182,6 +183,52 @@ def test_subtypes_of_lists_direct_subtypes(tmp_path: Path) -> None:
     store = _hierarchy(tmp_path)
     subs = store.subtypes_of(BASE)
     assert [n.symbol for n in subs] == [DERIVED]
+
+
+TYPE = "cxx . . $ mongo/ResumeTokenData#"
+
+
+def test_references_of_returns_locations(tmp_path: Path) -> None:
+    graph = Graph()
+    graph.add_reference(TYPE, "a.cpp", 11)
+    graph.add_reference(TYPE, "a.cpp", 40)
+    graph.add_reference(TYPE, "b.cpp", 7)
+    store = _store(tmp_path, graph)
+    refs = store.references_of(TYPE)
+    assert [(r.file, r.line) for r in refs] == [("a.cpp", 11), ("a.cpp", 40), ("b.cpp", 7)]
+    assert store.meta().get("has_references") == "true"
+
+
+def test_references_empty_when_not_built(tmp_path: Path) -> None:
+    # a graph with no references at all -> no has_references flag, empty query
+    store = _sample(tmp_path)
+    assert store.references_of(METHOD) == []
+    assert "has_references" not in store.meta()
+
+
+def test_references_unknown_symbol_returns_empty(tmp_path: Path) -> None:
+    graph = Graph()
+    graph.add_reference(TYPE, "a.cpp", 1)
+    store = _store(tmp_path, graph)
+    assert store.references_of("does::not::exist") == []
+
+
+def test_update_replaces_references_for_changed_file(tmp_path: Path) -> None:
+    graph = Graph()
+    graph.add_reference(TYPE, "a.cpp", 5)
+    graph.add_reference(TYPE, "b.cpp", 9)
+    db = tmp_path / "g.db"
+    write_sqlite(graph, db)
+
+    # re-index a.cpp: the type now used at a different line there
+    partial = scip_pb2.Index()
+    doc = partial.documents.add(relative_path="a.cpp")
+    doc.occurrences.add(symbol=TYPE).range.extend([21, 0, 5])
+    store = GraphStore(db)
+    store.apply_update(build_graph(partial, include_references=True), ["a.cpp"])
+    refs = store.references_of(TYPE)
+    # a.cpp:5 replaced by a.cpp:21; b.cpp:9 untouched
+    assert sorted((r.file, r.line) for r in refs) == [("a.cpp", 21), ("b.cpp", 9)]
 
 
 def test_impact_over_inherits_gives_transitive_descendants(tmp_path: Path) -> None:

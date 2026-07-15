@@ -136,6 +136,47 @@ def test_bases_unknown_symbol_is_error(hierarchy: GraphStore) -> None:
     assert "error" in mcp_server.bases(hierarchy, "nope")
 
 
+TYPE = "cxx . . $ mongo/ResumeTokenData#"
+
+
+@pytest.fixture
+def refs_store(tmp_path: Path) -> GraphStore:
+    graph = Graph()
+    graph.add_reference(TYPE, "a.cpp", 10)
+    graph.add_reference(TYPE, "b.cpp", 41)
+    path = tmp_path / "r.db"
+    write_sqlite(graph, path)
+    return GraphStore(path)
+
+
+def test_references_lists_use_sites(refs_store: GraphStore) -> None:
+    result = mcp_server.references(refs_store, TYPE)
+    assert result["available"] is True
+    assert result["total"] == 2
+    assert {(u["file"], u["line"]) for u in result["uses"]} == {("a.cpp", 11), ("b.cpp", 42)}
+    assert all("source" not in u for u in result["uses"])  # coordinates only
+
+
+def test_references_with_root_reads_snippets(refs_store: GraphStore, tmp_path: Path) -> None:
+    root = tmp_path / "co"
+    root.mkdir()
+    (root / "a.cpp").write_text("\n".join(f"line {i}" for i in range(50)))
+    (root / "b.cpp").write_text("\n".join(f"line {i}" for i in range(50)))
+    result = mcp_server.references(refs_store, TYPE, root=str(root), include_source=True, context=0)
+    a = next(u for u in result["uses"] if u["file"] == "a.cpp")
+    assert a["source"] == [{"line": 11, "text": "line 10"}]
+
+
+def test_references_unavailable_when_not_built(store: GraphStore) -> None:
+    # the `store` fixture has no reference index
+    result = mcp_server.references(store, FOO)
+    assert result["available"] is False
+
+
+def test_references_unknown_symbol_is_error(refs_store: GraphStore) -> None:
+    assert "error" in mcp_server.references(refs_store, "nope")
+
+
 def test_impact_over_inherits_gives_all_descendants(hierarchy: GraphStore) -> None:
     result = mcp_server.impact(hierarchy, BASE, kind="inherits")
     assert {r["symbol"] for r in result["reached_by"]} == {DERIVED, LEAF}

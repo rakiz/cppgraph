@@ -4,6 +4,30 @@ _Last updated: 2026-07-15_
 
 ## Where we are
 
+`references` landed as an exact **location index** (approach "C", on by default;
+opt out with `cppgraph build --no-references`). Every non-local, non-definition
+occurrence is recorded as `symbol → file:line` with *no* enclosing attribution —
+so 100% exact, zero heuristic. Deliberately not edges: a reference edge's "who
+references" would need the same nearest-preceding proxy as `calls`, but
+references live disproportionately in class bodies (field/param/return types),
+exactly where that proxy fails. Locations sidestep it. The query returns
+coordinates, or — with `--root` — the snippet the tool reads itself (same dual
+mode as `explain`, reusing `read_source_snippet`). CLI `references`, MCP
+`find_references` (returns `available: false` if the graph lacks the index).
+Incremental `update` refreshes references for changed files too (store carries a
+`has_references` meta flag; GC now considers refs, not just edges). Verified on
+the real pipeline graph: `ResumeTokenData#` — a plain struct with 0 callers and
+0 subclasses — has **155 exact use sites**, `--root` serving the parameter-type
+usages the call graph is blind to. Cost is modest (full mongo: 5.3M deduped
+locations, store 323 MB → 468 MB / +45%, build ~40 s vs ~23 s), so it's on by
+default; `--no-references` gives the leaner store. 110 tests green.
+
+When scip-clang emits `enclosing_range` (PR #504), attributed reference *edges*
+(traversable, exact via containment) become worth adding as an opt-in — approach
+"A" (type-only) / "B" (all). Tracked in TODO.md; locations-only until then.
+
+## Where we were (inherits edges)
+
 `inherits` edges landed (derived → base). scip-clang emits `is_implementation`
 for *both* class inheritance and method override; the builder splits them by
 SCIP descriptor kind — type→type (`#`→`#`) becomes `inherits`, method→method
@@ -189,18 +213,19 @@ C++-general, MongoDB-first.
 
 ## Exact next step
 
-Phases 2 and 3 are complete, plus `inherits` edges: SQLite `GraphStore`; the CLI
-queries `find`, `callers`, `callees`, `bases`, `subtypes`, `path`, `impact`
-(`--kind calls|inherits`), `explain`, `status`; incremental `cppgraph update` +
-`reindex.sh --update`; the `cppgraph-mcp` server exposing all of it to an LLM
-(see "Where we are"). The declaration-context false-positive is closed as a
-fundamental scip-clang limitation (see "Known limitation"), tracked on PR #504.
+Phases 2 and 3 are complete, plus `inherits` edges and the `references` location
+index: SQLite `GraphStore`; the CLI queries `find`, `callers`, `callees`,
+`bases`, `subtypes`, `references`, `path`, `impact` (`--kind calls|inherits`),
+`explain`, `status`; incremental `cppgraph update` + `reindex.sh --update`; the
+`cppgraph-mcp` server (10 tools) exposing all of it to an LLM. The
+declaration-context false-positive is closed as a fundamental scip-clang
+limitation (see "Known limitation"), tracked on PR #504.
 
-Next is the **`references` scope decision** (deferred — see "Where we are" and
-TODO.md): it's the one remaining edge type, but it's ~3× the store and leans on
-the nearest-preceding proxy, so pick a scope (type-refs only / all / locations-
-not-edges) before building. After that: the Serena comparison (TODO Phase 3
-item 2), then Phase 4 (generalize / open-source).
+Next is the **Serena comparison** on a real design question (TODO Phase 3
+item 2): does cppgraph's compiler-exact impact/references beat Serena's
+LSP-driven navigation for a concrete "what does changing X affect?" question?
+After that, Phase 4 (generalize / open-source). Attributed reference *edges*
+(approach A/B) stay parked until `enclosing_range` (PR #504) lands.
 
 To run the MCP server:
 `.venv/bin/cppgraph-mcp --graph scratch/mongo_full.graph.db --root /Users/sebastien.mendez/code/mongo`

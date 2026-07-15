@@ -80,6 +80,15 @@ def main(argv: list[str] | None = None) -> int:
         help="mark the indexed sources as having uncommitted changes "
         "(pair with --source-commit; auto-detected otherwise)",
     )
+    p_build.add_argument(
+        "--references",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="build the exact reference-location index (every non-local use of "
+        "a symbol as file:line) — answers 'where is this type/symbol used?', the "
+        "dependency the call graph is blind to. On by default; pass "
+        "--no-references for a leaner store (measured +45% size on full mongo).",
+    )
 
     p_update = sub.add_parser(
         "update",
@@ -123,6 +132,25 @@ def main(argv: list[str] | None = None) -> int:
     p_subtypes = sub.add_parser("subtypes", help="direct subclasses of a type")
     p_subtypes.add_argument("--graph", required=True, help="path to a graph store built by `cppgraph build`")
     p_subtypes.add_argument("symbol", help="exact SCIP symbol string of a type (see `find`)")
+
+    p_refs = sub.add_parser(
+        "references",
+        help="exact use sites of a symbol (unless the graph was built --no-references)",
+    )
+    p_refs.add_argument("--graph", required=True, help="path to a graph store built by `cppgraph build`")
+    p_refs.add_argument("symbol", help="exact SCIP symbol string (see `find`)")
+    p_refs.add_argument(
+        "--root", default=None,
+        help="checkout root to read source snippets from (a runtime argument, "
+        "never stored). Omit for coordinates (file:line) only.",
+    )
+    p_refs.add_argument(
+        "--context", type=int, default=0, metavar="N",
+        help="lines of source context around each use site, with --root (default: 0)",
+    )
+    p_refs.add_argument(
+        "--limit", type=int, default=50, help="max use sites to print (default: 50)"
+    )
 
     p_path = sub.add_parser("path", help="shortest call chain from one symbol to another")
     p_path.add_argument("--graph", required=True, help="path to a graph store built by `cppgraph build`")
@@ -177,14 +205,18 @@ def main(argv: list[str] | None = None) -> int:
         index = scip_pb2.Index()
         with open(args.scip, "rb") as f:
             index.ParseFromString(f.read())
-        graph = build_graph(index)
+        graph = build_graph(index, include_references=args.references)
         meta = build_provenance(
             index,
             source_commit=args.source_commit,
             source_dirty=True if args.source_dirty else None,
         )
         write_sqlite(graph, args.out, meta=meta)
-        print(f"[cppgraph] built graph: {len(graph.nodes)} nodes, {len(graph.edges)} edges -> {args.out}")
+        refs_note = f", {len(graph.references)} refs" if graph.references else ""
+        print(
+            f"[cppgraph] built graph: {len(graph.nodes)} nodes, "
+            f"{len(graph.edges)} edges{refs_note} -> {args.out}"
+        )
         commit = meta.get("source_commit")
         if commit:
             dirty = " (dirty)" if meta.get("source_dirty") == "true" else ""
@@ -261,6 +293,30 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[cppgraph] {len(subs)} subclass(es) of {args.symbol}")
         for node in subs:
             _print_node(node)
+        return 0
+
+    if args.command == "references":
+        store = GraphStore(args.graph)
+        if not store.has_symbol(args.symbol):
+            parser.error(f"unknown symbol: {args.symbol} (use `cppgraph find` to look it up)")
+        refs = store.references_of(args.symbol)
+        if not refs and store.meta().get("has_references") != "true":
+            print("[cppgraph] this graph was built with --no-references (no location index)")
+            return 1
+        print(f"[cppgraph] {len(refs)} use site(s) of {args.symbol}")
+        for ref in refs[: args.limit]:
+            line = ref.line + 1 if ref.line is not None else "?"
+            print(f"  {ref.file}:{line}")
+            if args.root is not None and ref.file is not None and ref.line is not None:
+                snippet = read_source_snippet(args.root, ref.file, ref.line, context=args.context)
+                if snippet is None:
+                    print(f"    (source not found at {args.root}/{ref.file})")
+                else:
+                    for lineno, text in snippet:
+                        marker = ">" if lineno == ref.line else " "
+                        print(f"    {marker} {lineno + 1:>6} | {text}")
+        if len(refs) > args.limit:
+            print(f"  ... and {len(refs) - args.limit} more")
         return 0
 
     if args.command == "path":

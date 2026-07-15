@@ -73,7 +73,15 @@ def _occurrence_start_line(occ: scip_pb2.Occurrence) -> int | None:
     return None
 
 
-def build_graph(index: scip_pb2.Index) -> Graph:
+def build_graph(index: scip_pb2.Index, *, include_references: bool = True) -> Graph:
+    """Build the graph from a SCIP index.
+
+    `include_references` (default on) collects an exact reference-location index
+    (`Graph.references`): every non-local, non-definition occurrence as
+    `symbol -> file:line`, with no enclosing attribution (so no heuristic, 100%
+    exact). Set False to skip it and get a leaner store (measured +45% size on
+    full mongo). See DESIGN.md § Graph model.
+    """
     graph = Graph()
 
     for doc in index.documents:
@@ -128,5 +136,20 @@ def build_graph(index: scip_pb2.Index) -> Graph:
                 continue  # no enclosing callable definition found in this document
             _, caller_symbol = callable_defs[pos]
             graph.add_edge("calls", caller_symbol, occ.symbol, doc.relative_path, line)
+
+        if include_references:
+            # Exact location index: every non-local use of a symbol, as-is. No
+            # attribution to an enclosing definition — that's the whole point of
+            # the "C" approach (no nearest-preceding heuristic, no class-body
+            # false positives). `local ...` symbols are function-scoped noise.
+            for occ in doc.occurrences:
+                if occ.symbol_roles & (DEFINITION | FORWARD_DEFINITION):
+                    continue
+                if occ.symbol.startswith("local "):
+                    continue
+                line = _occurrence_start_line(occ)
+                if line is None:
+                    continue
+                graph.add_reference(occ.symbol, doc.relative_path, line)
 
     return graph

@@ -26,10 +26,27 @@ class Edge:
 
 
 @dataclass
+class Reference:
+    """A single non-definition use of a symbol at a source location.
+
+    Unlike an `Edge`, a reference has no `src`: it is an exact position where the
+    symbol is used, not an attributed symbol→symbol relationship. This is the
+    "C" approach to references (see DESIGN.md § Graph model) — 100% exact, no
+    enclosing-definition heuristic.
+    """
+
+    symbol: str
+    file: str
+    line: int | None = None
+
+
+@dataclass
 class Graph:
     nodes: dict[str, Node] = field(default_factory=dict)
     edges: list[Edge] = field(default_factory=list)
+    references: list[Reference] = field(default_factory=list)
     _edge_keys: set[tuple] = field(default_factory=set, repr=False)
+    _ref_keys: set[tuple] = field(default_factory=set, repr=False)
 
     def add_node(self, symbol: str, *, display_name: str = "") -> Node:
         node = self.nodes.get(symbol)
@@ -48,6 +65,23 @@ class Graph:
             return
         self._edge_keys.add(key)
         self.edges.append(Edge(kind=kind, src=src, dst=dst, file=file, line=line))
+
+    def add_reference(self, symbol: str, file: str, line: int | None = None) -> None:
+        """Record a use of `symbol` at `file:line`, deduped by (symbol, file,
+        line) — a header included by N TUs surfaces the same occurrence N times.
+
+        The referenced symbol becomes a node so it is interned and findable even
+        if it is defined outside the indexed set (e.g. a `std::` type used here).
+        """
+        self.add_node(symbol)
+        key = (symbol, file, line)
+        if key in self._ref_keys:
+            return
+        self._ref_keys.add(key)
+        self.references.append(Reference(symbol=symbol, file=file, line=line))
+
+    def references_of(self, symbol: str) -> list[Reference]:
+        return [r for r in self.references if r.symbol == symbol]
 
     def callers_of(self, symbol: str) -> list[Edge]:
         return [e for e in self.edges if e.kind == "calls" and e.dst == symbol]

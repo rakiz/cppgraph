@@ -126,6 +126,52 @@ def test_implements_relationship_becomes_an_edge() -> None:
     assert not [e for e in graph.edges if e.kind == "inherits"]
 
 
+def test_references_collected_by_default_and_skippable() -> None:
+    typ = "cxx . . $ mongo/ResumeTokenData#"
+    user = "cxx . . $ mongo/Consumer#use()."
+    doc = scip_pb2.Document(relative_path="consumer.cpp")
+    doc.occurrences.append(_occurrence(user, 10, roles=DEFINITION))
+    doc.occurrences.append(_occurrence(typ, 12))  # a plain use of the type
+    doc.occurrences.append(_occurrence(typ, 20))
+    index = scip_pb2.Index(documents=[doc])
+
+    # on by default
+    graph = build_graph(index)
+    refs = graph.references_of(typ)
+    assert {r.line for r in refs} == {12, 20}
+    assert all(r.file == "consumer.cpp" for r in refs)
+    # the referenced type becomes a node so it's interned/findable
+    assert typ in graph.nodes
+
+    # skippable for a leaner store
+    assert build_graph(index, include_references=False).references == []
+
+
+def test_references_exclude_definitions_and_locals() -> None:
+    sym = "cxx . . $ mongo/Foo#"
+    local = "local 4"
+    doc = scip_pb2.Document(relative_path="f.cpp")
+    doc.occurrences.append(_occurrence(sym, 5, roles=DEFINITION))  # def, not a ref
+    doc.occurrences.append(_occurrence(sym, 9))                    # a real ref
+    doc.occurrences.append(_occurrence(local, 9))                  # local, skipped
+    index = scip_pb2.Index(documents=[doc])
+
+    graph = build_graph(index, include_references=True)
+    assert {r.line for r in graph.references_of(sym)} == {9}
+    assert graph.references_of(local) == []
+
+
+def test_references_deduped_across_header_includes() -> None:
+    sym = "cxx . . $ mongo/Foo#"
+    # same occurrence surfacing from two TUs after scip-clang merges indexes
+    docs = [scip_pb2.Document(relative_path="foo.h") for _ in range(2)]
+    for d in docs:
+        d.occurrences.append(_occurrence(sym, 3))
+    index = scip_pb2.Index(documents=docs)
+    graph = build_graph(index, include_references=True)
+    assert len(graph.references_of(sym)) == 1
+
+
 def test_type_definition_site_is_recorded() -> None:
     # A class definition occurrence should set the node's file/line, so
     # `find`/`explain`/`bases`/`subtypes` can locate a type — not just callables.

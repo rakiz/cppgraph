@@ -326,6 +326,47 @@ def test_impact_lists_transitive_callers(graph_path: Path, capsys: pytest.Captur
 
 
 @pytest.fixture
+def refs_graph(tmp_path: Path) -> Path:
+    graph = Graph()
+    graph.add_reference("cxx . . $ mongo/ResumeTokenData#", "a.cpp", 10)
+    graph.add_reference("cxx . . $ mongo/ResumeTokenData#", "b.cpp", 41)
+    path = tmp_path / "r.db"
+    write_sqlite(graph, path)
+    return path
+
+
+def test_references_lists_use_sites(refs_graph: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["references", "--graph", str(refs_graph), "cxx . . $ mongo/ResumeTokenData#"]) == 0
+    out = capsys.readouterr().out
+    assert "2 use site(s)" in out
+    assert "a.cpp:11" in out  # 0-indexed 10 -> 1-indexed 11
+    assert "b.cpp:42" in out
+
+
+def test_references_without_index_returns_nonzero(
+    graph_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # graph_path has no reference index; the symbol exists as a node
+    code = main(["references", "--graph", str(graph_path), "cxx . . $ mongo/Foo#makeResumeToken(a1)."])
+    out = capsys.readouterr().out
+    assert code == 1
+    assert "--no-references" in out
+
+
+def test_references_with_root_shows_snippet(refs_graph: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    root = tmp_path / "co"
+    root.mkdir()
+    (root / "a.cpp").write_text("\n".join(f"line {i}" for i in range(50)))
+    (root / "b.cpp").write_text("\n".join(f"line {i}" for i in range(50)))
+    assert main(
+        ["references", "--graph", str(refs_graph), "--root", str(root),
+         "cxx . . $ mongo/ResumeTokenData#"]
+    ) == 0
+    out = capsys.readouterr().out
+    assert "line 10" in out  # the source at a.cpp:10 (0-indexed)
+
+
+@pytest.fixture
 def hierarchy_graph(tmp_path: Path) -> Path:
     graph = Graph()
     graph.add_edge("inherits", "cxx . . $ mongo/Derived#", "cxx . . $ mongo/Base#", file="d.h", line=2)

@@ -31,7 +31,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from cppgraph.builder import build_graph
-from cppgraph.model import Edge, Graph, Node
+from cppgraph.model import Edge, Graph, Node, Reference
 
 if TYPE_CHECKING:
     from cppgraph.proto import scip_pb2
@@ -55,6 +55,15 @@ CREATE TABLE edges (
     file_id INTEGER,
     line    INTEGER
 );
+-- Exact reference-location index (opt-in, `cppgraph build --references`): each
+-- non-local use of a symbol as symbol_id -> file:line, with NO enclosing
+-- attribution. See DESIGN.md § Graph model ("C" approach). Empty unless the
+-- graph was built with references.
+CREATE TABLE refs (
+    symbol_id INTEGER NOT NULL,
+    file_id   INTEGER,
+    line      INTEGER
+);
 -- Provenance: what was indexed. `source_commit` is the anchor for an
 -- incremental `cppgraph update` (git-diff the stored commit against HEAD to
 -- learn exactly which files changed). See DESIGN.md § "Keeping the graph up
@@ -70,6 +79,7 @@ _INDEXES = """
 CREATE INDEX ix_sym ON symbols(symbol);   -- exact symbol -> id resolution
 CREATE INDEX ix_src ON edges(src_id);     -- callees_of / forward traversal
 CREATE INDEX ix_dst ON edges(dst_id);     -- callers_of / reverse traversal
+CREATE INDEX ix_refs ON refs(symbol_id);  -- references_of a symbol
 """
 
 # SQLite caps host-variable count per statement (default 999 historically).
@@ -216,15 +226,23 @@ def write_sqlite(
             (e.kind, sym_ids[e.src], sym_ids[e.dst], file_id(e.file), e.line)
             for e in graph.edges
         ]
+        # add_reference interns the symbol as a node, so sym_ids covers it.
+        ref_rows = [
+            (sym_ids[r.symbol], file_id(r.file), r.line) for r in graph.references
+        ]
 
         all_meta = dict(meta or {})
         all_meta.setdefault("node_count", str(len(graph.nodes)))
         all_meta.setdefault("edge_count", str(len(graph.edges)))
+        if graph.references:
+            all_meta.setdefault("has_references", "true")
+            all_meta.setdefault("ref_count", str(len(graph.references)))
 
         con.executemany("INSERT INTO files VALUES (?, ?)",
                         [(fid, p) for p, fid in file_ids.items()])
         con.executemany("INSERT INTO symbols VALUES (?, ?, ?, ?, ?)", sym_rows)
         con.executemany("INSERT INTO edges VALUES (?, ?, ?, ?, ?)", edge_rows)
+        con.executemany("INSERT INTO refs VALUES (?, ?, ?)", ref_rows)
         con.executemany("INSERT INTO meta VALUES (?, ?)", all_meta.items())
         con.executescript(_INDEXES)
         con.commit()
@@ -265,11 +283,14 @@ def update_store(
     is exactly the Document that produced it, so replacing a file's edges never
     needs cross-file analysis.
     """
-    partial_graph = build_graph(partial_index)
     changed_files = {doc.relative_path for doc in partial_index.documents}
     changed_files.update(deleted_files)
     store = GraphStore(path)
     try:
+        # Match the store: if it carries a reference-location index, rebuild
+        # references for the changed files too, else they'd be silently dropped.
+        include_references = store.meta().get("has_references") == "true"
+        partial_graph = build_graph(partial_index, include_references=include_references)
         return store.apply_update(partial_graph, changed_files, meta=meta)
     finally:
         store.close()
@@ -439,6 +460,29 @@ class GraphStore:
         ).fetchall()
         return [Node(symbol=r[0], display_name=r[1] or "", file=r[2], line=r[3]) for r in rows]
 
+    def references_of(self, symbol: str) -> list[Reference]:
+        """Exact use sites of `symbol` (the `--references` location index).
+
+        Returns positions only, no attributed source symbol. Empty if the graph
+        was built without `--references` (or predates the `refs` table).
+        """
+        sym_id = self._symbol_id(symbol)
+        if sym_id is None:
+            return []
+        try:
+            rows = self._con.execute(
+                """
+                SELECT f.path, r.line
+                FROM refs r LEFT JOIN files f ON f.id = r.file_id
+                WHERE r.symbol_id = ?
+                ORDER BY f.path, r.line
+                """,
+                (sym_id,),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return []  # store predates the refs table
+        return [Reference(symbol=symbol, file=r[0], line=r[1]) for r in rows]
+
     # --- traversals (indexed neighbour lookups, never a full load) ---------
 
     def shortest_call_path(self, src: str, dst: str) -> list[Edge] | None:
@@ -592,10 +636,15 @@ class GraphStore:
                     f"SELECT id FROM symbols WHERE file_id IN ({ph})", chunk
                 ):
                     gc_candidates.add(sid)
+                for (sid,) in con.execute(
+                    f"SELECT symbol_id FROM refs WHERE file_id IN ({ph})", chunk
+                ):
+                    gc_candidates.add(sid)
 
-                # (2) delete the changed files' edges; clear defs sited there.
+                # (2) delete the changed files' edges + refs; clear defs sited there.
                 cur = con.execute(f"DELETE FROM edges WHERE file_id IN ({ph})", chunk)
                 edges_removed += cur.rowcount
+                con.execute(f"DELETE FROM refs WHERE file_id IN ({ph})", chunk)
                 con.execute(
                     f"UPDATE symbols SET file_id = NULL, line = NULL WHERE file_id IN ({ph})",
                     chunk,
@@ -607,6 +656,7 @@ class GraphStore:
             sym_id = self._bulk_intern("symbols", "symbol", partial.nodes)
             partial_files = [n.file for n in partial.nodes.values() if n.file]
             partial_files += [e.file for e in partial.edges if e.file]
+            partial_files += [r.file for r in partial.references if r.file]
             file_id = self._bulk_intern("files", "path", partial_files)
 
             con.executemany(
@@ -634,8 +684,16 @@ class GraphStore:
                     for e in partial.edges
                 ],
             )
+            con.executemany(
+                "INSERT INTO refs(symbol_id, file_id, line) VALUES (?, ?, ?)",
+                [
+                    (sym_id[r.symbol], file_id.get(r.file) if r.file else None, r.line)
+                    for r in partial.references
+                ],
+            )
 
-            # (4) GC candidates now orphaned (undefined and unreferenced).
+            # (4) GC candidates now orphaned (undefined, and unreferenced by any
+            # edge or ref location) so `find` doesn't surface stale symbols.
             symbols_removed = 0
             for sid in gc_candidates:
                 row = con.execute(
@@ -648,15 +706,22 @@ class GraphStore:
                     (sid, sid),
                 ).fetchone()
                 if referenced is None:
+                    referenced = con.execute(
+                        "SELECT 1 FROM refs WHERE symbol_id = ? LIMIT 1", (sid,)
+                    ).fetchone()
+                if referenced is None:
                     con.execute("DELETE FROM symbols WHERE id = ?", (sid,))
                     symbols_removed += 1
 
             # (5) refresh meta: provided provenance + recomputed counts.
             node_count = con.execute("SELECT COUNT(*) FROM symbols").fetchone()[0]
             edge_count = con.execute("SELECT COUNT(*) FROM edges").fetchone()[0]
+            ref_count = con.execute("SELECT COUNT(*) FROM refs").fetchone()[0]
             all_meta = dict(meta or {})
             all_meta["node_count"] = str(node_count)
             all_meta["edge_count"] = str(edge_count)
+            if ref_count:
+                all_meta["ref_count"] = str(ref_count)
             con.executemany(
                 "INSERT OR REPLACE INTO meta VALUES (?, ?)", all_meta.items()
             )
