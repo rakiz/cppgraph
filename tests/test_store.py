@@ -12,7 +12,7 @@ from pathlib import Path
 
 from cppgraph.model import Graph
 from cppgraph.proto import scip_pb2
-from cppgraph.store import GraphStore, build_provenance, write_sqlite
+from cppgraph.store import GraphStore, build_provenance, update_store, write_sqlite
 
 METHOD = "cxx . . $ mongo/Foo#makeResumeToken(a1)."
 CALLER = "cxx . . $ mongo/Foo#caller(a2)."
@@ -244,6 +244,150 @@ def test_build_provenance_autodetects_commit_on_this_repo() -> None:
     assert "source_commit" in meta
     assert len(meta["source_commit"]) == 40  # full SHA-1
     assert meta["source_dirty"] in ("true", "false")
+
+
+# --- incremental update -----------------------------------------------------
+#
+# A partial re-index (only changed TUs) must replace exactly the changed files'
+# contributions and leave everything else byte-for-byte intact — the whole point
+# of the document-local builder (see DESIGN.md § "Keeping the graph up to date").
+
+
+def _partial_index(*paths: str) -> scip_pb2.Index:
+    """A partial SCIP index containing (empty) Documents for `paths`, so the
+    update knows which files were re-indexed even when they now produce no
+    edges. Callers add occurrences to the returned documents as needed."""
+    index = scip_pb2.Index()
+    for p in paths:
+        index.documents.add(relative_path=p)
+    return index
+
+
+def _add_call(doc: scip_pb2.Document, caller: str, callee: str, *, def_line: int, call_line: int) -> None:
+    """Add a callable definition and a call to `callee` attributed to it."""
+    d = doc.occurrences.add(symbol=caller, symbol_roles=scip_pb2.SymbolRole.Definition)
+    d.range.extend([def_line, 0, 3])
+    c = doc.occurrences.add(symbol=callee)
+    c.range.extend([call_line, 0, 3])
+
+
+def test_update_replaces_only_changed_files_edges(tmp_path: Path) -> None:
+    db = tmp_path / "graph.db"
+    original = Graph()
+    original.add_edge("calls", "a().", "old().", file="foo.cpp", line=5)
+    original.add_edge("calls", "c().", "d().", file="bar.cpp", line=9)
+    write_sqlite(original, db)
+
+    # foo.cpp re-indexed: a() now calls new() instead of old(). bar.cpp untouched.
+    partial = _partial_index("foo.cpp")
+    _add_call(partial.documents[0], "a().", "new().", def_line=2, call_line=6)
+    update_store(db, partial)
+
+    store = GraphStore(db)
+    assert [e.dst for e in store.callees_of("a().")] == ["new()."]
+    # bar.cpp's edge is left exactly as it was.
+    assert [e.dst for e in store.callees_of("c().")] == ["d()."]
+
+
+def test_update_garbage_collects_orphaned_symbols(tmp_path: Path) -> None:
+    db = tmp_path / "graph.db"
+    original = Graph()
+    original.add_edge("calls", "a().", "old().", file="foo.cpp", line=5)
+    write_sqlite(original, db)
+    assert GraphStore(db).has_symbol("old().")
+
+    # foo.cpp re-indexed with no reference to old() anymore.
+    partial = _partial_index("foo.cpp")
+    _add_call(partial.documents[0], "a().", "new().", def_line=2, call_line=6)
+    update_store(db, partial)
+
+    store = GraphStore(db)
+    # old() is now referenced by nothing and defined nowhere -> gone from `find`.
+    assert not store.has_symbol("old().")
+    assert store.find("old().") == []
+
+
+def test_update_keeps_symbol_still_referenced_elsewhere(tmp_path: Path) -> None:
+    db = tmp_path / "graph.db"
+    original = Graph()
+    original.add_edge("calls", "a().", "shared().", file="foo.cpp", line=5)
+    original.add_edge("calls", "b().", "shared().", file="bar.cpp", line=7)
+    write_sqlite(original, db)
+
+    # foo.cpp re-indexed: a() no longer calls shared(). But bar.cpp still does.
+    partial = _partial_index("foo.cpp")
+    _add_call(partial.documents[0], "a().", "other().", def_line=2, call_line=6)
+    update_store(db, partial)
+
+    store = GraphStore(db)
+    assert store.has_symbol("shared().")  # kept: bar.cpp still calls it
+    assert [e.src for e in store.callers_of("shared().")] == ["b()."]
+
+
+def test_update_adds_brand_new_file(tmp_path: Path) -> None:
+    db = tmp_path / "graph.db"
+    original = Graph()
+    original.add_edge("calls", "a().", "b().", file="foo.cpp", line=5)
+    write_sqlite(original, db)
+
+    partial = _partial_index("baz.cpp")
+    _add_call(partial.documents[0], "e().", "f().", def_line=2, call_line=6)
+    update_store(db, partial)
+
+    store = GraphStore(db)
+    assert [e.dst for e in store.callees_of("e().")] == ["f()."]
+    assert [e.dst for e in store.callees_of("a().")] == ["b()."]  # untouched
+
+
+def test_update_removes_deleted_file(tmp_path: Path) -> None:
+    db = tmp_path / "graph.db"
+    original = Graph()
+    original.add_edge("calls", "a().", "b().", file="foo.cpp", line=5)
+    original.add_edge("calls", "c().", "d().", file="gone.cpp", line=9)
+    write_sqlite(original, db)
+
+    # gone.cpp deleted from the tree: no Document in the partial index, passed
+    # explicitly as deleted.
+    update_store(db, _partial_index(), deleted_files=["gone.cpp"])
+
+    store = GraphStore(db)
+    assert not store.has_symbol("c().")
+    assert not store.has_symbol("d().")
+    assert [e.dst for e in store.callees_of("a().")] == ["b()."]  # foo.cpp untouched
+
+
+def test_update_clears_stale_edges_when_file_now_empty(tmp_path: Path) -> None:
+    """A changed file that no longer produces any edge must still have its old
+    edges cleared — the re-indexed Document is present even with no occurrences,
+    which is why the changed-file set comes from the index, not the partial graph."""
+    db = tmp_path / "graph.db"
+    original = Graph()
+    original.add_edge("calls", "a().", "b().", file="foo.cpp", line=5)
+    write_sqlite(original, db)
+
+    update_store(db, _partial_index("foo.cpp"))  # foo.cpp now empty
+
+    store = GraphStore(db)
+    assert store.callees_of("a().") == []
+    assert not store.has_symbol("b().")
+
+
+def test_update_recomputes_meta_counts_and_provenance(tmp_path: Path) -> None:
+    db = tmp_path / "graph.db"
+    original = Graph()
+    original.add_edge("calls", "a().", "b().", file="foo.cpp", line=5)
+    write_sqlite(original, db, meta={"source_commit": "oldcommit"})
+
+    partial = _partial_index("foo.cpp")
+    _add_call(partial.documents[0], "a().", "b().", def_line=2, call_line=6)
+    _add_call(partial.documents[0], "a().", "c().", def_line=2, call_line=7)
+    update_store(db, partial, meta={"source_commit": "newcommit"})
+
+    meta = GraphStore(db).meta()
+    assert meta["source_commit"] == "newcommit"
+    assert meta["edge_count"] == "2"  # a->b, a->c
+    # nodes: a, b, c
+    assert meta["node_count"] == "3"
 
 
 def test_implements_edges_are_stored(tmp_path: Path) -> None:

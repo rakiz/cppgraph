@@ -23,11 +23,14 @@ from __future__ import annotations
 import sqlite3
 import subprocess
 from collections import deque
+from collections.abc import Iterable
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from importlib import metadata as importlib_metadata
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from cppgraph.builder import build_graph
 from cppgraph.model import Edge, Graph, Node
 
 if TYPE_CHECKING:
@@ -207,11 +210,56 @@ def write_sqlite(
         con.close()
 
 
+@dataclass
+class UpdateStats:
+    """What an incremental update touched — for `cppgraph update`'s summary."""
+
+    files_changed: int
+    edges_removed: int
+    edges_added: int
+    symbols_removed: int
+    node_count: int
+    edge_count: int
+
+
+def update_store(
+    path: str | Path,
+    partial_index: scip_pb2.Index,
+    *,
+    deleted_files: Iterable[str] = (),
+    meta: dict[str, str] | None = None,
+) -> UpdateStats:
+    """Apply a partial re-index to an existing store in place.
+
+    `partial_index` is the SCIP index of *only the changed translation units*
+    (re-indexed after a `git diff`); `deleted_files` are source paths removed
+    from the tree entirely (no Document in the partial index). The set of files
+    whose old contributions to invalidate is taken from the partial index's
+    Documents — not the rebuilt graph — so a file that changed to produce *no*
+    edges still gets its stale edges cleared (see DESIGN.md § "Keeping the graph
+    up to date").
+
+    Correctness rests on the builder being document-local: every edge's `file`
+    is exactly the Document that produced it, so replacing a file's edges never
+    needs cross-file analysis.
+    """
+    partial_graph = build_graph(partial_index)
+    changed_files = {doc.relative_path for doc in partial_index.documents}
+    changed_files.update(deleted_files)
+    store = GraphStore(path)
+    try:
+        return store.apply_update(partial_graph, changed_files, meta=meta)
+    finally:
+        store.close()
+
+
 class GraphStore:
-    """Read-only query handle over a SQLite store written by `write_sqlite`.
+    """Query + incremental-update handle over a SQLite store written by
+    `write_sqlite`.
 
     Mirrors the query surface of the in-memory `Graph` (callers_of, callees_of,
-    find, shortest_call_path, impact) so the CLI is agnostic to the backend.
+    find, shortest_call_path, impact) so the CLI is agnostic to the backend, and
+    adds `apply_update` for in-place partial re-indexing.
     """
 
     def __init__(self, path: str | Path) -> None:
@@ -394,3 +442,160 @@ class GraphStore:
 
         visited.discard(start_id)
         return set(self._symbols_for_ids(visited).values())
+
+    # --- incremental update ------------------------------------------------
+
+    def _bulk_intern(self, table: str, col: str, values: Iterable[str]) -> dict[str, int]:
+        """Map each value in `values` to an integer id in `table.col`, inserting
+        rows for values not already present. Resolves existing ids with chunked
+        `IN (...)` lookups and assigns new ids in one `executemany` — so a large
+        partial re-index is a handful of bulk statements, not a per-row probe.
+
+        `table`/`col` are internal literals, never user input.
+        """
+        values = list(dict.fromkeys(values))  # dedup, keep order
+        mapping: dict[str, int] = {}
+        for start in range(0, len(values), _ID_CHUNK):
+            chunk = values[start:start + _ID_CHUNK]
+            ph = ",".join("?" * len(chunk))
+            for vid, val in self._con.execute(
+                f"SELECT id, {col} FROM {table} WHERE {col} IN ({ph})", chunk
+            ):
+                mapping[val] = vid
+        missing = [v for v in values if v not in mapping]
+        if missing:
+            (max_id,) = self._con.execute(f"SELECT MAX(id) FROM {table}").fetchone()
+            next_id = 0 if max_id is None else max_id + 1
+            new_rows = []
+            for v in missing:
+                mapping[v] = next_id
+                new_rows.append((next_id, v))
+                next_id += 1
+            self._con.executemany(
+                f"INSERT INTO {table}(id, {col}) VALUES (?, ?)", new_rows
+            )
+        return mapping
+
+    def _file_ids(self, paths: Iterable[str]) -> list[int]:
+        ids: list[int] = []
+        for p in paths:
+            row = self._con.execute("SELECT id FROM files WHERE path = ?", (p,)).fetchone()
+            if row is not None:
+                ids.append(row[0])
+        return ids
+
+    def apply_update(
+        self,
+        partial: Graph,
+        changed_files: Iterable[str],
+        *,
+        meta: dict[str, str] | None = None,
+    ) -> UpdateStats:
+        """Replace the contributions of `changed_files` with those in `partial`.
+
+        Steps, all in one transaction: (1) collect the symbols touched by the
+        changed files as GC candidates, (2) delete those files' edges and clear
+        the definition site of symbols defined there, (3) re-insert `partial`'s
+        nodes + edges (interning any new symbols/files), (4) drop candidate
+        symbols now orphaned (no defining site *and* no edge references them) so
+        `find` doesn't surface stale symbols, (5) refresh `meta` counts +
+        provided provenance.
+        """
+        con = self._con
+        changed_files = list(changed_files)
+        with con:  # atomic: commit on success, rollback on error
+            changed_ids = self._file_ids(changed_files)
+
+            # (1) candidate symbols for GC: endpoints of the edges we're about
+            # to delete, plus symbols whose definition lives in a changed file.
+            gc_candidates: set[int] = set()
+            edges_removed = 0
+            for start in range(0, len(changed_ids), _ID_CHUNK):
+                chunk = changed_ids[start:start + _ID_CHUNK]
+                ph = ",".join("?" * len(chunk))
+                for src_id, dst_id in con.execute(
+                    f"SELECT src_id, dst_id FROM edges WHERE file_id IN ({ph})", chunk
+                ):
+                    gc_candidates.add(src_id)
+                    gc_candidates.add(dst_id)
+                for (sid,) in con.execute(
+                    f"SELECT id FROM symbols WHERE file_id IN ({ph})", chunk
+                ):
+                    gc_candidates.add(sid)
+
+                # (2) delete the changed files' edges; clear defs sited there.
+                cur = con.execute(f"DELETE FROM edges WHERE file_id IN ({ph})", chunk)
+                edges_removed += cur.rowcount
+                con.execute(
+                    f"UPDATE symbols SET file_id = NULL, line = NULL WHERE file_id IN ({ph})",
+                    chunk,
+                )
+
+            # (3) re-insert the partial graph's nodes + edges, in bulk. Every
+            # edge endpoint is also a node (Graph.add_edge adds both), so
+            # interning the nodes covers all symbols the edges reference.
+            sym_id = self._bulk_intern("symbols", "symbol", partial.nodes)
+            partial_files = [n.file for n in partial.nodes.values() if n.file]
+            partial_files += [e.file for e in partial.edges if e.file]
+            file_id = self._bulk_intern("files", "path", partial_files)
+
+            con.executemany(
+                "UPDATE symbols SET "
+                "display_name = COALESCE(NULLIF(?, ''), display_name), "
+                "file_id = COALESCE(?, file_id), "
+                "line = COALESCE(?, line) "
+                "WHERE id = ?",
+                [
+                    (
+                        n.display_name,
+                        file_id.get(n.file) if n.file else None,
+                        n.line,
+                        sym_id[n.symbol],
+                    )
+                    for n in partial.nodes.values()
+                ],
+            )
+            con.executemany(
+                "INSERT INTO edges(kind, src_id, dst_id, file_id, line) "
+                "VALUES (?, ?, ?, ?, ?)",
+                [
+                    (e.kind, sym_id[e.src], sym_id[e.dst],
+                     file_id.get(e.file) if e.file else None, e.line)
+                    for e in partial.edges
+                ],
+            )
+
+            # (4) GC candidates now orphaned (undefined and unreferenced).
+            symbols_removed = 0
+            for sid in gc_candidates:
+                row = con.execute(
+                    "SELECT file_id FROM symbols WHERE id = ?", (sid,)
+                ).fetchone()
+                if row is None or row[0] is not None:
+                    continue  # already gone, or still defined somewhere
+                referenced = con.execute(
+                    "SELECT 1 FROM edges WHERE src_id = ? OR dst_id = ? LIMIT 1",
+                    (sid, sid),
+                ).fetchone()
+                if referenced is None:
+                    con.execute("DELETE FROM symbols WHERE id = ?", (sid,))
+                    symbols_removed += 1
+
+            # (5) refresh meta: provided provenance + recomputed counts.
+            node_count = con.execute("SELECT COUNT(*) FROM symbols").fetchone()[0]
+            edge_count = con.execute("SELECT COUNT(*) FROM edges").fetchone()[0]
+            all_meta = dict(meta or {})
+            all_meta["node_count"] = str(node_count)
+            all_meta["edge_count"] = str(edge_count)
+            con.executemany(
+                "INSERT OR REPLACE INTO meta VALUES (?, ?)", all_meta.items()
+            )
+
+        return UpdateStats(
+            files_changed=len(changed_files),
+            edges_removed=edges_removed,
+            edges_added=len(partial.edges),
+            symbols_removed=symbols_removed,
+            node_count=node_count,
+            edge_count=edge_count,
+        )

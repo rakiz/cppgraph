@@ -37,22 +37,31 @@ Ordered. Check off as you go. Detail lives in `DESIGN.md`.
       read actual source (see `DESIGN.md` § "Project root is a query-time
       parameter, never stored") — not needed yet since `callers`/`callees`
       only print symbol/file/line, no source snippets.
-- [ ] **Incremental update path** (design already sketched in `DESIGN.md` §
-      "Keeping the graph up to date" — don't lose this while building the
-      full-repo store): re-index only changed TUs → merge partial `.scip`
-      documents into the full index by `relative_path` → rebuild only the
-      edges/nodes whose `Edge.file`/definition-site is one of the changed
-      files. The document-local caller-attribution design already makes this
-      possible without cross-file analysis.
+- [x] **Incremental update path** (`cppgraph update`, `store.update_store` /
+      `GraphStore.apply_update`): re-index only changed TUs → apply the partial
+      `.scip` to the store in place. The set of files whose old contributions
+      to invalidate comes from the partial index's Documents (not the rebuilt
+      graph — so a file that changed to produce *no* edges still gets its stale
+      edges cleared). For each changed file: delete its edges, clear the
+      definition site of symbols defined there, re-insert the partial graph's
+      nodes/edges in bulk (`_bulk_intern`), then GC symbols left orphaned
+      (undefined *and* unreferenced) so `find` doesn't surface stale symbols.
+      All in one transaction; SQLite maintains the indexes incrementally.
+      Verified on the full mongo store: a 519-TU partial (3833 documents,
+      ~400k edges replaced) applied in ~10 s with the `makeResumeToken`
+      over-capture preserved (3 callers, unchanged). Rests on the document-local
+      builder — a change to file A only ever invalidates edges with `file == A`.
       - [x] Provenance anchor in place: `meta.source_commit` (+`source_dirty`)
             is recorded at build (`store.build_provenance`, captured at index
             time by `reindex.sh`). `git diff --name-only <source_commit>..HEAD`
-            now gives the exact changed-file set — the input to the update.
-      - [ ] Still missing: (a) a merge function for partial `Index` → full
-            `Index`, (b) a `Graph.drop_file(path)` / row-delete-by-file_id to
-            invalidate before re-inserting, (c) a `cppgraph update` CLI command
-            wiring commit-diff → filtered re-index → merge → partial rebuild,
-            instead of always re-running `build` from scratch.
+            gives the exact changed-file set — the input to the update.
+      - [ ] Still to wire: a `reindex.sh --update <graph.db>` mode that runs
+            `git diff` from `meta.source_commit`, filters the compdb to the
+            changed TUs, re-indexes just those into a partial `.scip`, and calls
+            `cppgraph update` (with `--deleted` for removed files). The Python
+            primitive (`cppgraph update`) is done; this is the shell glue.
+            A dirty stored commit (`source_dirty`) means the diff base is
+            approximate → warn or fall back to a full rebuild.
 
 ## Phase 3 — serve to LLMs
 

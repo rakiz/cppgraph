@@ -4,6 +4,24 @@ _Last updated: 2026-07-15_
 
 ## Where we are
 
+Incremental update landed: `cppgraph update --graph <graph.db> --scip
+<partial.scip> [--deleted PATH ...] [--source-commit C]` applies a partial
+re-index (only the changed TUs) to an existing store **in place**, instead of
+rebuilding from scratch. `store.update_store` / `GraphStore.apply_update`: the
+changed-file set is the partial index's Documents (+ `--deleted`), so a file
+re-indexed to zero edges still has its stale edges cleared; for each changed
+file it deletes edges, clears defs sited there, bulk-reinserts the partial
+graph's nodes/edges (`_bulk_intern`), then GCs orphaned symbols (undefined +
+unreferenced) so `find` stays clean — all in one transaction, indexes
+maintained incrementally. Verified on the full mongo store: a 519-TU partial
+(3833 documents, ~400k edges replaced) in ~10 s, `makeResumeToken` over-capture
+preserved (3 callers). 57 tests green. Remaining glue: a `reindex.sh --update`
+mode wiring `git diff <meta.source_commit>..HEAD` → filtered compdb → partial
+`.scip` → `cppgraph update` (the Python primitive is done). See `DESIGN.md` §
+"Keeping the graph up to date".
+
+## Where we were (Phase 2 store)
+
 Phase 2 store landed: the graph now persists as an **interned SQLite store**
 (`src/cppgraph/store.py`), not flat JSON. `cppgraph build --scip <index.scip>
 --out <graph.db>` writes it; all queries (`find`/`callers`/`callees`/`path`/
@@ -96,13 +114,13 @@ C++-general, MongoDB-first.
 
 ## Exact next step
 
-Phase 2 store + queries are done (SQLite `GraphStore`, all five CLI queries).
-Remaining Phase 2 work in `TODO.md`: (a) the declaration-context
-false-positive refinement in the builder heuristic (known limitation above),
-(b) the incremental update path (`cppgraph update`: merge partial `.scip` +
-`drop_file` + re-insert — design in `DESIGN.md` § "Keeping the graph up to
-date"), (c) `explain` query + project-root runtime param when queries start
-returning source snippets.
+Phase 2 store + queries + incremental `update` are done (SQLite `GraphStore`,
+all five CLI queries, `cppgraph update`). Remaining Phase 2 work in `TODO.md`:
+(a) the declaration-context false-positive refinement in the builder heuristic
+(known limitation above), (b) the `reindex.sh --update` shell glue on top of
+the `cppgraph update` primitive (git-diff → filtered re-index → update),
+(c) `explain` query + project-root runtime param when queries start returning
+source snippets.
 
 ## Key reference symbols for the acceptance tests
 

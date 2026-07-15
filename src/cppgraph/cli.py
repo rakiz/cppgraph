@@ -8,7 +8,7 @@ import sys
 from cppgraph.builder import build_graph
 from cppgraph.model import Edge, Node
 from cppgraph.proto import scip_pb2
-from cppgraph.store import GraphStore, build_provenance, write_sqlite
+from cppgraph.store import GraphStore, build_provenance, update_store, write_sqlite
 
 
 def _print_node(node: Node) -> None:
@@ -43,6 +43,29 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="mark the indexed sources as having uncommitted changes "
         "(pair with --source-commit; auto-detected otherwise)",
+    )
+
+    p_update = sub.add_parser(
+        "update",
+        help="incrementally apply a partial re-index (only changed TUs) to an existing store",
+    )
+    p_update.add_argument("--graph", required=True, help="path to the graph store to update in place")
+    p_update.add_argument(
+        "--scip", required=True,
+        help="SCIP index of only the re-indexed (changed) translation units",
+    )
+    p_update.add_argument(
+        "--deleted", action="append", default=[], metavar="PATH",
+        help="a source file removed from the tree (no Document in --scip); repeatable",
+    )
+    p_update.add_argument(
+        "--source-commit", default=None,
+        help="commit hash of the sources after the change (the new provenance anchor); "
+        "auto-detected via git on the SCIP project_root if omitted",
+    )
+    p_update.add_argument(
+        "--source-dirty", action="store_true",
+        help="mark the updated sources as having uncommitted changes",
     )
 
     p_find = sub.add_parser("find", help="find symbols by name (SCIP symbol strings aren't memorable)")
@@ -83,6 +106,28 @@ def main(argv: list[str] | None = None) -> int:
         )
         write_sqlite(graph, args.out, meta=meta)
         print(f"[cppgraph] built graph: {len(graph.nodes)} nodes, {len(graph.edges)} edges -> {args.out}")
+        commit = meta.get("source_commit")
+        if commit:
+            dirty = " (dirty)" if meta.get("source_dirty") == "true" else ""
+            print(f"[cppgraph] source commit: {commit}{dirty}")
+        return 0
+
+    if args.command == "update":
+        index = scip_pb2.Index()
+        with open(args.scip, "rb") as f:
+            index.ParseFromString(f.read())
+        meta = build_provenance(
+            index,
+            source_commit=args.source_commit,
+            source_dirty=True if args.source_dirty else None,
+        )
+        stats = update_store(args.graph, index, deleted_files=args.deleted, meta=meta)
+        print(
+            f"[cppgraph] updated {stats.files_changed} file(s): "
+            f"-{stats.edges_removed}/+{stats.edges_added} edges, "
+            f"-{stats.symbols_removed} orphaned symbol(s) -> "
+            f"{stats.node_count} nodes, {stats.edge_count} edges"
+        )
         commit = meta.get("source_commit")
         if commit:
             dirty = " (dirty)" if meta.get("source_dirty") == "true" else ""

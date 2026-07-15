@@ -116,6 +116,40 @@ def test_build_records_source_commit_provenance(
     assert meta["project_root"] == "file:///some/repo"
 
 
+def test_update_applies_partial_reindex(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Start from a store where foo.cpp has a() calling old().
+    original = Graph()
+    original.add_edge("calls", "cxx . . $ mongo/Foo#a(a1).",
+                      "cxx . . $ mongo/Foo#old(o1).", file="foo.cpp", line=5)
+    db = tmp_path / "graph.db"
+    write_sqlite(original, db)
+
+    # Partial re-index of foo.cpp: a() now calls new().
+    index = scip_pb2.Index()
+    index.metadata.project_root = "file:///some/repo"
+    doc = index.documents.add(relative_path="foo.cpp")
+    d = doc.occurrences.add(symbol="cxx . . $ mongo/Foo#a(a1).",
+                            symbol_roles=scip_pb2.SymbolRole.Definition)
+    d.range.extend([2, 0, 3])
+    c = doc.occurrences.add(symbol="cxx . . $ mongo/Foo#new(n1).")
+    c.range.extend([6, 0, 3])
+    scip_path = tmp_path / "partial.scip"
+    scip_path.write_bytes(index.SerializeToString())
+
+    exit_code = main(["update", "--graph", str(db), "--scip", str(scip_path),
+                      "--source-commit", "newsha"])
+    assert exit_code == 0
+
+    store = GraphStore(db)
+    assert [e.dst for e in store.callees_of("cxx . . $ mongo/Foo#a(a1).")] == [
+        "cxx . . $ mongo/Foo#new(n1)."
+    ]
+    assert not store.has_symbol("cxx . . $ mongo/Foo#old(o1).")
+    assert store.meta()["source_commit"] == "newsha"
+
+
 def test_impact_lists_transitive_callers(graph_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     exit_code = main(
         ["impact", "--graph", str(graph_path), "cxx . . $ mongo/Foo#makeResumeToken(a1)."]

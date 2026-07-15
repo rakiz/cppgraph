@@ -179,24 +179,40 @@ paths, kept in mind while designing the builder so this isn't a later rewrite:
    guessing — this is why the commit is recorded in `meta` (see § Store). A
    dirty stored commit (`source_dirty`) means the diff base is approximate, so
    `update` should fall back to a full rebuild or warn.
-2. **Merging + graph rebuild** is where the design choice matters. A partial
-   `.scip`'s documents replace the corresponding `relative_path` entries in the
-   full `Index`. The graph builder is deliberately kept **document-local**:
-   caller attribution only ever looks at occurrences within the *same*
-   `Document` (nearest preceding callable-symbol definition by line), so every
-   `calls`/`implements` edge's `Edge.file` is exactly the one document that
-   produced it. This means a change to file A can only ever invalidate edges
-   where `e.file == A` — an incremental rebuild doesn't need cross-file
-   analysis, just: drop all edges/owned-node-definitions for the changed
-   file(s), re-run the per-document builder pass on their new occurrences, and
-   re-insert. Not implemented yet (Phase 1 always does a full rebuild from a
-   full `.scip`), but the document-local attribution design is what makes it
-   possible later without changing the model.
+2. **Merging + graph rebuild** is where the design choice matters. The graph
+   builder is deliberately kept **document-local**: caller attribution only ever
+   looks at occurrences within the *same* `Document` (nearest preceding
+   callable-symbol definition by line), so every `calls`/`implements` edge's
+   `Edge.file` is exactly the one document that produced it. This means a change
+   to file A can only ever invalidate edges where `e.file == A` — an incremental
+   rebuild doesn't need cross-file analysis.
+
+   **Implemented** as `cppgraph update` (`store.update_store` /
+   `GraphStore.apply_update`): rather than merging protobuf `Index`es and
+   re-writing the whole store, it mutates the store in place. The set of changed
+   files comes from the partial `.scip`'s Documents (authoritative — a file
+   re-indexed to *zero* edges still gets its stale edges cleared, which deriving
+   the set from the rebuilt graph would miss), plus any `--deleted` paths. In
+   one transaction: delete each changed file's edges, clear the definition site
+   of symbols defined there, re-insert the partial graph's nodes/edges in bulk
+   (`_bulk_intern` resolves/assigns integer ids in a handful of `executemany`s,
+   not a per-row probe), then GC symbols left orphaned — undefined *and*
+   unreferenced — so `find` never surfaces a symbol that no longer exists.
+   SQLite maintains `ix_sym`/`ix_src`/`ix_dst` incrementally, so no index
+   rebuild. Measured: a 519-TU partial (3833 documents) applied to the full
+   mongo store in ~10 s, over-capture preserved.
+
+   Caveat: the partial must be produced the *same way* as the base (same compdb
+   scope/tree). A header's occurrences are source-line-local, so re-indexing
+   only the changed TUs that include an unchanged header reproduces that
+   header's edges identically; but feeding a differently-scoped index (e.g. a
+   subsystem-only run against a full-repo store) will legitimately rewrite
+   shared-header edges to that narrower index's view.
 
 ## Serving
 
-- CLI: `build`, `callers`, `callees`, `path`, `impact` (reverse blast-radius),
-  `explain`.
+- CLI: `build`, `update` (incremental), `callers`, `callees`, `path`,
+  `impact` (reverse blast-radius), `explain`.
 - MCP server (later): expose the same queries to an LLM, token-budgeted.
 - Export: optional graphify-compatible `graph.json` purely for visualization.
 
