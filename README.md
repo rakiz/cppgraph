@@ -33,6 +33,25 @@ compile_commands.json  →  scip-clang  →  index.scip  →  cppgraph build  �
   serves queries, exposes an MCP server, and can export a graph.json for
   visualization.
 
+## Does it actually beat by-name tools?
+
+Yes, measurably. On MongoDB's `makeResumeToken` (two distinct symbols sharing a
+name), a tree-sitter tool drops the real call edges *and* collapses 431 unrelated
+`Value` sites onto one node; cppgraph returns the correct, separated caller sets.
+Full write-up with numbers and reproduction steps: **[COMPARISON.md](COMPARISON.md)**
+(cppgraph vs graphify vs Serena/LSP).
+
+## Documentation
+
+| Doc | What's in it |
+|---|---|
+| [AGENTS.md](AGENTS.md) | Working instructions, principles, guardrails — read first |
+| [DESIGN.md](DESIGN.md) | Architecture, edge model, the call-attribution heuristic + its known limitation |
+| [COMPARISON.md](COMPARISON.md) | Measured comparison vs graphify and Serena on a real design question |
+| [INSTALL.md](INSTALL.md) | Setting up a new machine (`scip-clang`, `protoc`, the venv) |
+| [TODO.md](TODO.md) | Ordered task list / roadmap |
+| [HANDOFF.md](HANDOFF.md) | Current state + exact next command (for resuming work) |
+
 ## Non-goals
 
 - Re-implementing a C++ parser. We consume a compiler index.

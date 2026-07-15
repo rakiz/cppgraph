@@ -4,6 +4,30 @@ _Last updated: 2026-07-15_
 
 ## Where we are
 
+**Tool comparison done** (`COMPARISON.md`, linked from README's new Documentation
+map). Ran the real design question — "what calls
+`ChangeStreamEventTransformation::makeResumeToken`?" — through three tools on the
+`src/mongo/db/pipeline` subsystem:
+- **graphify** (by-name, tree-sitter, v0.9.16): **0** call edges into *either*
+  `makeResumeToken` (under-capture — dropped all real calls), and **431**
+  unrelated `.getValue()`/`serialize()` sites collapsed onto one `Value` node
+  (over-capture). Confirms the thesis.
+- **cppgraph**: method **3** callers (2 real overrides + 1 known decl FP), free
+  helper **122**, kept distinct; `Value` stays hundreds of distinct symbols;
+  type `ResumeTokenData` = 0 callers but **155** exact use-sites; transitive
+  `impact` = 14 in one query.
+- **Serena/clangd** (drove its bundled clangd 19.1.2 directly on mongo's compdb):
+  compiler-grade precision *where it answers*, but `incomingCalls` gave only the
+  1 same-TU caller (~2.7 s) and `textDocument/references` stayed at **1 ref, 0
+  cross-TU after 6 min** of background indexing — mongo's ~6000-TU index doesn't
+  finish in interactive time. Matches the maintainer's "not very useful on mongo"
+  experience. Verdict: cppgraph wins for exact + transitive + offline structure;
+  Serena wins for live, in-sync, in-file navigation.
+
+Also noted a follow-up in TODO: `status` staleness is binary today; add a
+magnitude measure so it can recommend a *full rebuild* (not just incremental
+`update`) once drift is large.
+
 Store now stamps a **`schema_version`** (meta, currently 1) — the on-disk format
 version, distinct from `cppgraph_version` (the writing code). It's the migration
 enabler: a future incompatible schema change bumps it, and migration code

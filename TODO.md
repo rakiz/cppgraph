@@ -114,7 +114,18 @@ Ordered. Check off as you go. Detail lives in `DESIGN.md`.
         once attribution is exact). Until #504, edges would be heuristic-noisy
         exactly where references live (class bodies), so we deliberately do
         locations-only. See DESIGN.md § Graph model.
-- [ ] Compare usefulness against Serena on a real design question.
+- [x] Compare usefulness against Serena on a real design question. Done:
+      `COMPARISON.md` — cppgraph vs graphify (by-name, drops all real
+      `makeResumeToken` call edges + collapses 431 `Value` sites) vs
+      Serena/clangd (compiler-grade but its whole-repo background index doesn't
+      finish in interactive time on mongo: cross-TU references stuck at 1 after
+      6 min). Verdict: cppgraph wins for exact + transitive + offline structure.
+- [ ] Staleness *magnitude*, not just binary. `status --root` today is
+      fresh/STALE on any single changed C++ file and always recommends the
+      incremental `reindex.sh --update`. Add a "how far behind" measure (e.g.
+      `git rev-list --count` of commits since the indexed one, or % of TUs
+      touched) and, past a threshold, recommend a full rebuild instead of an
+      incremental update (incremental stops paying off once most TUs changed).
 
 ## Phase 4 — open-source / generalize
 
