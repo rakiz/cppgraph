@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+
+# generated protobuf bindings
+src/cppgraph/scip_pb2.py
+src/cppgraph/scip_pb2.pyi
+
+# indexes / graph outputs
+*.scip
+*.graph.json
+graph.db
+scratch/
