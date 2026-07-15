@@ -30,13 +30,20 @@ crashes on some third_party TUs.
 Nodes = symbols, identified by SCIP symbol string (stable across TUs).
 Node attrs: display name, kind, defining file+range, namespace/enclosing.
 
-Edges:
-- `calls`      caller-symbol → callee-symbol (attributed via enclosing definition
-               of a reference occurrence with a call role)
-- `references` symbol → symbol (non-call use)
-- `overrides` / `implements`  (from SCIP relationships)
-- `inherits`   type → base type
-- `defines` / `contains`  file/namespace/class → member (structural)
+Edges (implemented unless marked planned):
+- `calls`      caller-symbol → callee-symbol (attributed via nearest preceding
+               callable definition of a reference occurrence — see below)
+- `inherits`   derived type → base type (from SCIP `is_implementation`
+               relationships where both endpoints are types; queried by
+               `bases`/`subtypes` and `impact --kind inherits`)
+- `implements` override-method → overridden-method (the method→method
+               `is_implementation` relationships; the class→class ones are
+               `inherits`)
+- `references` symbol → symbol, non-call use (planned — measured cost:
+               ~778k new edges on the pipeline subsystem alone, ~3× the store
+               at full-mongo scale, and attribution leans on the same
+               nearest-preceding proxy as `calls`; scope TBD)
+- `defines` / `contains`  file/namespace/class → member, structural (planned)
 
 ## Building calls from SCIP
 
@@ -237,15 +244,18 @@ paths, kept in mind while designing the builder so this isn't a later rewrite:
 ## Serving
 
 - CLI: `build`, `update` (incremental), `find`, `callers`, `callees`, `path`,
-  `impact` (reverse blast-radius), `explain` (definition + neighbors; pass
+  `bases` / `subtypes` (direct inheritance neighbours of a type), `impact`
+  (reverse blast-radius; `--kind calls` = transitive callers, `--kind inherits`
+  = all transitive subclasses), `explain` (definition + neighbors; pass
   `--root` to also get a source snippet, omit it for coordinates only),
   `status` (source commit + drift check).
 - MCP server (`cppgraph-mcp`, `src/cppgraph/mcp_server.py`): exposes the same
   queries to an LLM, token-budgeted. FastMCP over stdio; the graph store is
   fixed at launch (`--graph <db>`, optional `--root <checkout>`) so tools never
   take — and the LLM never has to guess or repeat — a filesystem path. Tools:
-  `find`, `who_calls`, `what_it_calls`, `path`, `impact_of`, `explain_symbol`,
-  `status`. The intended loop: `status` tells the LLM whether the graph is
+  `find`, `who_calls`, `what_it_calls`, `base_classes`, `subclasses`, `path`,
+  `impact_of` (`kind` = calls|inherits), `explain_symbol`, `status`. The
+  intended loop: `status` tells the LLM whether the graph is
   current (else `reindex.sh --update`); then `impact_of`/`who_calls`/`path`/
   `explain_symbol` answer "what does this change affect?" with compiler-exact
   edges — no grep guessing, no loading files into context.

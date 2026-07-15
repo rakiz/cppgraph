@@ -122,3 +122,45 @@ def test_implements_relationship_becomes_an_edge() -> None:
     assert len(implements) == 1
     assert implements[0].src == override
     assert implements[0].dst == base
+    # method override is `implements`, never `inherits`
+    assert not [e for e in graph.edges if e.kind == "inherits"]
+
+
+def test_type_definition_site_is_recorded() -> None:
+    # A class definition occurrence should set the node's file/line, so
+    # `find`/`explain`/`bases`/`subtypes` can locate a type — not just callables.
+    cls = "cxx . . $ mongo/Widget#"
+    doc = scip_pb2.Document(relative_path="widget.h")
+    doc.symbols.append(scip_pb2.SymbolInformation(symbol=cls, display_name="Widget"))
+    doc.occurrences.append(_occurrence(cls, 41, roles=DEFINITION))
+    index = scip_pb2.Index(documents=[doc])
+
+    graph = build_graph(index)
+
+    node = graph.nodes[cls]
+    assert node.file == "widget.h"
+    assert node.line == 41
+
+
+def test_class_inheritance_becomes_inherits_edge() -> None:
+    # scip-clang emits the same is_implementation relationship for class
+    # inheritance as for method override; the two are told apart by the SCIP
+    # descriptor kind (type `#` vs method `).`). A derived class carries a
+    # relationship pointing at its base. src = derived, dst = base.
+    base = "cxx . . $ mongo/ServerParameter#"
+    derived = "cxx . . $ mongo/IDLServerParameterWithStorage#"
+
+    doc = scip_pb2.Document(relative_path="server_parameter.h")
+    sym_info = scip_pb2.SymbolInformation(symbol=derived)
+    sym_info.relationships.add(symbol=base, is_implementation=True)
+    doc.symbols.append(sym_info)
+    index = scip_pb2.Index(documents=[doc])
+
+    graph = build_graph(index)
+
+    inherits = [e for e in graph.edges if e.kind == "inherits"]
+    assert len(inherits) == 1
+    assert inherits[0].src == derived
+    assert inherits[0].dst == base
+    # class inheritance is `inherits`, never `implements`
+    assert not [e for e in graph.edges if e.kind == "implements"]

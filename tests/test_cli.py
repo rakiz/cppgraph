@@ -323,3 +323,39 @@ def test_impact_lists_transitive_callers(graph_path: Path, capsys: pytest.Captur
     assert exit_code == 0
     assert "1 symbol(s)" in out
     assert "caller(a2)." in out
+
+
+@pytest.fixture
+def hierarchy_graph(tmp_path: Path) -> Path:
+    graph = Graph()
+    graph.add_edge("inherits", "cxx . . $ mongo/Derived#", "cxx . . $ mongo/Base#", file="d.h", line=2)
+    graph.add_edge("inherits", "cxx . . $ mongo/Leaf#", "cxx . . $ mongo/Derived#", file="l.h", line=3)
+    path = tmp_path / "h.db"
+    write_sqlite(graph, path)
+    return path
+
+
+def test_bases_lists_direct_supertypes(hierarchy_graph: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["bases", "--graph", str(hierarchy_graph), "cxx . . $ mongo/Derived#"]) == 0
+    out = capsys.readouterr().out
+    assert "1 base class(es)" in out
+    assert "mongo/Base#" in out
+
+
+def test_subtypes_lists_direct_subclasses(hierarchy_graph: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["subtypes", "--graph", str(hierarchy_graph), "cxx . . $ mongo/Base#"]) == 0
+    out = capsys.readouterr().out
+    assert "1 subclass(es)" in out
+    assert "mongo/Derived#" in out
+
+
+def test_impact_kind_inherits_walks_hierarchy(
+    hierarchy_graph: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert main(
+        ["impact", "--graph", str(hierarchy_graph), "--kind", "inherits", "cxx . . $ mongo/Base#"]
+    ) == 0
+    out = capsys.readouterr().out
+    assert "2 symbol(s) transitively inherit from" in out
+    assert "mongo/Derived#" in out
+    assert "mongo/Leaf#" in out

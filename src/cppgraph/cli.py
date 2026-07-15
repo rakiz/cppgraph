@@ -116,6 +116,14 @@ def main(argv: list[str] | None = None) -> int:
     p_callees.add_argument("--graph", required=True, help="path to a graph store built by `cppgraph build`")
     p_callees.add_argument("symbol", help="exact SCIP symbol string (see `find`)")
 
+    p_bases = sub.add_parser("bases", help="direct base classes a type inherits from")
+    p_bases.add_argument("--graph", required=True, help="path to a graph store built by `cppgraph build`")
+    p_bases.add_argument("symbol", help="exact SCIP symbol string of a type (see `find`)")
+
+    p_subtypes = sub.add_parser("subtypes", help="direct subclasses of a type")
+    p_subtypes.add_argument("--graph", required=True, help="path to a graph store built by `cppgraph build`")
+    p_subtypes.add_argument("symbol", help="exact SCIP symbol string of a type (see `find`)")
+
     p_path = sub.add_parser("path", help="shortest call chain from one symbol to another")
     p_path.add_argument("--graph", required=True, help="path to a graph store built by `cppgraph build`")
     p_path.add_argument("src", help="exact SCIP symbol string (see `find`)")
@@ -125,7 +133,12 @@ def main(argv: list[str] | None = None) -> int:
     p_impact.add_argument("--graph", required=True, help="path to a graph store built by `cppgraph build`")
     p_impact.add_argument("symbol", help="exact SCIP symbol string (see `find`)")
     p_impact.add_argument(
-        "--depth", type=int, default=None, help="max call hops to walk backwards (default: unbounded)"
+        "--depth", type=int, default=None, help="max hops to walk backwards (default: unbounded)"
+    )
+    p_impact.add_argument(
+        "--kind", choices=("calls", "inherits"), default="calls",
+        help="edge kind to walk: 'calls' = call blast-radius (default); "
+        "'inherits' = all transitive subclasses of a base type",
     )
 
     p_status = sub.add_parser(
@@ -230,6 +243,26 @@ def main(argv: list[str] | None = None) -> int:
             _print_edge(edge, other=edge.dst)
         return 0
 
+    if args.command == "bases":
+        store = GraphStore(args.graph)
+        if not store.has_symbol(args.symbol):
+            parser.error(f"unknown symbol: {args.symbol} (use `cppgraph find` to look it up)")
+        bases = store.bases_of(args.symbol)
+        print(f"[cppgraph] {len(bases)} base class(es) of {args.symbol}")
+        for node in bases:
+            _print_node(node)
+        return 0
+
+    if args.command == "subtypes":
+        store = GraphStore(args.graph)
+        if not store.has_symbol(args.symbol):
+            parser.error(f"unknown symbol: {args.symbol} (use `cppgraph find` to look it up)")
+        subs = store.subtypes_of(args.symbol)
+        print(f"[cppgraph] {len(subs)} subclass(es) of {args.symbol}")
+        for node in subs:
+            _print_node(node)
+        return 0
+
     if args.command == "path":
         store = GraphStore(args.graph)
         if not store.has_symbol(args.src):
@@ -251,8 +284,9 @@ def main(argv: list[str] | None = None) -> int:
         store = GraphStore(args.graph)
         if not store.has_symbol(args.symbol):
             parser.error(f"unknown symbol: {args.symbol} (use `cppgraph find` to look it up)")
-        affected = store.impact(args.symbol, max_depth=args.depth)
-        print(f"[cppgraph] {len(affected)} symbol(s) transitively call {args.symbol}")
+        affected = store.impact(args.symbol, max_depth=args.depth, kind=args.kind)
+        verb = "transitively call" if args.kind == "calls" else "transitively inherit from"
+        print(f"[cppgraph] {len(affected)} symbol(s) {verb} {args.symbol}")
         for symbol in affected:
             node = store.get_node(symbol)
             if node is not None:

@@ -86,6 +86,21 @@ Ordered. Check off as you go. Detail lives in `DESIGN.md`.
       in-process end-to-end on the full mongo graph (both `makeResumeToken`
       symbols come back distinct through MCP). Target loop realized:
       status → impact/who_calls/path → explain.
+- [x] Enrich the graph with `inherits` edges (derived → base). scip-clang emits
+      `is_implementation` for both class inheritance and method override; split
+      by SCIP descriptor kind (type→type = `inherits`, method→method =
+      `implements`). Definition sites now recorded for every defined symbol
+      (types too), so classes are locatable. Queries: `bases`/`subtypes` (CLI +
+      MCP `base_classes`/`subclasses`) and `impact --kind inherits` (transitive
+      subclasses). Verified on the real pipeline index (30445 inherits / 11950
+      implements; `ServerParameter#` → 3 subclasses with def sites).
+- [ ] `references` edges (any non-call use of a symbol). DEFERRED pending a
+      scope decision: measured ~778k new edges on the pipeline subsystem alone
+      (~3× the store at full-mongo scale), and attribution reuses the same
+      nearest-preceding proxy as `calls` (with its known class-body limitation).
+      Options when picked up: (a) type-references only, (b) all references,
+      (c) store references as locations, not symbol→symbol edges. See DESIGN.md
+      § Graph model.
 - [ ] Compare usefulness against Serena on a real design question.
 
 ## Phase 4 — open-source / generalize

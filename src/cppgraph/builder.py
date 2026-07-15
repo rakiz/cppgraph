@@ -18,8 +18,17 @@ field. Instead:
   (identical file/line/symbol/roles) once per TU when scip-clang merges
   their partial indexes — verified on `change_stream_event_transform.h`,
   included by 3 TUs in the pipeline subsystem, each producing an identical
-  duplicate reference occurrence. `calls`/`implements` edges are deduped by
-  (kind, src, dst, file, line) to avoid inflating caller counts.
+  duplicate reference occurrence. Edges are deduped by
+  (kind, src, dst, file, line) to avoid inflating counts.
+- Inheritance vs override: scip-clang emits an `is_implementation`
+  relationship for *both* class inheritance and method override. They're told
+  apart by SCIP descriptor kind — a type→type relationship (`#` → `#`) is an
+  `inherits` edge (derived → base), a method→method one stays `implements`.
+  Verified on the pipeline index: 30445 type→type, 11950 method→method.
+- Definition sites are recorded for every defined symbol (types/fields too,
+  not just callables), so `find`/`explain`/`bases`/`subtypes` can locate any
+  symbol. Only *callable* definitions act as caller-attribution boundaries for
+  `calls`.
 """
 
 from __future__ import annotations
@@ -42,6 +51,17 @@ def is_callable_symbol(symbol: str) -> bool:
     return symbol.endswith(").")
 
 
+def is_type_symbol(symbol: str) -> bool:
+    """True if the SCIP symbol's last descriptor is a type (class/struct/enum).
+
+    Per the SCIP symbol grammar, `<type> ::= <name> '#'` — the descriptor kind
+    ending in `#`. Used to tell class inheritance apart from method override:
+    scip-clang emits an `is_implementation` relationship for both, and the only
+    reliable discriminator is the descriptor kind of the two endpoints.
+    """
+    return symbol.endswith("#")
+
+
 def _occurrence_start_line(occ: scip_pb2.Occurrence) -> int | None:
     which = occ.WhichOneof("typed_range")
     if which == "single_line_range":
@@ -61,26 +81,37 @@ def build_graph(index: scip_pb2.Index) -> Graph:
             graph.add_node(sym_info.symbol, display_name=sym_info.display_name)
             for rel in sym_info.relationships:
                 if rel.is_implementation:
+                    # scip-clang uses is_implementation for both class
+                    # inheritance (type -> type) and method override
+                    # (method -> method). Split them by descriptor kind:
+                    # class-level relationships are `inherits`, the rest
+                    # (method override) stay `implements`. Verified on the
+                    # pipeline index: 30445 type->type, 11950 method->method.
+                    if is_type_symbol(sym_info.symbol) and is_type_symbol(rel.symbol):
+                        edge_kind = "inherits"
+                    else:
+                        edge_kind = "implements"
                     graph.add_edge(
-                        "implements", sym_info.symbol, rel.symbol, doc.relative_path
+                        edge_kind, sym_info.symbol, rel.symbol, doc.relative_path
                     )
 
-        # Callable-symbol definitions in this document, sorted by start line,
-        # used both as call-graph nodes and as caller-attribution boundaries.
+        # One pass over definition occurrences: record every symbol's
+        # definition site (so types/fields, not just callables, can be located
+        # by find/explain/bases/subtypes), and separately collect the callable
+        # definitions that act as caller-attribution boundaries for `calls`.
         callable_defs: list[tuple[int, str]] = []
         for occ in doc.occurrences:
             if not (occ.symbol_roles & DEFINITION):
                 continue
-            if not is_callable_symbol(occ.symbol):
-                continue
             line = _occurrence_start_line(occ)
             if line is None:
                 continue
-            callable_defs.append((line, occ.symbol))
             node = graph.add_node(occ.symbol)
-            if node.file is None:
+            if node.file is None:  # first definition site wins (header dedup)
                 node.file = doc.relative_path
                 node.line = line
+            if is_callable_symbol(occ.symbol):
+                callable_defs.append((line, occ.symbol))
         callable_defs.sort()
         boundary_lines = [line for line, _ in callable_defs]
 

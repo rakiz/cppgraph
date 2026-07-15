@@ -395,6 +395,50 @@ class GraphStore:
         ).fetchall()
         return [Edge(kind="calls", src=symbol, dst=r[0], file=r[1], line=r[2]) for r in rows]
 
+    def bases_of(self, symbol: str) -> list[Node]:
+        """Direct base classes of `symbol` (one `inherits` hop forward).
+
+        `inherits` edges point derived -> base, so the bases are the `dst`s of
+        edges where `symbol` is the `src`. Returns the base *types* with their
+        own definition sites — an inheritance edge carries no meaningful line,
+        so what's useful is where each base class is defined.
+        """
+        src_id = self._symbol_id(symbol)
+        if src_id is None:
+            return []
+        rows = self._con.execute(
+            """
+            SELECT dst.symbol, dst.display_name, f.path, dst.line
+            FROM edges e
+            JOIN symbols dst ON dst.id = e.dst_id
+            LEFT JOIN files f ON f.id = dst.file_id
+            WHERE e.kind = 'inherits' AND e.src_id = ?
+            """,
+            (src_id,),
+        ).fetchall()
+        return [Node(symbol=r[0], display_name=r[1] or "", file=r[2], line=r[3]) for r in rows]
+
+    def subtypes_of(self, symbol: str) -> list[Node]:
+        """Direct subclasses of `symbol` (one `inherits` hop backward).
+
+        The `src`s of `inherits` edges whose `dst` is `symbol`, returned as the
+        derived *types* with their own definition sites (see `bases_of`).
+        """
+        dst_id = self._symbol_id(symbol)
+        if dst_id is None:
+            return []
+        rows = self._con.execute(
+            """
+            SELECT src.symbol, src.display_name, f.path, src.line
+            FROM edges e
+            JOIN symbols src ON src.id = e.src_id
+            LEFT JOIN files f ON f.id = src.file_id
+            WHERE e.kind = 'inherits' AND e.dst_id = ?
+            """,
+            (dst_id,),
+        ).fetchall()
+        return [Node(symbol=r[0], display_name=r[1] or "", file=r[2], line=r[3]) for r in rows]
+
     # --- traversals (indexed neighbour lookups, never a full load) ---------
 
     def shortest_call_path(self, src: str, dst: str) -> list[Edge] | None:
@@ -435,12 +479,16 @@ class GraphStore:
                     queue.append((e_dst_id, e_dst_symbol, path + [edge]))
         return None
 
-    def impact(self, symbol: str, max_depth: int | None = None) -> set[str]:
-        """Symbols that transitively call `symbol` (reverse blast-radius).
+    def impact(
+        self, symbol: str, max_depth: int | None = None, kind: str = "calls"
+    ) -> set[str]:
+        """Symbols that transitively reach `symbol` backward along `kind` edges.
 
         Reverse BFS over `ix_dst`; `max_depth` bounds the backward hops
-        (`None` = unbounded). Walks in id-space, resolving to symbol strings
-        only for the final result set.
+        (`None` = unbounded). `kind="calls"` is the call blast-radius (who
+        transitively calls it); `kind="inherits"` is the type hierarchy below a
+        base (all transitive subclasses). Walks in id-space, resolving to symbol
+        strings only for the final result set.
         """
         start_id = self._symbol_id(symbol)
         if start_id is None:
@@ -453,8 +501,8 @@ class GraphStore:
             next_frontier: list[int] = []
             for node_id in frontier:
                 for (caller_id,) in self._con.execute(
-                    "SELECT src_id FROM edges WHERE kind = 'calls' AND dst_id = ?",
-                    (node_id,),
+                    "SELECT src_id FROM edges WHERE kind = ? AND dst_id = ?",
+                    (kind, node_id),
                 ).fetchall():
                     if caller_id not in visited:
                         visited.add(caller_id)

@@ -95,15 +95,51 @@ def test_path_none_when_no_chain(store: GraphStore) -> None:
 
 def test_impact_transitive_callers(store: GraphStore) -> None:
     result = mcp_server.impact(store, FOO)
-    syms = {r["symbol"] for r in result["callers"]}
+    syms = {r["symbol"] for r in result["reached_by"]}
     assert syms == {CALLER, MID}
     assert result["total"] == 2
+    assert result["kind"] == "calls"
 
 
 def test_impact_depth_bounds_walk(store: GraphStore) -> None:
     result = mcp_server.impact(store, FOO, depth=1)
-    syms = {r["symbol"] for r in result["callers"]}
+    syms = {r["symbol"] for r in result["reached_by"]}
     assert syms == {MID}  # only the direct caller at depth 1
+
+
+BASE = "cxx . . $ mongo/Base#"
+DERIVED = "cxx . . $ mongo/Derived#"
+LEAF = "cxx . . $ mongo/Leaf#"
+
+
+@pytest.fixture
+def hierarchy(tmp_path: Path) -> GraphStore:
+    graph = Graph()
+    graph.add_edge("inherits", DERIVED, BASE, file="d.h", line=2)
+    graph.add_edge("inherits", LEAF, DERIVED, file="l.h", line=3)
+    path = tmp_path / "h.db"
+    write_sqlite(graph, path)
+    return GraphStore(path)
+
+
+def test_bases_lists_direct_supertypes(hierarchy: GraphStore) -> None:
+    result = mcp_server.bases(hierarchy, DERIVED)
+    assert [b["symbol"] for b in result["bases"]] == [BASE]
+
+
+def test_subtypes_lists_direct_subclasses(hierarchy: GraphStore) -> None:
+    result = mcp_server.subtypes(hierarchy, BASE)
+    assert [s["symbol"] for s in result["subtypes"]] == [DERIVED]
+
+
+def test_bases_unknown_symbol_is_error(hierarchy: GraphStore) -> None:
+    assert "error" in mcp_server.bases(hierarchy, "nope")
+
+
+def test_impact_over_inherits_gives_all_descendants(hierarchy: GraphStore) -> None:
+    result = mcp_server.impact(hierarchy, BASE, kind="inherits")
+    assert {r["symbol"] for r in result["reached_by"]} == {DERIVED, LEAF}
+    assert result["kind"] == "inherits"
 
 
 def test_explain_coordinates_only_by_default(store: GraphStore) -> None:

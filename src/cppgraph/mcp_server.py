@@ -114,6 +114,39 @@ def callees(store: GraphStore, symbol: str, limit: int = DEFAULT_LIMIT) -> dict[
     }
 
 
+def bases(store: GraphStore, symbol: str, limit: int = DEFAULT_LIMIT) -> dict[str, Any]:
+    """Direct base classes `symbol` inherits from (one `inherits` hop).
+
+    Each base is returned with its own definition site (an inheritance edge has
+    no meaningful line).
+    """
+    if not store.has_symbol(symbol):
+        return {"error": _UNKNOWN.format(symbol=symbol)}
+    nodes = store.bases_of(symbol)
+    shown, truncated = _capped(nodes, limit)
+    return {
+        "symbol": symbol,
+        "total": len(nodes),
+        "truncated": truncated,
+        "bases": [_node_dict(n) for n in shown],
+    }
+
+
+def subtypes(store: GraphStore, symbol: str, limit: int = DEFAULT_LIMIT) -> dict[str, Any]:
+    """Direct subclasses of `symbol` (one `inherits` hop backward), each with
+    its own definition site."""
+    if not store.has_symbol(symbol):
+        return {"error": _UNKNOWN.format(symbol=symbol)}
+    nodes = store.subtypes_of(symbol)
+    shown, truncated = _capped(nodes, limit)
+    return {
+        "symbol": symbol,
+        "total": len(nodes),
+        "truncated": truncated,
+        "subtypes": [_node_dict(n) for n in shown],
+    }
+
+
 def call_path(store: GraphStore, src: str, dst: str) -> dict[str, Any]:
     """Shortest `calls` chain from `src` to `dst`, as an ordered node list.
 
@@ -134,17 +167,22 @@ def call_path(store: GraphStore, src: str, dst: str) -> dict[str, Any]:
 
 
 def impact(
-    store: GraphStore, symbol: str, depth: int | None = None, limit: int = DEFAULT_LIMIT
+    store: GraphStore,
+    symbol: str,
+    depth: int | None = None,
+    limit: int = DEFAULT_LIMIT,
+    kind: str = "calls",
 ) -> dict[str, Any]:
-    """Reverse blast-radius: everything that transitively calls `symbol`.
+    """Reverse blast-radius: everything that transitively reaches `symbol`.
 
-    `depth` bounds the backward hops (None = unbounded). The core "what breaks if
-    I change this?" question. Results are symbols (with their definition site);
-    capped like the other fan-out tools.
+    `kind="calls"` (default) = transitive callers ("what breaks if I change this
+    function?"); `kind="inherits"` = all transitive subclasses of a base type.
+    `depth` bounds the backward hops (None = unbounded). Results are symbols
+    (with their definition site); capped like the other fan-out tools.
     """
     if not store.has_symbol(symbol):
         return {"error": _UNKNOWN.format(symbol=symbol)}
-    affected = sorted(store.impact(symbol, max_depth=depth))
+    affected = sorted(store.impact(symbol, max_depth=depth, kind=kind))
     shown, truncated = _capped(affected, limit)
     out: list[dict[str, Any]] = []
     for sym in shown:
@@ -152,10 +190,11 @@ def impact(
         out.append(_node_dict(node) if node is not None else {"symbol": sym, "file": None, "line": None})
     return {
         "symbol": symbol,
+        "kind": kind,
         "depth": depth,
         "total": len(affected),
         "truncated": truncated,
-        "callers": out,
+        "reached_by": out,
     }
 
 
@@ -289,15 +328,31 @@ def build_server(graph_path: str | Path, root: str | None = None) -> Any:
         return callees(store, symbol, limit=limit)
 
     @mcp.tool()
+    def base_classes(symbol: str, limit: int = DEFAULT_LIMIT) -> dict[str, Any]:
+        """Direct base classes a type inherits from (`symbol` is an exact SCIP
+        type string from `find`, ending in `#`)."""
+        return bases(store, symbol, limit=limit)
+
+    @mcp.tool()
+    def subclasses(symbol: str, limit: int = DEFAULT_LIMIT) -> dict[str, Any]:
+        """Direct subclasses of a type (one inheritance hop). For the whole
+        subtree use `impact_of` with kind="inherits"."""
+        return subtypes(store, symbol, limit=limit)
+
+    @mcp.tool()
     def path(src: str, dst: str) -> dict[str, Any]:
         """Shortest call chain from `src` to `dst` (exact SCIP strings)."""
         return call_path(store, src, dst)
 
     @mcp.tool()
-    def impact_of(symbol: str, depth: int | None = None, limit: int = DEFAULT_LIMIT) -> dict[str, Any]:
-        """Reverse blast-radius: everything that transitively calls `symbol`.
-        "What could break if I change this?" `depth` bounds the hops."""
-        return impact(store, symbol, depth=depth, limit=limit)
+    def impact_of(
+        symbol: str, depth: int | None = None, limit: int = DEFAULT_LIMIT, kind: str = "calls"
+    ) -> dict[str, Any]:
+        """Reverse blast-radius: everything that transitively reaches `symbol`.
+        kind="calls" (default) = transitive callers ("what could break if I
+        change this function?"); kind="inherits" = every transitive subclass of
+        a base type. `depth` bounds the hops."""
+        return impact(store, symbol, depth=depth, limit=limit, kind=kind)
 
     @mcp.tool()
     def explain_symbol(

@@ -4,6 +4,29 @@ _Last updated: 2026-07-15_
 
 ## Where we are
 
+`inherits` edges landed (derived → base). scip-clang emits `is_implementation`
+for *both* class inheritance and method override; the builder splits them by
+SCIP descriptor kind — type→type (`#`→`#`) becomes `inherits`, method→method
+stays `implements` (verified on the pipeline index: 30445 vs 11950). Definition
+sites are now recorded for *every* defined symbol (types/fields, not just
+callables), so a class is locatable by `find`/`explain`. New query surface:
+`bases` / `subtypes` (CLI) and `base_classes` / `subclasses` (MCP) for direct
+inheritance neighbours, plus `impact --kind inherits` / `impact_of(kind=
+"inherits")` for the whole transitive subtree ("everything that derives from
+this base"). `bases`/`subtypes` return the related *type* with its own
+definition site (an inheritance edge has no meaningful line). Verified on the
+real pipeline graph: `ServerParameter#` → `IDLServerParameterWithStorage#`,
+`IDLServerParameterDeprecatedAlias#`, `FeatureFlagServerParameter#`, each with a
+def site. 96 tests green.
+
+Next: `references` edges are DEFERRED pending a scope decision — measured ~778k
+new edges on the pipeline subsystem alone (~3× the store at full scale), and
+attribution reuses the same nearest-preceding proxy as `calls` (with its
+class-body limitation). Options in TODO.md / DESIGN.md § Graph model. Then the
+Serena comparison, then Phase 4 (generalize / open-source).
+
+## Where we were (Phase 3 MCP server)
+
 Phase 3 MCP server landed (`src/cppgraph/mcp_server.py`, console script
 `cppgraph-mcp`, optional `[mcp]` extra). FastMCP over stdio, launched with
 `--graph <db> [--root <checkout>]` so the graph path is fixed once and tools
@@ -166,19 +189,17 @@ C++-general, MongoDB-first.
 
 ## Exact next step
 
-Phases 2 and 3 are complete: SQLite `GraphStore`; the CLI queries `find`,
-`callers`, `callees`, `path`, `impact`, `explain`, `status`; incremental
-`cppgraph update` + `reindex.sh --update`; the `cppgraph-mcp` server exposing
-all of it to an LLM (see "Where we are"). The declaration-context false-positive
-is closed as a fundamental scip-clang limitation (see "Known limitation"),
-tracked on PR #504.
+Phases 2 and 3 are complete, plus `inherits` edges: SQLite `GraphStore`; the CLI
+queries `find`, `callers`, `callees`, `bases`, `subtypes`, `path`, `impact`
+(`--kind calls|inherits`), `explain`, `status`; incremental `cppgraph update` +
+`reindex.sh --update`; the `cppgraph-mcp` server exposing all of it to an LLM
+(see "Where we are"). The declaration-context false-positive is closed as a
+fundamental scip-clang limitation (see "Known limitation"), tracked on PR #504.
 
-Next is **`references`/`inherits` edges** (builder work). Today the graph has
-`calls` (+ `implements`); `references` (any use of a symbol, not just a call)
-and `inherits` (class → base) let an LLM reason about *data*/type dependencies
-and hierarchy impact, not just the call graph. This is a `builder.py` change
-(new SCIP occurrence-role handling) + store/query plumbing; the MCP tools then
-surface them the same way. After that: the Serena comparison (TODO Phase 3
+Next is the **`references` scope decision** (deferred — see "Where we are" and
+TODO.md): it's the one remaining edge type, but it's ~3× the store and leans on
+the nearest-preceding proxy, so pick a scope (type-refs only / all / locations-
+not-edges) before building. After that: the Serena comparison (TODO Phase 3
 item 2), then Phase 4 (generalize / open-source).
 
 To run the MCP server:

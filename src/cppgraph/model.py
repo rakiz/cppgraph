@@ -18,7 +18,7 @@ class Node:
 
 @dataclass
 class Edge:
-    kind: str  # "calls" | "implements"
+    kind: str  # "calls" | "implements" | "inherits"
     src: str
     dst: str
     file: str

@@ -10,7 +10,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-from cppgraph.model import Graph
+from cppgraph.model import Graph, Node
 from cppgraph.proto import scip_pb2
 from cppgraph.store import GraphStore, build_provenance, update_store, write_sqlite
 
@@ -150,6 +150,46 @@ def test_impact_respects_max_depth(tmp_path: Path) -> None:
 def test_impact_unknown_symbol_returns_empty(tmp_path: Path) -> None:
     store = _store(tmp_path, Graph())
     assert store.impact("nope") == set()
+
+
+# --- inheritance queries ---------------------------------------------------
+
+BASE = "cxx . . $ mongo/Base#"
+DERIVED = "cxx . . $ mongo/Derived#"
+LEAF = "cxx . . $ mongo/Leaf#"
+
+
+def _hierarchy(tmp_path: Path) -> GraphStore:
+    # Leaf -> Derived -> Base (edge src = derived, dst = base)
+    graph = Graph()
+    graph.nodes[BASE] = Node(symbol=BASE, display_name="Base", file="b.h", line=1)
+    graph.add_edge("inherits", DERIVED, BASE, file="d.h", line=3)
+    graph.add_edge("inherits", LEAF, DERIVED, file="l.h", line=4)
+    graph.add_edge("calls", "cxx . . $ mongo/x#f().", DERIVED, file="x.cpp", line=1)
+    return _store(tmp_path, graph)
+
+
+def test_bases_of_lists_direct_supertypes_with_def_site(tmp_path: Path) -> None:
+    store = _hierarchy(tmp_path)
+    bases = store.bases_of(DERIVED)
+    assert [n.symbol for n in bases] == [BASE]
+    # the base type's own definition site, not the (line-less) inherits edge
+    assert bases[0].file == "b.h"
+    assert bases[0].line == 1
+
+
+def test_subtypes_of_lists_direct_subtypes(tmp_path: Path) -> None:
+    store = _hierarchy(tmp_path)
+    subs = store.subtypes_of(BASE)
+    assert [n.symbol for n in subs] == [DERIVED]
+
+
+def test_impact_over_inherits_gives_transitive_descendants(tmp_path: Path) -> None:
+    store = _hierarchy(tmp_path)
+    # everything that transitively derives from Base
+    assert store.impact(BASE, kind="inherits") == {DERIVED, LEAF}
+    # calls-space impact of Base is empty (no calls edges into it)
+    assert store.impact(BASE) == set()
 
 
 def test_store_persists_and_reopens(tmp_path: Path) -> None:
