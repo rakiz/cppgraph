@@ -345,5 +345,9 @@ echo "[3/3] Building the cppgraph graph ..."
 
 echo "Done. Graph: $OUT_GRAPH"
 echo
-echo "Register it with Claude Code (then open a new session):"
-echo "  scripts/register-mcp.sh \"$OUT_GRAPH\" \"$PROJECT_ROOT\""
+echo "Use it in Claude Code:"
+echo "  1. once per machine:  scripts/register-mcp.sh"
+echo "     (registers cppgraph globally; it auto-discovers each project's .cppgraph/)"
+echo "  2. open Claude Code from this project, in a NEW session:"
+echo "       $PROJECT_ROOT"
+echo "     then ask your questions — it uses this project's graph automatically."

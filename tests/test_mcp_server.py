@@ -299,3 +299,32 @@ def test_make_export_usage_returns_file_graph(tmp_path: Path) -> None:
 
 def test_make_export_unknown_symbol_is_none(store: GraphStore) -> None:
     assert mcp_server.make_export(store, "nope") is None
+
+
+def test_discover_graph_finds_nearest_cppgraph(tmp_path: Path) -> None:
+    proj = tmp_path / "proj"
+    (proj / ".cppgraph").mkdir(parents=True)
+    (proj / ".cppgraph" / "proj.graph.db").write_bytes(b"x")
+    sub = proj / "src" / "deep"
+    sub.mkdir(parents=True)
+    found = mcp_server.discover_graph(sub)  # from a nested dir
+    assert found is not None
+    graph, root = found
+    assert graph.name == "proj.graph.db"
+    assert root == proj.resolve()
+
+
+def test_discover_graph_picks_newest(tmp_path: Path) -> None:
+    import os, time
+    cpg = tmp_path / ".cppgraph"
+    cpg.mkdir()
+    old = cpg / "old.graph.db"; old.write_bytes(b"o")
+    time.sleep(0.01)
+    new = cpg / "new.graph.db"; new.write_bytes(b"n")
+    os.utime(old, (1, 1))  # force old to be older
+    graph, _ = mcp_server.discover_graph(tmp_path)
+    assert graph.name == "new.graph.db"
+
+
+def test_discover_graph_none_when_absent(tmp_path: Path) -> None:
+    assert mcp_server.discover_graph(tmp_path) is None

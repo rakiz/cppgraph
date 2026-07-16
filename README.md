@@ -69,9 +69,13 @@ deterministic; the scripts fail loudly with actionable messages.
    ```bash
    scripts/reindex.sh <compile_commands.json> <filter> myproject
    ```
-5. **Register the MCP server** by running the `scripts/register-mcp.sh …` command
-   that step 4 printed (it has the correct paths).
-6. **Tell the user to open a new Claude Code session**, then ask questions like
+5. **Register the MCP server** — once per machine (idempotent; no project args,
+   it auto-discovers each project's `.cppgraph/` from the working directory):
+   ```bash
+   scripts/register-mcp.sh
+   ```
+6. **Tell the user to open a new Claude Code session _from their project
+   directory_** (that's how the server finds this project's graph), then ask
    *"what calls X?"*, *"impact of changing Y?"*, *"show the dependency graph of Z"*.
 
 Humans: the same flow, step by step, is in [QUICKSTART.md](QUICKSTART.md).

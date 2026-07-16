@@ -1,36 +1,25 @@
 #!/usr/bin/env bash
-# Register the cppgraph MCP server in Claude Code, pointed at a built graph.
-# After this, open a NEW Claude Code session and the `cppgraph` tools appear.
+# Register the cppgraph MCP server in Claude Code — ONCE, globally.
 #
-# Usage:
-#   scripts/register-mcp.sh GRAPH_DB [PROJECT_ROOT]
+# Serena-style: the server auto-discovers each project's graph from the current
+# directory's `.cppgraph/` at launch, so a single registration serves every
+# indexed project with no collision. Open Claude Code *from a project directory*
+# and the cppgraph tools use that project's graph. Re-run any time (idempotent).
 #
-#   GRAPH_DB       a store built by `cppgraph build` / `scripts/reindex.sh`
-#   PROJECT_ROOT   (optional) the source checkout, for `status` drift checks and
-#                  source snippets in `explain`/`visualize`
+# Usage: scripts/register-mcp.sh   (no arguments)
 set -euo pipefail
 
-cd "$(dirname "$0")/.."  # repo root
-
-if [[ $# -lt 1 ]]; then
-  echo "usage: scripts/register-mcp.sh GRAPH_DB [PROJECT_ROOT]" >&2
-  exit 2
-fi
-GRAPH="$1"
-ROOT="${2:-}"
+repo_root="$(cd "$(dirname "$0")/.." && pwd)"
 
 command -v claude >/dev/null || { echo "Claude Code CLI 'claude' not found." >&2; exit 1; }
-[ -f "$GRAPH" ] || { echo "graph not found: $GRAPH" >&2; exit 1; }
+bin="$repo_root/.venv/bin/cppgraph-mcp"
+[[ -x "$bin" ]] || { echo "cppgraph-mcp not found — run scripts/setup.sh first." >&2; exit 1; }
 
-bin="$(pwd)/.venv/bin/cppgraph-mcp"
-[ -x "$bin" ] || { echo "cppgraph-mcp not found — run scripts/setup.sh first." >&2; exit 1; }
+# Replace any prior registration (e.g. an older graph-pinned one) so re-running
+# is idempotent and migrates cleanly to discovery mode.
+claude mcp remove cppgraph --scope user >/dev/null 2>&1 || true
+claude mcp add cppgraph --scope user -- "$bin"
 
-# absolute path so the server resolves the graph regardless of cwd
-graph_abs="$(cd "$(dirname "$GRAPH")" && pwd)/$(basename "$GRAPH")"
-
-args=(--graph "$graph_abs")
-[ -n "$ROOT" ] && args+=(--root "$ROOT")
-
-claude mcp add cppgraph --scope user -- "$bin" "${args[@]}"
-echo "Registered. Open a NEW Claude Code session, then ask e.g.:"
+echo "Registered cppgraph globally (project-aware, auto-discovers <project>/.cppgraph/)."
+echo "Now open Claude Code FROM an indexed project directory (a new session) and ask e.g.:"
 echo "  \"what calls X?\"   \"impact of changing Y?\"   \"show the dependency graph of Z\""

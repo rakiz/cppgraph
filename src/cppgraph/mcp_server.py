@@ -380,47 +380,82 @@ def make_export(
     )
 
 
-def build_server(graph_path: str | Path, root: str | None = None) -> Any:
-    """A FastMCP server bound to one graph store (opened once, reused per call).
+_NO_GRAPH = {
+    "error": "no cppgraph index found for the current project. Build one with "
+    "scripts/reindex.sh (it writes <project>/.cppgraph/…), then reopen this "
+    "Claude Code session from the project directory."
+}
 
-    `graph_path` is fixed at launch so tools never take a graph argument — the
-    LLM shouldn't have to know or repeat a filesystem path. `root`, if given, is
-    the default checkout used for `status` drift and `explain` source snippets.
+
+def discover_graph(start: str | Path | None = None) -> tuple[Path, Path] | None:
+    """Find the graph for the current project, Serena-style (`--project-from-cwd`).
+
+    Walk up from `start` (default: cwd) looking for a `.cppgraph/` holding at
+    least one `*.graph.db`; return `(graph, project_root)` — the most recently
+    built graph there and the directory that owns the `.cppgraph/`. `None` if no
+    indexed project is found above the cwd. This is what lets a single global
+    registration serve every project: the config effectively lives in each
+    project's own `.cppgraph/`.
+    """
+    d = Path(start or Path.cwd()).resolve()
+    for cur in (d, *d.parents):
+        cpg = cur / ".cppgraph"
+        if cpg.is_dir():
+            graphs = sorted(cpg.glob("*.graph.db"), key=lambda p: p.stat().st_mtime, reverse=True)
+            if graphs:
+                return graphs[0], cur
+    return None
+
+
+def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
+    """A FastMCP server for one project's graph (opened once, reused per call).
+
+    `graph_path` is resolved at launch — explicitly (`--graph`) or discovered
+    from the cwd (`discover_graph`) — so tools never take a graph argument. If it
+    is `None` (no indexed project above the cwd), the server still starts and
+    every tool returns a clear "not indexed here" message. `root` is the checkout
+    used for `status` drift and source snippets.
     """
     from mcp.server.fastmcp import FastMCP
 
-    store = GraphStore(graph_path)
+    store = GraphStore(graph_path) if graph_path else None
     mcp = FastMCP("cppgraph")
+
+    def _call(fn: Any, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        """Run a pure `(store, …) -> dict` query, or return the no-graph notice."""
+        if store is None:
+            return dict(_NO_GRAPH)
+        return fn(store, *args, **kwargs)
 
     @mcp.tool()
     def find(query: str, limit: int = DEFAULT_LIMIT) -> dict[str, Any]:
         """Find C++ symbols by name substring. Start here: other tools need the
         exact SCIP symbol string this returns, not a human name."""
-        return find_symbols(store, query, limit=limit)
+        return _call(find_symbols, query, limit=limit)
 
     @mcp.tool()
     def who_calls(symbol: str, limit: int = DEFAULT_LIMIT) -> dict[str, Any]:
         """Direct callers of a symbol (one call hop). `symbol` is an exact SCIP
         string from `find`."""
-        return callers(store, symbol, limit=limit)
+        return _call(callers, symbol, limit=limit)
 
     @mcp.tool()
     def what_it_calls(symbol: str, limit: int = DEFAULT_LIMIT) -> dict[str, Any]:
         """Direct callees of a symbol (one call hop). `symbol` is an exact SCIP
         string from `find`."""
-        return callees(store, symbol, limit=limit)
+        return _call(callees, symbol, limit=limit)
 
     @mcp.tool()
     def base_classes(symbol: str, limit: int = DEFAULT_LIMIT) -> dict[str, Any]:
         """Direct base classes a type inherits from (`symbol` is an exact SCIP
         type string from `find`, ending in `#`)."""
-        return bases(store, symbol, limit=limit)
+        return _call(bases, symbol, limit=limit)
 
     @mcp.tool()
     def subclasses(symbol: str, limit: int = DEFAULT_LIMIT) -> dict[str, Any]:
         """Direct subclasses of a type (one inheritance hop). For the whole
         subtree use `impact_of` with kind="inherits"."""
-        return subtypes(store, symbol, limit=limit)
+        return _call(subtypes, symbol, limit=limit)
 
     @mcp.tool()
     def find_references(
@@ -430,13 +465,13 @@ def build_server(graph_path: str | Path, root: str | None = None) -> Any:
         dependency the call graph can't show (a struct has no callers). Needs a
         graph unless built --no-references. Coordinates only unless include_source=True
         and the server was launched with --root."""
-        return references(store, symbol, root=root, include_source=include_source,
-                          context=context, limit=limit)
+        return _call(references, symbol, root=root, include_source=include_source,
+                     context=context, limit=limit)
 
     @mcp.tool()
     def path(src: str, dst: str) -> dict[str, Any]:
         """Shortest call chain from `src` to `dst` (exact SCIP strings)."""
-        return call_path(store, src, dst)
+        return _call(call_path, src, dst)
 
     @mcp.tool()
     def impact_of(
@@ -446,7 +481,7 @@ def build_server(graph_path: str | Path, root: str | None = None) -> Any:
         kind="calls" (default) = transitive callers ("what could break if I
         change this function?"); kind="inherits" = every transitive subclass of
         a base type. `depth` bounds the hops."""
-        return impact(store, symbol, depth=depth, limit=limit, kind=kind)
+        return _call(impact, symbol, depth=depth, limit=limit, kind=kind)
 
     @mcp.tool()
     def explain_symbol(
@@ -456,8 +491,8 @@ def build_server(graph_path: str | Path, root: str | None = None) -> Any:
         by default; set `include_source=True` to also get a source snippet (needs
         the server launched with --root). `limit` caps each of the caller/callee
         lists (raise it when `truncated` is true and you need more)."""
-        return explain(
-            store, symbol, root=root, include_source=include_source, context=context, limit=limit
+        return _call(
+            explain, symbol, root=root, include_source=include_source, context=context, limit=limit
         )
 
     @mcp.tool()
@@ -465,7 +500,7 @@ def build_server(graph_path: str | Path, root: str | None = None) -> Any:
         """Graph provenance and drift: is this graph still current for the
         checkout? Run first — if `drift.up_to_date` is false, re-index before
         trusting the topology."""
-        return status_report(store, root=root)
+        return _call(status_report, root=root)
 
     @mcp.tool()
     def visualize(
@@ -487,6 +522,8 @@ def build_server(graph_path: str | Path, root: str | None = None) -> Any:
         didn't launch)."""
         from cppgraph.viz_html import open_in_browser, write_temp_html
 
+        if store is None:
+            return dict(_NO_GRAPH)
         graph_json = make_export(
             store, symbol, mode=mode, depth=depth,
             direction=direction, exclude_tests=exclude_tests,
@@ -514,18 +551,33 @@ def main(argv: list[str] | None = None) -> int:
         prog="cppgraph-mcp",
         description="MCP server exposing the cppgraph query surface to an LLM.",
     )
-    parser.add_argument("--graph", required=True, help="path to a graph store built by `cppgraph build`")
+    parser.add_argument(
+        "--graph", default=None,
+        help="path to a graph store built by `cppgraph build`. Omit to "
+        "auto-discover the current project's graph from the cwd's `.cppgraph/` "
+        "(the default; lets one global registration serve every project).",
+    )
     parser.add_argument(
         "--root", default=None,
-        help="default checkout root for `status` drift checks and `explain` "
-        "source snippets (a runtime argument, never stored in the graph)",
+        help="checkout root for `status` drift checks and source snippets "
+        "(defaults to the discovered project directory)",
     )
     args = parser.parse_args(argv)
 
-    if not Path(args.graph).exists():
-        parser.error(f"graph store not found: {args.graph}")
+    graph = args.graph
+    root = args.root
+    if graph is None:
+        found = discover_graph()
+        if found is not None:
+            graph, discovered_root = found
+            root = root or str(discovered_root)
+    elif not Path(graph).exists():
+        parser.error(f"graph store not found: {graph}")
 
-    server = build_server(args.graph, root=args.root)
+    # If no graph (explicit or discovered), the server still starts and tools
+    # report "not indexed here" — so a single global registration is harmless in
+    # projects that haven't been indexed yet.
+    server = build_server(graph, root=root)
     server.run()  # stdio transport
     return 0
 

@@ -45,6 +45,10 @@ Everything so far — the project has not cut a numbered release yet.
   surface as token-budgeted tools: `find`, `who_calls`, `what_it_calls`,
   `base_classes`, `subclasses`, `find_references`, `path`, `impact_of`,
   `explain_symbol`, `status`, `visualize`.
+- Project auto-discovery (Serena-style): registered once, globally, the server
+  finds the current project's graph from the working directory's `.cppgraph/`
+  at launch — one registration serves every indexed project, no collision. In a
+  project with no graph yet, tools return a clear "not indexed here" notice.
 
 ### Export & visualization
 - `cppgraph export`: bounded neighbourhood around a symbol as a

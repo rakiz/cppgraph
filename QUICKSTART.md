@@ -38,15 +38,15 @@ scripts/reindex.sh /path/to/project/compile_commands.json src/ myproject
 
 ## 3. Use it from Claude Code (the main way)
 
-Run the `register-mcp.sh …` command that step 2 printed (it has the right
-paths), e.g.:
+Register the server once per machine (it auto-discovers each project's
+`.cppgraph/`, so you only do this the first time):
 
 ```bash
-scripts/register-mcp.sh /path/to/project/.cppgraph/myproject.graph.db /path/to/project
+scripts/register-mcp.sh
 ```
 
-Then open a **new** Claude Code session (MCP servers load at startup) and just
-ask, in plain language:
+Then open a **new** Claude Code session **from your project directory** (that's
+how it finds this project's graph) and just ask, in plain language:
 
 - *"What calls `SomeClass::someMethod`? Watch out for same-named overloads."*
 - *"What's the blast radius if I change this function?"*
