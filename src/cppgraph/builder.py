@@ -12,8 +12,8 @@ field. Instead:
 - The caller of a call site is attributed as the nearest preceding
   callable-symbol definition in the same document (by start line), since we
   have no enclosing-range to contain it directly. Verified against real
-  MongoDB data: this correctly finds both real callers of
-  `ChangeStreamEventTransformation::makeResumeToken`.
+  index data (see `COMPARISON.md`): e.g. it correctly separates the two
+  distinct `makeResumeToken` symbols and their caller sets.
 - A header included by N translation units contributes the same occurrence
   (identical file/line/symbol/roles) once per TU when scip-clang merges
   their partial indexes — verified on `change_stream_event_transform.h`,
@@ -79,8 +79,8 @@ def build_graph(index: scip_pb2.Index, *, include_references: bool = True) -> Gr
     `include_references` (default on) collects an exact reference-location index
     (`Graph.references`): every non-local, non-definition occurrence as
     `symbol -> file:line`, with no enclosing attribution (so no heuristic, 100%
-    exact). Set False to skip it and get a leaner store (measured +45% size on
-    full mongo). See DESIGN.md § Graph model.
+    exact). Set False to skip it and get a leaner store (measured ~+45% size on
+    a large index). See DESIGN.md § Graph model.
     """
     graph = Graph()
 

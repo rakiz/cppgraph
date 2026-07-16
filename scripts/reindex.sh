@@ -2,9 +2,9 @@
 set -euo pipefail
 
 # Index any C++ project's compile_commands.json into a SCIP index + a
-# cppgraph graph store (SQLite). Generic — cppgraph works on any project that provides
-# a compile_commands.json (MongoDB is only our current test target, see
-# AGENTS.md; never hard-code a project's paths here). Wraps the three steps
+# cppgraph graph store (SQLite). Generic — cppgraph works on any project that
+# provides a compile_commands.json (never hard-code a project's paths here; see
+# AGENTS.md). Wraps the three steps
 # documented in INSTALL.md as one command — also the script to hand to an
 # LLM/agent if you want it to redo or adjust an indexing run, since it embeds
 # the one non-obvious compdb gotcha inline (see below).
@@ -53,18 +53,17 @@ set -euo pipefail
 #   propagate. The script warns when the diff contains headers; for a
 #   structural or widely-included header change, prefer a full rebuild.
 #
-# Example — MongoDB, our current test target, all of src/mongo (excludes
-# third_party):
-#   scripts/reindex.sh /Users/sebastien.mendez/code/mongo/compile_commands.json \
-#     src/mongo/ mongo_full
+# Example — index a whole project's sources (filter to your source subtree to
+# skip third_party/vendored code):
+#   scripts/reindex.sh /path/to/project/compile_commands.json src/ myproject
 #
-# Example — one MongoDB subsystem instead, for fast iteration:
-#   scripts/reindex.sh /Users/sebastien.mendez/code/mongo/compile_commands.json \
-#     src/mongo/db/pipeline/ pipeline
+# Example — one subsystem instead, for fast iteration:
+#   scripts/reindex.sh /path/to/project/compile_commands.json \
+#     src/subsystem/ subsystem
 #
 # Example — incremental update after some edits:
-#   scripts/reindex.sh --update scratch/mongo_full.graph.db \
-#     /Users/sebastien.mendez/code/mongo/compile_commands.json src/mongo/
+#   scripts/reindex.sh --update scratch/myproject.graph.db \
+#     /path/to/project/compile_commands.json src/
 #
 # Outputs (all under scratch/, gitignored — never committed, see AGENTS.md
 # "Large artifacts"):
@@ -74,13 +73,12 @@ set -euo pipefail
 #   scratch/<OUT_NAME>.partial.compdb.json   changed-TU compdb subset (--update)
 #   scratch/<OUT_NAME>.partial.scip          changed-TU scip-clang index (--update)
 #
-# GOTCHA (cost a debugging session the first time on MongoDB's compdb — kept
-# here so it isn't rediscovered on the next project): some build systems'
-# generated compile_commands.json is not uniformly formatted — entries may
-# mix an absolute path and a bare relative path for logically equivalent
-# locations (observed on MongoDB's Bazel-generated compdb: most entries use
-# an absolute bazel-out path, a handful use a bare "src/..." relative path
-# for the same file). A SRC_FILTER that requires a leading "/" would silently
+# GOTCHA (kept here so it isn't rediscovered on the next project): some build
+# systems' generated compile_commands.json is not uniformly formatted — entries
+# may mix an absolute path and a bare relative path for logically equivalent
+# locations (e.g. a Bazel-generated compdb where most entries use an absolute
+# bazel-out path but a handful use a bare "src/..." relative path for the same
+# file). A SRC_FILTER that requires a leading "/" would silently
 # drop the bare-relative ones. This script does a plain substring match
 # (no anchoring), which is robust to both forms — keep it that way, and
 # don't assume a compdb's "file" field is uniformly absolute or relative for

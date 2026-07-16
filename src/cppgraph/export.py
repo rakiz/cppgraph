@@ -20,7 +20,7 @@ from .model import Edge, Node, Reference
 def is_test_file(path: str | None) -> bool:
     """Heuristic: is `path` a C++ test / test-support file?
 
-    Covers the common conventions (and MongoDB's): a `_test` / `_tests` /
+    Covers the common conventions: a `_test` / `_tests` /
     `_unittest` suffix, a `test_` prefix, a `_test_` infix (catches
     `*_test_helpers.cpp`), or a `test/` / `tests/` directory in the path. Used
     by `--no-tests` to show production usage only.

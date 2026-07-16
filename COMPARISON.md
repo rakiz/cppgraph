@@ -1,6 +1,11 @@
 # cppgraph vs graphify vs Serena — a measured comparison
 
-_Last run: 2026-07-15. Subsystem: MongoDB `src/mongo/db/pipeline` (~770 C++ files)._
+A case study on a large real-world C++ codebase. cppgraph is
+project-agnostic; to measure at scale we use **MongoDB** as the example target —
+specifically the `src/mongo/db/pipeline` subsystem (~770 C++ files), because it
+contains a clean instance of the over/under-capture problem. Nothing here is
+MongoDB-specific; any large C++ project with name collisions and virtual
+dispatch shows the same effects.
 
 The thesis of this project is that a **compiler index** (SCIP) gives *exact,
 disambiguated* symbol identity, where a **by-name / tree-sitter** graph both
@@ -14,9 +19,9 @@ against two other tools, with numbers you can reproduce.
 > builds resume tokens. **What calls this method** — and only this method, not
 > the identically-named test helper? And what's the transitive blast radius?"_
 
-This is the canonical over/under-capture case for MongoDB: `makeResumeToken`
-is really **two distinct symbols** — a class method and a free test-helper
-function — that share a name.
+This is a canonical over/under-capture case: `makeResumeToken` is really **two
+distinct symbols** — a class method and a free test-helper function — that share
+a name.
 
 ## The three tools
 

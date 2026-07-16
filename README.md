@@ -16,8 +16,9 @@ dispatch, and pointer/reference method calls).
 
 ## Status
 
-Early. MongoDB is the first target (large real-world C++ codebase), but the tool
-is general: point it at any `compile_commands.json`.
+Early, but functional end-to-end: build, query, incremental update, an MCP
+server for LLMs, and visualization. The tool is general — point it at any C++
+project's `compile_commands.json`.
 
 ## Pipeline
 
@@ -35,11 +36,12 @@ compile_commands.json  →  scip-clang  →  index.scip  →  cppgraph build  �
 
 ## Does it actually beat by-name tools?
 
-Yes, measurably. On MongoDB's `makeResumeToken` (two distinct symbols sharing a
-name), a tree-sitter tool drops the real call edges *and* collapses 431 unrelated
-`Value` sites onto one node; cppgraph returns the correct, separated caller sets.
-Full write-up with numbers and reproduction steps: **[COMPARISON.md](COMPARISON.md)**
-(cppgraph vs graphify vs Serena/LSP).
+Yes, measurably. On a real case (two distinct methods sharing the name
+`makeResumeToken`), a tree-sitter tool drops the real call edges *and* collapses
+431 unrelated `Value` sites onto one node; cppgraph returns the correct,
+separated caller sets. Full write-up with numbers and reproduction steps:
+**[COMPARISON.md](COMPARISON.md)** (cppgraph vs graphify vs Serena/LSP, on a
+large C++ codebase).
 
 ## Documentation
 
@@ -50,8 +52,8 @@ Full write-up with numbers and reproduction steps: **[COMPARISON.md](COMPARISON.
 | [COMPARISON.md](COMPARISON.md) | Measured comparison vs graphify and Serena on a real design question |
 | [INSTALL.md](INSTALL.md) | Setting up a new machine (`scip-clang`, `protoc`, the venv) |
 | [viz/README.md](viz/README.md) | The bundled graph viewer + `cppgraph export` graph.json format |
-| [TODO.md](TODO.md) | Ordered task list / roadmap |
-| [HANDOFF.md](HANDOFF.md) | Current state + exact next command (for resuming work) |
+| [CHANGELOG.md](CHANGELOG.md) | What's been built so far |
+| [TODO.md](TODO.md) | Open tasks |
 
 ## Non-goals
 

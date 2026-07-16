@@ -29,7 +29,7 @@ install the optional `mcp` extra — it's not needed for the core build/query CL
 ```bash
 uv pip install -e ".[dev,mcp]"
 # then, pointed at a built graph:
-.venv/bin/cppgraph-mcp --graph scratch/mongo_full.graph.db --root /path/to/checkout
+.venv/bin/cppgraph-mcp --graph scratch/myproject.graph.db --root /path/to/checkout
 ```
 
 ## 2. `scip-clang` (required, every machine — NOT committed to this repo)
@@ -143,20 +143,17 @@ rediscover it.
 scripts/reindex.sh COMPDB_PATH [SRC_FILTER] [OUT_NAME] [PROJECT_ROOT]
 ```
 
-MongoDB is our current test target (see `AGENTS.md`), not something the tool
-or this script know about — these are example invocations, not defaults:
+Example invocations (no project is baked into the tool or the script):
 
 ```bash
-# All of src/mongo (excludes third_party):
-scripts/reindex.sh /Users/sebastien.mendez/code/mongo/compile_commands.json \
-  src/mongo/ mongo_full
+# A project's source subtree (filter to skip third_party/vendored code):
+scripts/reindex.sh /path/to/project/compile_commands.json src/ myproject
 
 # One subsystem instead (fast, good for iterating):
-scripts/reindex.sh /Users/sebastien.mendez/code/mongo/compile_commands.json \
-  src/mongo/db/pipeline/ pipeline
+scripts/reindex.sh /path/to/project/compile_commands.json src/subsystem/ subsystem
 
-# Any other C++ project, indexing everything in its compdb:
-scripts/reindex.sh /path/to/other/project/compile_commands.json
+# Everything in the compdb (no filter):
+scripts/reindex.sh /path/to/project/compile_commands.json
 ```
 
 Outputs land under `scratch/<name>.{compdb.json,scip,graph.db}` —
@@ -164,23 +161,21 @@ gitignored, per-machine, never committed (see AGENTS.md "Large artifacts").
 The `graph.db` is the interned SQLite store queried by `cppgraph
 find/callers/callees/path/impact` (see DESIGN.md § Store).
 
-Verified timings on this machine (14-core arm64 Mac, `scip-clang` v0.4.0),
-indexing MongoDB:
-- `src/mongo/db/pipeline/` — 519 TUs, ~151s, 0 errors, 23 MB `.scip`.
-- All of `src/mongo/` — 6004 TUs, ~1253s (indexing 1228s + merging 19s),
+Reference timings, indexing a large C++ codebase (~6000 TUs) on a 14-core
+arm64 Mac with `scip-clang` v0.4.0:
+- one subsystem — 519 TUs, ~151s, 0 errors, 23 MB `.scip`.
+- the whole tree — 6004 TUs, ~1253s (indexing 1228s + merging 19s),
   0 errored TUs, 797 MB `.scip` → 323 MB `graph.db`
   (643,967 nodes, 2,735,021 edges; ~23s to build the store). The same graph
-  as a flat JSON was 1.19 GB — the interned SQLite store is the Phase 2 move
-  that both shrinks it 3.7× and makes queries hit a B-tree index instead of
-  loading the whole file per query. See `DESIGN.md` § Store.
+  as flat JSON was 1.19 GB — the interned SQLite store shrinks it 3.7× and
+  makes queries hit a B-tree index instead of loading the whole file per
+  query. See `DESIGN.md` § Store.
 
 **Gotcha** (already handled by the script, documented here so it isn't
 rediscovered on the next project): a build system's generated
 `compile_commands.json` is not guaranteed to format the `file` field
-uniformly — MongoDB's Bazel-generated compdb mixes an absolute bazel-out path
+uniformly — e.g. a Bazel-generated compdb can mix an absolute bazel-out path
 for most entries with a bare relative path for a handful of the same kind of
 location. A `SRC_FILTER` that requires a leading `/` would silently drop the
-bare-relative ones (and, on MongoDB specifically, those happened to be the
-exact files cppgraph's own acceptance tests depend on). `scripts/reindex.sh`
-does a plain substring match, with no anchoring, to stay robust to this on
-any project.
+bare-relative ones. `scripts/reindex.sh` does a plain substring match, with no
+anchoring, to stay robust to this on any project.

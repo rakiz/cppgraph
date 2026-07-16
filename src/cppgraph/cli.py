@@ -125,7 +125,7 @@ def main(argv: list[str] | None = None) -> int:
         help="build the exact reference-location index (every non-local use of "
         "a symbol as file:line) — answers 'where is this type/symbol used?', the "
         "dependency the call graph is blind to. On by default; pass "
-        "--no-references for a leaner store (measured +45% size on full mongo).",
+        "--no-references for a leaner store (measured ~+45% size on a large index).",
     )
 
     p_update = sub.add_parser(

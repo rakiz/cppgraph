@@ -6,7 +6,7 @@ Syntactic (tree-sitter) code graphs key symbols by **name**. On real C++ this
 fails two ways at once:
 
 - **Over-capture**: distinct symbols sharing a name collapse into one node.
-  Example (MongoDB): `makeResumeToken` names *two* different symbols — the method
+  Example: `makeResumeToken` names *two* different symbols — the method
   `ChangeStreamEventTransformation::makeResumeToken` (2 real callers) and the free
   function `change_stream_test_helper::makeResumeToken` (~57 test call-sites). A
   name-based tool reports one node with ~66 edges; the truth is two nodes.
@@ -54,7 +54,7 @@ exact, and the `references` query returns coordinates or — with `--root` — t
 snippet the tool reads itself (same dual mode as `explain`). This answers "where
 is this type/symbol used?" — a dependency the call graph can't express (e.g.
 `ResumeTokenData#`, a plain struct: 0 callers, 155 exact use sites across the
-pipeline subsystem). Measured cost is modest — full mongo: 5.3M deduped
+pipeline subsystem). Measured cost is modest — on a large index: 5.3M deduped
 locations, store 323 MB → 468 MB (+45%), build ~40 s vs ~23 s — so it's on by
 default; `--no-references` gives the leaner store when the index isn't wanted.
 
@@ -68,7 +68,7 @@ locations-only. See TODO.md.
 SCIP gives occurrences (symbol, range, roles). The original plan was to
 attribute each reference to the definition symbol whose `enclosing_range`
 contains it — but `scip-clang` v0.4.0 never populates `enclosing_range` (nor
-`SymbolInformation.kind`), verified against real MongoDB data. Implemented
+`SymbolInformation.kind`), verified against real index data. Implemented
 fallback (`src/cppgraph/builder.py`):
 
 1. Callability is read off the SCIP symbol string's own grammar: a
@@ -118,7 +118,7 @@ independent of how the caller is attributed.
 in `model.py`). Every query does `load_json` → the entire file is parsed into
 Python dicts in RAM before answering.
 
-**Phase 2 decision — measured, not guessed.** Indexing all of `src/mongo`
+**Store decision — measured, not guessed.** Indexing a full large codebase
 (6004 TUs) produced **643,967 nodes / 2,735,021 edges → a 1.19 GB `graph.json`**.
 That settles JSON vs SQLite: flat JSON does not scale. The redundancy is the
 **symbol strings** — they average **127 characters** and each is referenced
@@ -161,7 +161,7 @@ Query timing on that SQLite: `callers_of(makeResumeToken)` returns in
 **0.08 ms** off the B-tree index — versus ~3.4 s just to `load_json` the JSON
 into RAM today, per query, at 4–6 GB RSS.
 
-**Decision: ship Phase 2 as interned SQLite, plain TEXT, no compression codec.**
+**Decision: ship the store as interned SQLite, plain TEXT, no compression codec.**
 3.7× smaller is enough, and the *major* wins are the bounded memory and the
 per-query speed, not maximal shrinkage. Two things that made `indent=2` removal
 and codec compression not worth it up front:
@@ -175,7 +175,7 @@ and codec compression not worth it up front:
   plain TEXT but *cannot* do on a compressed blob without a separate full-text
   index or a plaintext copy. Only revisit if 338 MB ever becomes a real problem.
 
-Phase 2 target schema (stdlib `sqlite3`):
+Store schema (stdlib `sqlite3`):
 
 ```sql
 -- COLD: payload, read only to materialize the results shown
@@ -227,9 +227,9 @@ left uncompressed; gzipping it saves nothing measurable on the build path.
 
 ## Keeping the graph up to date
 
-MongoDB's source changes continuously; re-running a full index + full rebuild
-on every edit won't scale once Phase 2 covers all of `src/mongo`. Two update
-paths, kept in mind while designing the builder so this isn't a later rewrite:
+A large project's source changes continuously; re-running a full index + full
+rebuild on every edit won't scale. Two update paths, kept in mind while
+designing the builder so this isn't a later rewrite:
 
 1. **Re-indexing** is already naturally incremental at the `compile_commands.json`
    level: only the changed TUs need to go through `scip-clang` again (a filtered
@@ -262,7 +262,7 @@ paths, kept in mind while designing the builder so this isn't a later rewrite:
    unreferenced — so `find` never surfaces a symbol that no longer exists.
    SQLite maintains `ix_sym`/`ix_src`/`ix_dst` incrementally, so no index
    rebuild. Measured: a 519-TU partial (3833 documents) applied to the full
-   mongo store in ~10 s, over-capture preserved.
+   store in ~10 s, over-capture preserved.
 
    Caveat: the partial must be produced the *same way* as the base (same compdb
    scope/tree). A header's occurrences are source-line-local, so re-indexing
@@ -319,9 +319,8 @@ Consequence for query commands and the future MCP server: any operation that
 needs to actually read source (e.g. returning a code snippet for a
 `file:line` result) must take the checkout root as a **runtime argument**
 (CLI flag / MCP tool parameter), not something read from the graph store.
-This is what lets the same `graph.json` be reused after moving the mongo
-checkout, or handed to a teammate with their own local clone, without
-rebuilding anything.
+This is what lets the same graph store be reused after moving the checkout, or
+handed to a teammate with their own local clone, without rebuilding anything.
 
 ## Language choice
 
@@ -331,9 +330,4 @@ scale. Port hot paths to Rust only if a measurement demands it.
 
 ## Roadmap
 
-1. **POC**: install scip-clang; index one MongoDB subsystem (change_stream /
-   pipeline); parse SCIP; build calls graph; verify the `makeResumeToken`
-   disambiguation and a virtual-dispatch case that tree-sitter drops.
-2. Full `src/mongo` index; store; CLI queries.
-3. MCP server + token-budgeted retrieval.
-4. graph.json export for viz; generalize / document for any C++ project.
+See `CHANGELOG.md` for what's built and `TODO.md` for what's open.
