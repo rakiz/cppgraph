@@ -23,10 +23,11 @@ deterministic; the scripts fail loudly with actionable messages.
 > **RULE — heavy steps need explicit sign-off (do not skip).** Generating a
 > `compile_commands.json` (step 3) and building the graph (step 4) are the only
 > expensive steps; they use significant CPU. **Give a realistic estimate — do
-> not overstate.** Indexing takes **minutes to tens of minutes**, *not hours*
-> (reference: ~2.5 min for ~500 translation units, ~20 min for ~6000, in
-> parallel). To gauge, count entries in `compile_commands.json` (≈ one per TU):
-> very roughly a few minutes per 1000 TUs.
+> not overstate.** Indexing is usually **minutes to tens of minutes** (reference
+> on ~14 cores: ~2.5 min for ~500 translation units, ~20 min for ~6000; a few
+> minutes per 1000 TUs, proportionally longer on fewer cores). Gauge it by
+> counting entries in `compile_commands.json` (≈ one per TU). `reindex.sh` also
+> prints an exact estimate for the machine right before it starts indexing.
 >
 > Before running either heavy step, in **one message** you **MUST**:
 > 1. say what it does and a realistic time estimate (per above);

@@ -110,10 +110,31 @@ out_dir_for() {
   printf '%s' "$d"
 }
 
+num_jobs() { sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 4; }
+
+# Deterministic time estimate so neither a human nor an LLM has to guess (and
+# guess "hours"). Calibrated on measured runs: ~3 CPU-seconds per translation
+# unit, parallelised across -j cores, plus a small fixed overhead. Rough by
+# design — machines and TUs vary — but the right order of magnitude.
+print_estimate() {
+  # print_estimate FILTERED_COMPDB
+  local compdb="$1" jobs; jobs="$(num_jobs)"
+  python3 - "$compdb" "$jobs" <<'PY'
+import json, sys
+compdb, jobs = sys.argv[1], max(int(sys.argv[2]), 1)
+tus = len(json.load(open(compdb)))
+secs = tus * 3.0 / jobs + 10          # ~3 CPU-s/TU across `jobs` cores + overhead
+est = "under a minute" if secs < 60 else f"about {round(secs/60)} minute(s)"
+print(f"  {tus} translation units, indexing with -j{jobs}")
+print(f"  estimated time: {est} (rough, first run)")
+if secs > 300:
+    print("  tip: pass a subtree filter (e.g. 'src/foo/') to index less and go faster")
+PY
+}
+
 run_scip_clang() {
   # run_scip_clang PROJECT_ROOT COMPDB OUT_SCIP
-  local project_root="$1" compdb="$2" out_scip="$3" jobs
-  jobs="$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 4)"
+  local project_root="$1" compdb="$2" out_scip="$3" jobs; jobs="$(num_jobs)"
   echo "  running scip-clang (-j $jobs, cwd=$project_root) ..." >&2
   (
     cd "$project_root"
@@ -218,6 +239,7 @@ PYEOF
 
   echo "[3/4] Re-indexing the changed TUs ..."
   if [[ "$MATCHED" -gt 0 ]]; then
+    print_estimate "$PART_COMPDB"
     run_scip_clang "$PROJECT_ROOT" "$PART_COMPDB" "$PART_SCIP"
   else
     # Deletions only (or headers with no matching TU): produce an empty partial
@@ -314,6 +336,7 @@ if SRC_COMMIT="$(git -C "$PROJECT_ROOT" rev-parse HEAD 2>/dev/null)"; then
 fi
 
 echo "[2/3] Running scip-clang ..."
+print_estimate "$OUT_COMPDB"
 run_scip_clang "$PROJECT_ROOT" "$OUT_COMPDB" "$OUT_SCIP"
 
 echo "[3/3] Building the cppgraph graph ..."
