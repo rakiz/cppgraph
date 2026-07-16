@@ -20,6 +20,15 @@ If someone pointed you (an AI coding agent) here with *"install this tool:
 https://github.com/rakiz/cppgraph"*, follow these steps exactly. They are
 deterministic; the scripts fail loudly with actionable messages.
 
+> **RULE — never run a heavy step without asking first.** Generating a
+> `compile_commands.json` (step 3) and building the graph (step 4) can each take
+> **many minutes and saturate the machine** (full compiler build / indexing all
+> translation units). Before running either, you **MUST**: (a) tell the user
+> what it will do and roughly how long/heavy it is, (b) ask for explicit
+> permission, and (c) offer to hand them the exact command so they can run it
+> themselves instead. Do not launch these in the background silently. The light
+> steps (1, 2, 5, 6) you may run directly.
+
 1. **Check the platform.** Local indexing needs **macOS arm64** or **Linux
    x86_64**. On **Windows**, do everything inside **WSL2 (Ubuntu)**. On an
    **Intel Mac** indexing is not supported — stop and tell the user (they can
@@ -29,12 +38,21 @@ deterministic; the scripts fail loudly with actionable messages.
    git clone https://github.com/rakiz/cppgraph && cd cppgraph
    scripts/setup.sh              # venv + deps + scip-clang
    ```
-3. **Ask the user** for: (a) the path to their project's `compile_commands.json`,
-   (b) their project's source root directory, and (c) optionally a subtree
-   filter to skip vendored code (e.g. `src/`). If they don't have a
-   `compile_commands.json`, see [AGENTS.md](AGENTS.md) → "The compilation
-   database".
-4. **Build the graph** (one-time, can take minutes on a big codebase). It writes
+3. **Get a `compile_commands.json`.** Ask the user where theirs is. If they don't
+   have one, it must be generated — and generating it may run a **full build**
+   (long/heavy). Apply the RULE above: propose the right command, get the OK, or
+   let them run it. Detect the build system:
+   - `CMakeLists.txt` → re-configure with `-DCMAKE_EXPORT_COMPILE_COMMANDS=ON`
+     (the compdb lands in the build dir; symlink/copy it to the project root);
+   - `WORKSPACE`/`BUILD` (Bazel) → the `hedron_compile_commands` rule
+     (`bazel run @hedron_compile_commands//:refresh_all`);
+   - `Makefile`/other → `bear -- <their build command>`.
+
+   See [AGENTS.md](AGENTS.md) → "The compilation database" for details. Also ask
+   for the project's **source root** and, optionally, a **subtree filter** to
+   skip vendored code (e.g. `src/`).
+4. **Build the graph** — **heavy, apply the RULE above** (one-time, can take many
+   minutes on a big codebase). Get permission or hand over the command. It writes
    into the target project's own gitignored `.cppgraph/` and prints the exact
    register command to run next:
    ```bash
