@@ -131,6 +131,45 @@ until refreshed (`cppgraph status --root` detects drift against the indexed
 commit and points at `reindex.sh --update`). Serena is always in sync with the
 working tree.
 
+## Token cost: cppgraph vs a grep-and-read loop
+
+The tool an LLM actually reaches for first isn't graphify or Serena — it's
+`grep`. So the most practical comparison is: how many **tokens** does it cost to
+answer a dependency question each way? (Fewer tokens ingested = cheaper, faster,
+and more room left in the context window.)
+
+Same question, *"who calls the **method** `makeResumeToken`?"*. `makeResumeToken`
+resolves to **four** distinct symbols across `src/mongo` (a method, two
+test-helper free functions, an anonymous-namespace test symbol). Measured with
+`scripts/measure_tokens.py`:
+
+| Approach | Chars | ≈ Tokens\* | Correct? |
+|---|---|---|---|
+| `grep -rn makeResumeToken src/mongo` (untargeted) | 26,540 | ~6,600 | ✗ 4 symbols merged; decls/comments/strings; needs file reads to disambiguate |
+| grep on the known subtree `.../db/pipeline` (best case) | 23,569 | ~5,900 | ✗ same problems; targeting barely helps |
+| cppgraph `find` (639) + `who_calls` on the method (583) | 1,222 | **~300** | ✓ exact — the method's 3 callers, nothing else |
+
+**~22× fewer tokens** (untargeted) / ~19× (even against the best-case targeted
+grep) — and exact, where grep is ambiguous *and* still needs follow-up file
+reads. `find` alone is the step grep can't do: it splits the name into its four
+real symbols with their definition sites.
+
+The flip side, kept honest: a symbol with many *genuine* callers costs more in
+cppgraph too — the free-function `makeResumeToken` here has **122** callers
+(~10,200 tokens for the full attributed list). But that *is* the complete,
+exact answer; grep's 6,600 tokens don't contain an attributed caller list at all.
+The token win is in disambiguation + targeting a specific symbol, which is the
+actual question.
+
+\* **Method & honesty.** Tokens ≈ **characters ÷ 4** (`scripts/measure_tokens.py`,
+tunable). That's the rough rule for prose; code and SCIP symbol strings (heavy
+punctuation, hex hashes, paths) tokenize *denser* (~3–3.5 chars/token), so true
+counts are **higher on both sides** — deliberately conservative, ratio stable. No
+exact tokenizer is used: Claude's isn't available offline, and a proxy (e.g.
+tiktoken's `o200k_base`) would shift both sides similarly. grep is scoped to all
+of `src/mongo` (the realistic case — the LLM isn't told how to scope). cppgraph
+pays a one-time index (~minutes) amortized over every later query.
+
 ## Verdict — when to use which
 
 - **graphify**: fast, language-agnostic, zero build setup, nice clustering/viz.
@@ -158,6 +197,11 @@ working tree.
 cp -R <mongo>/src/mongo/db/pipeline /tmp/gp && cd /tmp/gp
 graphify update . --no-cluster            # → graphify-out/graph.json
 graphify explain "makeResumeToken"        # inspect nodes/edges
+
+# token cost: grep (whole tree + a known subtree) vs cppgraph find+who_calls
+.venv/bin/python scripts/measure_tokens.py makeResumeToken \
+  <mongo>/src/mongo <mongo>/.cppgraph/mongo.graph.db \
+  <mongo>/src/mongo/db/pipeline 'ChangeStreamEventTransformation#makeResumeToken'
 ```
 
 The Serena/clangd numbers were produced by driving Serena's bundled clangd

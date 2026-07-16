@@ -63,6 +63,9 @@ Everything so far — the project has not cut a numbered release yet.
 ### Docs
 - Measured comparison vs graphify (by-name) and Serena/clangd (LSP) on a real
   design question — see `COMPARISON.md`.
+- Token-cost comparison vs an LLM's own `grep`-and-read loop (`README.md` §"Why
+  not just grep?"), reproducible with `scripts/measure_tokens.py`: ~20× fewer
+  tokens to answer "who calls this method?", and exact.
 
 ### Project
 - Licensed **MIT**.

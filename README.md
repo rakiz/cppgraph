@@ -109,6 +109,38 @@ separated caller sets. Full write-up with numbers and reproduction steps:
 **[COMPARISON.md](COMPARISON.md)** (cppgraph vs graphify vs Serena/LSP, on a
 large C++ codebase).
 
+## Why not just grep?
+
+Your AI assistant already answers "what calls X?" — with `grep`. On a large C++
+codebase that's both **wrong** and **token-expensive**:
+
+- **Wrong.** grep matches by name: it merges distinct symbols sharing a name,
+  includes comments/strings/declarations, and misses calls it can't see
+  textually (`ptr->method()`, virtual dispatch, templates).
+- **Expensive.** The grep output is noisy, and to disambiguate, the assistant
+  then reads whole files — all of it flows through the model's context.
+
+Measured on MongoDB, question *"who calls the **method** `makeResumeToken`?"*
+(four distinct symbols share that name):
+
+| Approach | Tokens ingested\* | Correct? |
+|---|---|---|
+| `grep -rn makeResumeToken src/mongo` (untargeted — realistic) | ~6,600 | ✗ 4 symbols merged, decls/comments; needs file reads to disambiguate |
+| same grep on the known subtree (best case) | ~5,900 | ✗ same problems — targeting barely helps |
+| cppgraph `find` + `who_calls` on the method | **~300** | ✓ exact: the method's 3 callers, nothing else |
+
+→ **~20× fewer tokens, and exact** — and grep still needs follow-up file reads
+that cppgraph doesn't. The trade-off: a one-time index (minutes), amortized over
+every later query.
+
+\* ≈ chars÷4 — rough and deliberately **conservative** (code and SCIP symbol
+strings tokenize *denser* than prose, so real counts are higher; the ratio
+holds). grep is run over all of `src/mongo` because you don't know up front where
+the symbol lives — and the LLM isn't told how to scope it. A symbol with many
+*genuine* callers costs more in cppgraph too, but that's the complete, attributed
+list grep can't produce at all. Reproduce with `scripts/measure_tokens.py`; method
+in [COMPARISON.md](COMPARISON.md).
+
 ## Documentation
 
 | Doc | What's in it |
