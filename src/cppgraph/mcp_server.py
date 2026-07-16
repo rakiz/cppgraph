@@ -13,14 +13,16 @@ Two layers, deliberately split so the substance is testable without a transport:
   `truncated` flag and a `total` count, so a fan-out query (a symbol with
   hundreds of callers) never dumps the whole set into the model's context.
 - **Transport wiring** (`build_server` / `main`): a thin FastMCP layer that
-  binds one long-lived `GraphStore` (fixed at launch via `--graph`, so tools
-  don't re-pass a path the LLM would have to guess/repeat) to those functions.
+  binds one long-lived `GraphStore` (resolved at launch — from `--graph` or
+  auto-discovered from the cwd's `.cppgraph/`) to those functions.
 
-Token-economy defaults mirror the CLI's `explain`: coordinates (`file:line`)
-only, never source text, unless the caller explicitly asks (`include_source`)
-*and* the server was launched with a `--root` checkout. The premise is that an
-LLM calling these tools already has file access — coordinates are enough and far
-cheaper. `--root` also drives the `status` drift check.
+Source snippets: by default these tools return **coordinates** (`file:line`),
+which are cheap. When you actually want to see the code, pass
+`include_source=True` — cppgraph reads the file and returns the **snippet
+inline**, so the caller does *not* need a separate file-read step. This works
+out of the box: the checkout root is auto-discovered (the project that owns the
+`.cppgraph/`), so no `--root` flag is required. The same root drives the
+`status` drift check.
 """
 
 from __future__ import annotations
@@ -462,9 +464,10 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         symbol: str, include_source: bool = False, context: int = 0, limit: int = DEFAULT_LIMIT
     ) -> dict[str, Any]:
         """Exact use sites of a symbol ("where is this type/symbol used?") — the
-        dependency the call graph can't show (a struct has no callers). Needs a
-        graph unless built --no-references. Coordinates only unless include_source=True
-        and the server was launched with --root."""
+        dependency the call graph can't show (a struct has no callers). Returns
+        `file:line` coordinates; set `include_source=True` to also get the code
+        at each site **inline** (cppgraph reads it for you — no separate file
+        read needed). `context` sets lines around each site."""
         return _call(references, symbol, root=root, include_source=include_source,
                      context=context, limit=limit)
 
@@ -487,10 +490,11 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
     def explain_symbol(
         symbol: str, include_source: bool = False, context: int = 3, limit: int = EXPLAIN_LIMIT
     ) -> dict[str, Any]:
-        """Definition site + caller/callee summary for `symbol`. Coordinates only
-        by default; set `include_source=True` to also get a source snippet (needs
-        the server launched with --root). `limit` caps each of the caller/callee
-        lists (raise it when `truncated` is true and you need more)."""
+        """Definition site + caller/callee summary for `symbol`. Returns
+        `file:line` coordinates by default; set `include_source=True` to also get
+        the definition's source snippet **inline** (cppgraph reads it for you — no
+        separate file read needed). `limit` caps each of the caller/callee lists
+        (raise it when `truncated` is true and you need more)."""
         return _call(
             explain, symbol, root=root, include_source=include_source, context=context, limit=limit
         )
