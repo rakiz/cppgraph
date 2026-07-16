@@ -22,7 +22,7 @@ set -euo pipefail
 #   SRC_FILTER    substring filter applied to each compdb entry's "file"
 #                 field; omit or pass "" to index everything in the compdb
 #                 (default: "")
-#   OUT_NAME      basename (no extension) for the outputs under scratch/
+#   OUT_NAME      basename (no extension) for the outputs (default: project dir name)
 #                 (default: basename of COMPDB_PATH's parent directory)
 #   PROJECT_ROOT  directory to run scip-clang from — matters for the
 #                 project_root recorded in the SCIP index (see DESIGN.md
@@ -62,16 +62,17 @@ set -euo pipefail
 #     src/subsystem/ subsystem
 #
 # Example — incremental update after some edits:
-#   scripts/reindex.sh --update scratch/myproject.graph.db \
+#   scripts/reindex.sh --update /path/to/project/.cppgraph/myproject.graph.db \
 #     /path/to/project/compile_commands.json src/
 #
-# Outputs (all under scratch/, gitignored — never committed, see AGENTS.md
-# "Large artifacts"):
-#   scratch/<OUT_NAME>.compdb.json           filtered compile_commands.json subset
-#   scratch/<OUT_NAME>.scip                  scip-clang index (full build)
-#   scratch/<OUT_NAME>.graph.db              cppgraph build output (interned SQLite)
-#   scratch/<OUT_NAME>.partial.compdb.json   changed-TU compdb subset (--update)
-#   scratch/<OUT_NAME>.partial.scip          changed-TU scip-clang index (--update)
+# Outputs live in the TARGET project's own .cppgraph/ (next to its code, like
+# .vscode/), gitignored via a dropped-in .gitignore of "*" so they never dirty
+# the repo. PROJECT_ROOT/.cppgraph/:
+#   <OUT_NAME>.compdb.json           filtered compile_commands.json subset
+#   <OUT_NAME>.scip                  scip-clang index (full build)
+#   <OUT_NAME>.graph.db              cppgraph build output (interned SQLite)
+#   <OUT_NAME>.partial.compdb.json   changed-TU compdb subset (--update)
+#   <OUT_NAME>.partial.scip          changed-TU scip-clang index (--update)
 #
 # GOTCHA (kept here so it isn't rediscovered on the next project): some build
 # systems' generated compile_commands.json is not uniformly formatted — entries
@@ -84,18 +85,30 @@ set -euo pipefail
 # don't assume a compdb's "file" field is uniformly absolute or relative for
 # a new project either.
 #
-# Prerequisites: `scratch/bin/scip-clang` and the `.venv` set up per
-# INSTALL.md. Both are per-machine and gitignored, not provided by this repo.
+# Prerequisites: the scip-clang binary and the `.venv` — both set up by
+# scripts/setup.sh (per-machine, in the cppgraph checkout, not committed).
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Per-machine tool install (the scip-clang binary and the venv) lives in the
+# cppgraph checkout; per-project outputs live in the target (see out_dir_for).
 SCIP_CLANG="$REPO_ROOT/scratch/bin/scip-clang"
 VENV_PY="$REPO_ROOT/.venv/bin/python"
 CPPGRAPH="$REPO_ROOT/.venv/bin/cppgraph"
 
 if [[ ! -x "$SCIP_CLANG" ]]; then
-  echo "error: $SCIP_CLANG not found/executable. See INSTALL.md section 2." >&2
+  echo "error: $SCIP_CLANG not found/executable. Run scripts/setup.sh (or see INSTALL.md)." >&2
   exit 1
 fi
+
+# Per-project outputs (graph.db, .scip, filtered compdb) live in the target
+# project's own .cppgraph/ — next to the code they describe, like .vscode/, and
+# gitignored (a .gitignore of "*" is dropped in) so they never dirty the repo.
+out_dir_for() {
+  local d="$1/.cppgraph"
+  mkdir -p "$d"
+  [[ -f "$d/.gitignore" ]] || printf '*\n' > "$d/.gitignore"
+  printf '%s' "$d"
+}
 
 run_scip_clang() {
   # run_scip_clang PROJECT_ROOT COMPDB OUT_SCIP
@@ -124,20 +137,20 @@ if [[ "${1:-}" == "--update" ]]; then
   GRAPH_DB="$1"
   COMPDB="$2"
   SRC_FILTER="${3:-}"
-  COMPDB_DIR="$(cd "$(dirname "$COMPDB")" && pwd)"
-  PROJECT_ROOT="${4:-$COMPDB_DIR}"
-  OUT_NAME="$(basename "$GRAPH_DB")"; OUT_NAME="${OUT_NAME%.graph.db}"; OUT_NAME="${OUT_NAME%.db}"
-  PART_COMPDB="$REPO_ROOT/scratch/${OUT_NAME}.partial.compdb.json"
-  PART_SCIP="$REPO_ROOT/scratch/${OUT_NAME}.partial.scip"
-
   if [[ ! -f "$GRAPH_DB" ]]; then
-    echo "error: graph store $GRAPH_DB not found. Run a full build first." >&2
+    echo "error: graph store not found: $GRAPH_DB (run a full build first)." >&2
     exit 1
   fi
   if [[ ! -f "$COMPDB" ]]; then
-    echo "error: $COMPDB not found." >&2
+    echo "error: compile_commands.json not found: $COMPDB" >&2
     exit 1
   fi
+  COMPDB_DIR="$(cd "$(dirname "$COMPDB")" && pwd)"
+  PROJECT_ROOT="${4:-$COMPDB_DIR}"
+  OUT_NAME="$(basename "$GRAPH_DB")"; OUT_NAME="${OUT_NAME%.graph.db}"; OUT_NAME="${OUT_NAME%.db}"
+  OUT_DIR="$(out_dir_for "$PROJECT_ROOT")"
+  PART_COMPDB="$OUT_DIR/${OUT_NAME}.partial.compdb.json"
+  PART_SCIP="$OUT_DIR/${OUT_NAME}.partial.scip"
 
   # The store's provenance anchor: the commit whose sources it reflects.
   BASE_COMMIT="$("$VENV_PY" - "$GRAPH_DB" <<'PYEOF'
@@ -186,7 +199,7 @@ PYEOF
   # list can't also go on stdin — pass it via a file. Match compdb entries whose
   # "file" contains any changed path (substring, to tolerate the absolute/
   # relative mix — see GOTCHA above).
-  CHANGED_LIST="$REPO_ROOT/scratch/${OUT_NAME}.changed.txt"
+  CHANGED_LIST="$OUT_DIR/${OUT_NAME}.changed.txt"
   printf '%s\n' "$CHANGED" > "$CHANGED_LIST"
   MATCHED="$("$VENV_PY" - "$COMPDB" "$PART_COMPDB" "$CHANGED_LIST" <<'PYEOF'
 import json, sys
@@ -252,20 +265,20 @@ fi
 
 COMPDB="$1"
 SRC_FILTER="${2:-}"
+if [[ ! -f "$COMPDB" ]]; then
+  echo "error: compile_commands.json not found: $COMPDB" >&2
+  echo "       pass the path to your project's compile_commands.json as the first argument" >&2
+  echo "       (see AGENTS.md -> 'The compilation database' for how to produce one)." >&2
+  exit 1
+fi
 COMPDB_DIR="$(cd "$(dirname "$COMPDB")" && pwd)"
 OUT_NAME="${3:-$(basename "$COMPDB_DIR")}"
 PROJECT_ROOT="${4:-$COMPDB_DIR}"
 
-OUT_COMPDB="$REPO_ROOT/scratch/${OUT_NAME}.compdb.json"
-OUT_SCIP="$REPO_ROOT/scratch/${OUT_NAME}.scip"
-OUT_GRAPH="$REPO_ROOT/scratch/${OUT_NAME}.graph.db"
-
-if [[ ! -f "$COMPDB" ]]; then
-  echo "error: $COMPDB not found." >&2
-  exit 1
-fi
-
-mkdir -p "$REPO_ROOT/scratch"
+OUT_DIR="$(out_dir_for "$PROJECT_ROOT")"
+OUT_COMPDB="$OUT_DIR/${OUT_NAME}.compdb.json"
+OUT_SCIP="$OUT_DIR/${OUT_NAME}.scip"
+OUT_GRAPH="$OUT_DIR/${OUT_NAME}.graph.db"
 
 echo "[1/3] Filtering compile_commands.json (substring: '${SRC_FILTER:-<none, indexing everything>}') ..."
 python3 - "$COMPDB" "$SRC_FILTER" "$OUT_COMPDB" <<'PYEOF'
@@ -279,6 +292,12 @@ filtered = [e for e in data if src_filter in e["file"]] if src_filter else data
 with open(out_path, "w") as f:
     json.dump(filtered, f)
 print(f"  {len(filtered)} of {len(data)} compdb entries matched")
+if src_filter and not filtered:
+    sys.exit(
+        f"  error: 0 entries matched filter {src_filter!r}. It is a plain "
+        f"substring of each entry's \"file\" field (e.g. 'src/', no leading "
+        f"slash). Check a sample path in {compdb_path} and adjust."
+    )
 PYEOF
 
 # Capture the source commit NOW, before indexing — this is the accurate moment
@@ -301,7 +320,7 @@ echo "[3/3] Building the cppgraph graph ..."
 "$CPPGRAPH" build --scip "$OUT_SCIP" --out "$OUT_GRAPH" \
   ${BUILD_PROVENANCE[@]+"${BUILD_PROVENANCE[@]}"}
 
-echo "Done."
-echo "  $OUT_COMPDB"
-echo "  $OUT_SCIP"
-echo "  $OUT_GRAPH"
+echo "Done. Graph: $OUT_GRAPH"
+echo
+echo "Register it with Claude Code (then open a new session):"
+echo "  scripts/register-mcp.sh \"$OUT_GRAPH\" \"$PROJECT_ROOT\""

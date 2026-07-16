@@ -14,6 +14,39 @@ dispatch, and pointer/reference method calls).
 > symbol has a stable, unique identity (USR / mangled name), so the graph is the
 > one the compiler actually sees.
 
+## Install with your AI agent
+
+If someone pointed you (an AI coding agent) here with *"install this tool:
+https://github.com/rakiz/cppgraph"*, follow these steps exactly. They are
+deterministic; the scripts fail loudly with actionable messages.
+
+1. **Check the platform.** Local indexing needs **macOS arm64** or **Linux
+   x86_64**. On **Windows**, do everything inside **WSL2 (Ubuntu)**. On an
+   **Intel Mac** indexing is not supported — stop and tell the user (they can
+   still use a graph built elsewhere).
+2. **Clone and set up** (needs [`uv`](https://docs.astral.sh/uv/) and `curl`):
+   ```bash
+   git clone https://github.com/rakiz/cppgraph && cd cppgraph
+   scripts/setup.sh              # venv + deps + scip-clang
+   ```
+3. **Ask the user** for: (a) the path to their project's `compile_commands.json`,
+   (b) their project's source root directory, and (c) optionally a subtree
+   filter to skip vendored code (e.g. `src/`). If they don't have a
+   `compile_commands.json`, see [AGENTS.md](AGENTS.md) → "The compilation
+   database".
+4. **Build the graph** (one-time, can take minutes on a big codebase). It writes
+   into the target project's own gitignored `.cppgraph/` and prints the exact
+   register command to run next:
+   ```bash
+   scripts/reindex.sh <compile_commands.json> <filter> myproject
+   ```
+5. **Register the MCP server** by running the `scripts/register-mcp.sh …` command
+   that step 4 printed (it has the correct paths).
+6. **Tell the user to open a new Claude Code session**, then ask questions like
+   *"what calls X?"*, *"impact of changing Y?"*, *"show the dependency graph of Z"*.
+
+Humans: the same flow, step by step, is in [QUICKSTART.md](QUICKSTART.md).
+
 ## Status
 
 Early, but functional end-to-end: build, query, incremental update, an MCP

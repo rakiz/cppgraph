@@ -21,3 +21,6 @@ compile_commands.json
 graph.db
 graph.sqlite
 scratch/
+# per-project outputs land in the target's .cppgraph/ (self-ignored there via a
+# dropped-in .gitignore); also ignore it here in case a run targets this repo.
+.cppgraph/

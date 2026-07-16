@@ -77,19 +77,27 @@ tool takes the path as an argument — never hard-code it.
 ## Guardrails
 
 - **Do not commit without the maintainer saying so explicitly.**
-- Keep target repos read-only. This tool never writes into the target; it only
-  reads `compile_commands.json` (and, with `--root`, sources) by path.
-- Large artifacts (`*.scip`, graph dumps, `compile_commands.json`) stay
-  gitignored / in `scratch/`.
+- Treat the target's **source** as read-only — never modify code or build files.
+  The one thing the tool writes into the target is a **gitignored `.cppgraph/`**
+  directory (its own outputs: `graph.db`, `.scip`, filtered compdb), dropped in
+  with a `.gitignore` of `*` so it never dirties the repo — like `.vscode/`.
+  Everything else is read (`compile_commands.json`, and sources with `--root`).
+- The per-machine tool install (the `scip-clang` binary, the `.venv`) lives in
+  this cppgraph checkout under `scratch/` — gitignored, set up by
+  `scripts/setup.sh`.
 
 ## Layout
 
 ```
 src/cppgraph/     package (cli, builder, scip parser, store, queries, mcp, export)
 viz/              bundled offline graph viewer (HTML + vendored vis-network)
+scripts/          setup.sh, reindex.sh, register-mcp.sh
 tests/            pytest
-scratch/          local indexes, throwaway outputs (gitignored)
+scratch/          per-machine tool install (scip-clang binary) + throwaway (gitignored)
 DESIGN.md         architecture + edge model
 CHANGELOG.md      what's been done
 TODO.md           open tasks
 ```
+
+Per-project outputs (`graph.db`, `.scip`) live in the **target** project's
+`.cppgraph/`, not here.
