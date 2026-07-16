@@ -63,6 +63,25 @@ When scip-clang emits `enclosing_range` (PR #504), *attributed* reference
 worth adding then as an opt-in, type-only ("A") or all ("B"). Until then,
 locations-only. See TODO.md.
 
+### Templates (measured, not assumed)
+
+scip-clang v0.4.0 represents each template as **one symbol — the primary
+template** — not one per instantiation. Verified empirically: a function
+template `maxv<T>` called as `maxv<int>` and `maxv<double>`, and a class
+template `Box<T>` used as `Box<int>`/`Box<double>`, each produce a *single* node
+(`maxv(…).`, `Box#`, `Box#get(…).`); every instantiation's call site attributes
+to that one node. So the graph does **not** fragment across instantiations — no
+collapse layer is needed, and `who_calls`/`impact` on a template already
+aggregate all instantiations (the right default for "what does changing this
+template affect?").
+
+The flip side: per-instantiation granularity is unavailable — the graph knows
+"calls to `maxv`", not "calls to `maxv<int>` specifically". *Explicit* and
+*partial specializations* are genuinely different code and are expected to be
+distinct symbols (correct); that edge case, plus cross-TU instantiation merging,
+wasn't exhaustively measured — the core "one node vs N" question is what's
+settled.
+
 ## Building calls from SCIP
 
 SCIP gives occurrences (symbol, range, roles). The original plan was to

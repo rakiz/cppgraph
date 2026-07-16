@@ -18,8 +18,3 @@ proxy can't give it in class bodies, so until #504 we stay locations-only
   traversable, exact via containment.
 - `usage` view at **symbol** granularity (type → the functions that use it)
   instead of file granularity, for `export --mode usage` / the `visualize` tool.
-
-## Open questions
-
-- Templates & header-only: how instantiations appear in SCIP; whether to
-  collapse instantiations to the primary template node.
