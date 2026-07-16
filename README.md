@@ -20,14 +20,23 @@ If someone pointed you (an AI coding agent) here with *"install this tool:
 https://github.com/rakiz/cppgraph"*, follow these steps exactly. They are
 deterministic; the scripts fail loudly with actionable messages.
 
-> **RULE — never run a heavy step without asking first.** Generating a
-> `compile_commands.json` (step 3) and building the graph (step 4) can each take
-> **many minutes and saturate the machine** (full compiler build / indexing all
-> translation units). Before running either, you **MUST**: (a) tell the user
-> what it will do and roughly how long/heavy it is, (b) ask for explicit
-> permission, and (c) offer to hand them the exact command so they can run it
-> themselves instead. Do not launch these in the background silently. The light
-> steps (1, 2, 5, 6) you may run directly.
+> **RULE — heavy steps need explicit sign-off (do not skip).** Generating a
+> `compile_commands.json` (step 3) and building the graph (step 4) are the only
+> expensive steps; they use significant CPU. **Give a realistic estimate — do
+> not overstate.** Indexing takes **minutes to tens of minutes**, *not hours*
+> (reference: ~2.5 min for ~500 translation units, ~20 min for ~6000, in
+> parallel). To gauge, count entries in `compile_commands.json` (≈ one per TU):
+> very roughly a few minutes per 1000 TUs.
+>
+> Before running either heavy step, in **one message** you **MUST**:
+> 1. say what it does and a realistic time estimate (per above);
+> 2. show the **exact command, verbatim** (so they can run it themselves);
+> 3. ask the user to pick: **"I run it for you"** or **"you run it yourself"**.
+>
+> Then stop and wait — do not start until they choose, and never launch it in
+> the background. Tip: for a first try, suggest scoping to one subtree (a filter
+> like `src/foo/`) so it finishes in a couple of minutes. The light steps (1, 2,
+> 5, 6) you may run directly.
 
 1. **Check the platform.** Local indexing needs **macOS arm64** or **Linux
    x86_64**. On **Windows**, do everything inside **WSL2 (Ubuntu)**. On an
@@ -51,10 +60,11 @@ deterministic; the scripts fail loudly with actionable messages.
    See [AGENTS.md](AGENTS.md) → "The compilation database" for details. Also ask
    for the project's **source root** and, optionally, a **subtree filter** to
    skip vendored code (e.g. `src/`).
-4. **Build the graph** — **heavy, apply the RULE above** (one-time, can take many
-   minutes on a big codebase). Get permission or hand over the command. It writes
-   into the target project's own gitignored `.cppgraph/` and prints the exact
-   register command to run next:
+4. **Build the graph** — **heavy: apply the RULE above** (one-time; minutes to
+   tens of minutes, *not hours*). Present this exact command, with a realistic
+   estimate, and let the user choose to run it or have you run it. Prefer a
+   `<filter>` (e.g. `src/foo/`) on a first run so it finishes fast. It writes
+   into the target's gitignored `.cppgraph/` and prints the register command:
    ```bash
    scripts/reindex.sh <compile_commands.json> <filter> myproject
    ```
