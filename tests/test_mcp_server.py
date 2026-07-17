@@ -504,3 +504,61 @@ def test_path_not_found_carries_dispatch_hint(store: GraphStore) -> None:
     assert result["found"] is False
     assert "hint" in result
     assert "dispatch" in result["hint"] or "factory" in result["hint"]
+
+
+def test_find_hide_trivial_drops_generated(tmp_path: Path) -> None:
+    real = "cxx . . $ mongo/DocumentSourceChangeStream#buildPipeline(a1)."
+    lam = "cxx . . $ mongo/`$anonymous_type_7`#operator()(a2)."
+    op = "cxx . . $ mongo/Pipeline#operator==(a3)."
+    graph = Graph()
+    for s in (real, lam, op):
+        graph.nodes[s] = Node(symbol=s, file="cs.cpp", line=1)
+    path = tmp_path / "noise.db"
+    write_sqlite(graph, path)
+    st = GraphStore(path)
+
+    full = mcp_server.find_symbols(st, "mongo")
+    assert full["total"] == 3
+    assert "trivial_hidden" not in full  # lossless by default
+
+    filtered = mcp_server.find_symbols(st, "mongo", hide_trivial=True)
+    assert filtered["total"] == 1
+    assert filtered["trivial_hidden"] == 2
+    assert filtered["results"][0]["symbol"] == real
+
+
+def test_find_relaxes_qualified_zero_hit(tmp_path: Path) -> None:
+    # A free function; a guess qualifying it under a class finds nothing exactly,
+    # so find retries on the leaf name and flags the result relaxed.
+    free = "cxx . . $ mongo/change_stream/pipeline_helpers/buildPipeline(a1)."
+    graph = Graph()
+    graph.nodes[free] = Node(symbol=free, file="ph.cpp", line=1)
+    path = tmp_path / "relax.db"
+    write_sqlite(graph, path)
+    st = GraphStore(path)
+
+    r = mcp_server.find_symbols(st, "DocumentSourceChangeStream#buildPipeline")
+    assert r["total"] == 1
+    assert r["relaxed"] is True
+    assert r["relaxed_query"] == "buildPipeline"
+    assert r["results"][0]["symbol"] == free
+
+
+def test_find_no_relax_when_exact_hits(store: GraphStore) -> None:
+    # An exact hit must not trigger the relaxed retry.
+    r = mcp_server.find_symbols(store, "Foo#makeResumeToken")
+    assert r["total"] >= 1
+    assert "relaxed" not in r
+
+
+def test_find_no_relax_for_bare_leaf(tmp_path: Path) -> None:
+    # A bare name with no qualifier separator and no hits stays a plain 0.
+    graph = Graph()
+    graph.nodes["cxx . . $ mongo/Foo#bar(a1)."] = Node(
+        symbol="cxx . . $ mongo/Foo#bar(a1).", file="f.cpp", line=1
+    )
+    path = tmp_path / "bare.db"
+    write_sqlite(graph, path)
+    r = mcp_server.find_symbols(GraphStore(path), "nonexistent")
+    assert r["total"] == 0
+    assert "relaxed" not in r

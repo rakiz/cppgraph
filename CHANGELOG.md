@@ -97,10 +97,19 @@ misleading rather than merely terse.
   with the reference-site count and points to `find_references` /
   `kind="inherits"` — never a misleading empty blast radius. Mirrored in the
   CLI `impact` command.
-- **`what_it_calls` opt-in `hide_trivial`**: drops ubiquitous helpers
-  (`operator==`, `tassert`/`uassert`, `makeStatus`, `source_location`, …) so the
-  domain edges stand out; `trivial_hidden` reports how many were cut. Default
-  stays lossless.
+- **Opt-in `hide_trivial` on `what_it_calls` and `find`**: drops ubiquitous
+  helpers (`operator==`, `tassert`/`uassert`, `makeStatus`, `source_location`, …)
+  and, for `find`, compiler-generated hits (unnamed-type lambdas
+  `$anonymous_type_N#…`) so the domain symbols stand out; `trivial_hidden`
+  reports how many were cut. Default stays lossless.
+- **`find` relaxes a zero-hit qualified guess**: when `Class#method` (a wrong
+  qualifier — e.g. a free function guessed as a method) matches nothing exactly,
+  `find` retries once on the bare leaf name and flags the response `relaxed`, so
+  a too-precise guess degrades to a hint instead of a silent empty answer.
+- **`what_it_calls` documents it returns a set, not a sequence**: the tool
+  description now states callees are unordered and can't convey execution order
+  or conditional calls — read the body for order (a fundamental static-graph
+  limit, called out so it isn't mistaken for a gap).
 - **Default fan-out cap raised 25 → 40**: a real function's callee set had
   genuine edges pushed past 25; the new default clears a typical fan-out.
 - **`path` failure carries a hint**: a missing *static* call chain now explains

@@ -106,6 +106,22 @@ def _qualified_name(symbol: str) -> str:
     return label.split("(", 1)[0].rstrip(".")
 
 
+def _loosen_to_leaf(query: str) -> str | None:
+    """The trailing name segment of a qualified query, or None if there's nothing
+    to loosen.
+
+    `find` is an exact substring match, so a guessed *qualifier* that's wrong
+    (`Class#method` when `method` is actually a free function, or a wrong
+    namespace) returns nothing even though the bare name exists. Dropping
+    everything up to the last `#`, `::`, or `/` gives the leaf name to retry on.
+    Returns None when the query has no such separator (it's already a leaf, so
+    there's nothing to relax)."""
+    leaf = re.split(r"#|::|/", query.rstrip(".#")).pop().strip()
+    if not leaf or leaf == query:
+        return None
+    return leaf
+
+
 # Callees an LLM almost never cares about when reading "what does this call?":
 # ubiquitous comparison/assertion/error-wrapping helpers and compiler builtins
 # that bury the domain edges. Matched against the readable label (substring for
@@ -135,6 +151,17 @@ def _is_trivial_callee(symbol: str) -> bool:
     if leaf in _TRIVIAL_CALLEE_NAMES:
         return True
     return any(s in label for s in _TRIVIAL_CALLEE_SUBSTR)
+
+
+def _is_noise_symbol(symbol: str) -> bool:
+    """True if `symbol` is a compiler-generated / boilerplate hit a `find` almost
+    never wants: an unnamed type (a lambda surfaces as `$anonymous_type_N#…`), or
+    a trivial helper (operators, `*assert`, `makeStatus`, …). Anonymous
+    *namespace* functions are real code and are **not** filtered — only unnamed
+    *types* are. Opt-in via `hide_trivial` so the default `find` stays lossless."""
+    if "$anonymous_type" in symbol:
+        return True
+    return _is_trivial_callee(symbol)
 
 
 def _label(symbol: str, node: Node | None) -> str:
@@ -217,13 +244,36 @@ def _merged_source(
     return [{"line": i + 1, "text": lines[i], "is_use": i in hits} for i in sorted(wanted)]
 
 
-def find_symbols(store: GraphStore, query: str, limit: int = DEFAULT_LIMIT) -> dict[str, Any]:
+def find_symbols(
+    store: GraphStore, query: str, limit: int = DEFAULT_LIMIT, hide_trivial: bool = False
+) -> dict[str, Any]:
     """Symbols whose SCIP string or display name contains `query`.
 
     The entry point to every other tool: SCIP symbol strings aren't memorable,
     so an LLM resolves a human name here first, then feeds the exact string on.
+    With `hide_trivial=True`, compiler-generated / boilerplate hits (unnamed-type
+    lambdas, operators, `*assert`/`makeStatus`, …) are dropped and counted as
+    `trivial_hidden`, so a broad query isn't buried in noise.
+
+    On an exact-zero result for a *qualified* query (`Class#method`, a wrong
+    guess), `find` retries once on the bare leaf name and flags the response
+    `relaxed` — so a too-precise guess degrades to a hint instead of a silent
+    empty answer.
     """
     matches = store.find(query)
+    relaxed_query: str | None = None
+    if not matches:
+        leaf = _loosen_to_leaf(query)
+        if leaf:
+            loosened = store.find(leaf)
+            if loosened:
+                matches = loosened
+                relaxed_query = leaf
+    trivial_hidden = 0
+    if hide_trivial:
+        kept = [n for n in matches if not _is_noise_symbol(n.symbol)]
+        trivial_hidden = len(matches) - len(kept)
+        matches = kept
 
     # Group overloads: signatures sharing a qualified name (distinct SCIP hashes
     # for the same `Class::method`) collapse into one entry, so querying doesn't
@@ -243,13 +293,24 @@ def find_symbols(store: GraphStore, query: str, limit: int = DEFAULT_LIMIT) -> d
             entry["signatures"] = [_node_dict(m, full_symbols=True) for m in members]
         results.append(entry)
 
-    return {
+    result = {
         "query": query,
         "total": len(matches),
         "groups": len(groups),
         "truncated": truncated,
         "results": results,
     }
+    if relaxed_query is not None:
+        result["relaxed"] = True
+        result["relaxed_query"] = relaxed_query
+        result["note"] = (
+            f"no exact match for {query!r}; showing results for the loosened "
+            f"name {relaxed_query!r} (the qualifier may be wrong — e.g. a free "
+            "function, not a method)"
+        )
+    if hide_trivial:
+        result["trivial_hidden"] = trivial_hidden
+    return result
 
 
 def callers(
@@ -703,10 +764,16 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         return fn(store, *args, **kwargs)
 
     @mcp.tool()
-    def find(query: str, limit: int = DEFAULT_LIMIT) -> dict[str, Any]:
-        """Find C++ symbols by name substring. Start here: other tools need the
-        exact SCIP symbol string this returns, not a human name."""
-        return _call(find_symbols, query, limit=limit)
+    def find(query: str, limit: int = DEFAULT_LIMIT, hide_trivial: bool = False) -> dict[str, Any]:
+        """Find C++ symbols by name. Start here: other tools need the exact SCIP
+        symbol string this returns, not a human name. A multi-word query is an
+        order-free AND (every word must appear); overloads sharing a qualified
+        name group under one result. A qualified query that matches nothing
+        (`Class#method` guessed wrong) is retried once on the bare leaf name and
+        flagged `relaxed`. Set `hide_trivial=True` to drop compiler-generated /
+        boilerplate hits (lambdas, operators, `*assert`, `makeStatus`, …) —
+        `trivial_hidden` reports how many were cut."""
+        return _call(find_symbols, query, limit=limit, hide_trivial=hide_trivial)
 
     @mcp.tool()
     def who_calls(
@@ -736,7 +803,13 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         (`full_symbols=True` for raw SCIP); callees in test files dropped unless
         `exclude_tests=False`. Set `hide_trivial=True` to drop ubiquitous helpers
         (operators, tassert/uassert, makeStatus, source_location, …) so the
-        domain edges stand out — `trivial_hidden` reports how many were cut."""
+        domain edges stand out — `trivial_hidden` reports how many were cut.
+
+        NOTE: this is an unordered *set* of callees, not an execution sequence.
+        It cannot tell you the order calls happen in, nor which are conditional
+        (`if (…) x();`). For stage/step order, read the function body — sorting
+        callees by `file:line` only approximates textual order, not runtime
+        order."""
         return _call(
             callees,
             symbol,
