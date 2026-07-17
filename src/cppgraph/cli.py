@@ -16,6 +16,7 @@ from cppgraph.store import (
     build_provenance,
     changed_files_since,
     commits_behind,
+    discover_graph,
     staleness_verdict,
     update_store,
     write_sqlite,
@@ -59,6 +60,61 @@ def read_source_snippet(
 def _print_edge(edge: Edge, *, other: str) -> None:
     line = edge.line + 1 if edge.line is not None else "?"
     print(f"  {other}  ({edge.file}:{line})")
+
+
+def _resolve_graph(args: argparse.Namespace, parser: argparse.ArgumentParser) -> str:
+    """The graph store path: explicit `--graph`, else auto-discovered from the
+    cwd (or `--root`) — the same `.cppgraph/*.graph.db` walk the MCP server does,
+    so running from inside an indexed project needs no `--graph`."""
+    if getattr(args, "graph", None):
+        return args.graph
+    found = discover_graph(getattr(args, "root", None) or None)
+    if found is None:
+        parser.error(
+            "no --graph given and no .cppgraph/*.graph.db found from here. "
+            "Pass --graph <store.db>, or run from inside an indexed project "
+            "(build one with scripts/reindex.sh)."
+        )
+    graph, _root = found
+    return str(graph)
+
+
+def _resolve_symbol(
+    store: GraphStore,
+    query: str,
+    parser: argparse.ArgumentParser,
+    *,
+    what: str = "symbol",
+) -> str:
+    """Accept a plain name, not just the exact SCIP symbol string. If `query` is
+    already an exact symbol, use it; otherwise resolve via `find` — one match is
+    used directly (noted on a TTY), several are listed so the caller can pick the
+    exact one, none is an error. Lets `callers foo` work like `find` + `callers`."""
+    if store.has_symbol(query):
+        return query
+    matches = store.find(query)
+    if not matches:
+        parser.error(f"unknown {what}: {query} (use `cppgraph find` to look it up)")
+    if len(matches) == 1:
+        sym = matches[0].symbol
+        if sys.stderr.isatty():
+            print(f"[cppgraph] resolved {query!r} -> {sym}", file=sys.stderr)
+        return sym
+    print(
+        f"[cppgraph] {query!r} is ambiguous ({len(matches)} matches) — "
+        "pass the exact SCIP symbol:",
+        file=sys.stderr,
+    )
+    for node in matches[:10]:
+        loc = (
+            f"{node.file}:{node.line + 1}"
+            if node.file is not None and node.line is not None
+            else "?"
+        )
+        print(f"    {node.symbol}  ({node.display_name or '?'} @ {loc})", file=sys.stderr)
+    if len(matches) > 10:
+        print(f"    ... and {len(matches) - 10} more", file=sys.stderr)
+    parser.error(f"ambiguous {what}: {query}")
 
 
 def build_export_json(
@@ -152,30 +208,36 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     p_find = sub.add_parser("find", help="find symbols by name (SCIP symbol strings aren't memorable)")
-    p_find.add_argument("--graph", required=True, help="path to a graph store built by `cppgraph build`")
+    p_find.add_argument("--graph", required=False, default=None,
+        help="graph store path (default: auto-discovered from the cwd's .cppgraph/)")
     p_find.add_argument("query", help="substring to match against symbol or display name")
 
     p_callers = sub.add_parser("callers", help="list callers of a symbol")
-    p_callers.add_argument("--graph", required=True, help="path to a graph store built by `cppgraph build`")
+    p_callers.add_argument("--graph", required=False, default=None,
+        help="graph store path (default: auto-discovered from the cwd's .cppgraph/)")
     p_callers.add_argument("symbol", help="exact SCIP symbol string (see `find`)")
 
     p_callees = sub.add_parser("callees", help="list callees of a symbol")
-    p_callees.add_argument("--graph", required=True, help="path to a graph store built by `cppgraph build`")
+    p_callees.add_argument("--graph", required=False, default=None,
+        help="graph store path (default: auto-discovered from the cwd's .cppgraph/)")
     p_callees.add_argument("symbol", help="exact SCIP symbol string (see `find`)")
 
     p_bases = sub.add_parser("bases", help="direct base classes a type inherits from")
-    p_bases.add_argument("--graph", required=True, help="path to a graph store built by `cppgraph build`")
+    p_bases.add_argument("--graph", required=False, default=None,
+        help="graph store path (default: auto-discovered from the cwd's .cppgraph/)")
     p_bases.add_argument("symbol", help="exact SCIP symbol string of a type (see `find`)")
 
     p_subtypes = sub.add_parser("subtypes", help="direct subclasses of a type")
-    p_subtypes.add_argument("--graph", required=True, help="path to a graph store built by `cppgraph build`")
+    p_subtypes.add_argument("--graph", required=False, default=None,
+        help="graph store path (default: auto-discovered from the cwd's .cppgraph/)")
     p_subtypes.add_argument("symbol", help="exact SCIP symbol string of a type (see `find`)")
 
     p_refs = sub.add_parser(
         "references",
         help="exact use sites of a symbol (unless the graph was built --no-references)",
     )
-    p_refs.add_argument("--graph", required=True, help="path to a graph store built by `cppgraph build`")
+    p_refs.add_argument("--graph", required=False, default=None,
+        help="graph store path (default: auto-discovered from the cwd's .cppgraph/)")
     p_refs.add_argument("symbol", help="exact SCIP symbol string (see `find`)")
     p_refs.add_argument(
         "--root", default=None,
@@ -191,12 +253,14 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     p_path = sub.add_parser("path", help="shortest call chain from one symbol to another")
-    p_path.add_argument("--graph", required=True, help="path to a graph store built by `cppgraph build`")
+    p_path.add_argument("--graph", required=False, default=None,
+        help="graph store path (default: auto-discovered from the cwd's .cppgraph/)")
     p_path.add_argument("src", help="exact SCIP symbol string (see `find`)")
     p_path.add_argument("dst", help="exact SCIP symbol string (see `find`)")
 
     p_impact = sub.add_parser("impact", help="reverse blast-radius: everything that transitively calls a symbol")
-    p_impact.add_argument("--graph", required=True, help="path to a graph store built by `cppgraph build`")
+    p_impact.add_argument("--graph", required=False, default=None,
+        help="graph store path (default: auto-discovered from the cwd's .cppgraph/)")
     p_impact.add_argument("symbol", help="exact SCIP symbol string (see `find`)")
     p_impact.add_argument(
         "--depth", type=int, default=None, help="max hops to walk backwards (default: unbounded)"
@@ -211,7 +275,8 @@ def main(argv: list[str] | None = None) -> int:
         "status",
         help="show the graph's source commit and, with --root, whether the checkout has drifted",
     )
-    p_status.add_argument("--graph", required=True, help="path to a graph store built by `cppgraph build`")
+    p_status.add_argument("--graph", required=False, default=None,
+        help="graph store path (default: auto-discovered from the cwd's .cppgraph/)")
     p_status.add_argument(
         "--root", default=None,
         help="checkout root to compare against (runtime argument). With it, "
@@ -223,7 +288,8 @@ def main(argv: list[str] | None = None) -> int:
         "explain",
         help="summarize a symbol: definition site, source snippet, callers/callees",
     )
-    p_explain.add_argument("--graph", required=True, help="path to a graph store built by `cppgraph build`")
+    p_explain.add_argument("--graph", required=False, default=None,
+        help="graph store path (default: auto-discovered from the cwd's .cppgraph/)")
     p_explain.add_argument("symbol", help="exact SCIP symbol string (see `find`)")
     p_explain.add_argument(
         "--root", default=None,
@@ -242,7 +308,8 @@ def main(argv: list[str] | None = None) -> int:
         help="export a viewable subgraph around a symbol as graphify-compatible "
         "graph.json (open it in viz/ or in graphify)",
     )
-    p_export.add_argument("--graph", required=True, help="path to a graph store built by `cppgraph build`")
+    p_export.add_argument("--graph", required=False, default=None,
+        help="graph store path (default: auto-discovered from the cwd's .cppgraph/)")
     p_export.add_argument("symbol", help="exact SCIP symbol string to center the view on (see `find`)")
     p_export.add_argument(
         "--depth", type=int, default=2, metavar="N",
@@ -278,7 +345,8 @@ def main(argv: list[str] | None = None) -> int:
         help="one-shot visualize: build the subgraph, write a self-contained "
         "HTML to a temp dir, and open it in your browser",
     )
-    p_view.add_argument("--graph", required=True, help="path to a graph store built by `cppgraph build`")
+    p_view.add_argument("--graph", required=False, default=None,
+        help="graph store path (default: auto-discovered from the cwd's .cppgraph/)")
     p_view.add_argument("symbol", help="exact SCIP symbol string to center on (see `find`)")
     p_view.add_argument("--mode", choices=("deps", "usage"), default="deps",
                         help="'deps' (call/inherit subgraph) or 'usage' (symbol->file usage graph)")
@@ -338,7 +406,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "find":
-        store = GraphStore(args.graph)
+        store = GraphStore(_resolve_graph(args, parser))
         matches = store.find(args.query)
         if not matches:
             print(f"[cppgraph] no symbol matching {args.query!r}")
@@ -348,9 +416,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "callers":
-        store = GraphStore(args.graph)
-        if not store.has_symbol(args.symbol):
-            parser.error(f"unknown symbol: {args.symbol} (use `cppgraph find` to look it up)")
+        store = GraphStore(_resolve_graph(args, parser))
+        args.symbol = _resolve_symbol(store, args.symbol, parser)
         edges = store.callers_of(args.symbol)
         print(f"[cppgraph] {len(edges)} caller(s) of {args.symbol}")
         for edge in edges:
@@ -358,9 +425,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "callees":
-        store = GraphStore(args.graph)
-        if not store.has_symbol(args.symbol):
-            parser.error(f"unknown symbol: {args.symbol} (use `cppgraph find` to look it up)")
+        store = GraphStore(_resolve_graph(args, parser))
+        args.symbol = _resolve_symbol(store, args.symbol, parser)
         edges = store.callees_of(args.symbol)
         print(f"[cppgraph] {len(edges)} callee(s) of {args.symbol}")
         for edge in edges:
@@ -368,9 +434,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "bases":
-        store = GraphStore(args.graph)
-        if not store.has_symbol(args.symbol):
-            parser.error(f"unknown symbol: {args.symbol} (use `cppgraph find` to look it up)")
+        store = GraphStore(_resolve_graph(args, parser))
+        args.symbol = _resolve_symbol(store, args.symbol, parser)
         bases = store.bases_of(args.symbol)
         print(f"[cppgraph] {len(bases)} base class(es) of {args.symbol}")
         for node in bases:
@@ -378,9 +443,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "subtypes":
-        store = GraphStore(args.graph)
-        if not store.has_symbol(args.symbol):
-            parser.error(f"unknown symbol: {args.symbol} (use `cppgraph find` to look it up)")
+        store = GraphStore(_resolve_graph(args, parser))
+        args.symbol = _resolve_symbol(store, args.symbol, parser)
         subs = store.subtypes_of(args.symbol)
         print(f"[cppgraph] {len(subs)} subclass(es) of {args.symbol}")
         for node in subs:
@@ -388,9 +452,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "references":
-        store = GraphStore(args.graph)
-        if not store.has_symbol(args.symbol):
-            parser.error(f"unknown symbol: {args.symbol} (use `cppgraph find` to look it up)")
+        store = GraphStore(_resolve_graph(args, parser))
+        args.symbol = _resolve_symbol(store, args.symbol, parser)
         refs = store.references_of(args.symbol)
         if not refs and store.meta().get("has_references") != "true":
             print("[cppgraph] this graph was built with --no-references (no location index)")
@@ -412,11 +475,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "path":
-        store = GraphStore(args.graph)
-        if not store.has_symbol(args.src):
-            parser.error(f"unknown symbol: {args.src} (use `cppgraph find` to look it up)")
-        if not store.has_symbol(args.dst):
-            parser.error(f"unknown symbol: {args.dst} (use `cppgraph find` to look it up)")
+        store = GraphStore(_resolve_graph(args, parser))
+        args.src = _resolve_symbol(store, args.src, parser, what="src symbol")
+        args.dst = _resolve_symbol(store, args.dst, parser, what="dst symbol")
         chain = store.shortest_call_path(args.src, args.dst)
         if chain is None:
             print(f"[cppgraph] no call path from {args.src} to {args.dst}")
@@ -429,9 +490,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "impact":
-        store = GraphStore(args.graph)
-        if not store.has_symbol(args.symbol):
-            parser.error(f"unknown symbol: {args.symbol} (use `cppgraph find` to look it up)")
+        store = GraphStore(_resolve_graph(args, parser))
+        args.symbol = _resolve_symbol(store, args.symbol, parser)
         affected = store.impact(args.symbol, max_depth=args.depth, kind=args.kind)
         verb = "transitively call" if args.kind == "calls" else "transitively inherit from"
         print(f"[cppgraph] {len(affected)} symbol(s) {verb} {args.symbol}")
@@ -442,11 +502,12 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "status":
-        store = GraphStore(args.graph)
+        graph_path = _resolve_graph(args, parser)
+        store = GraphStore(graph_path)
         m = store.meta()
         commit = m.get("source_commit")
         dirty = m.get("source_dirty") == "true"
-        print(f"[cppgraph] graph store: {args.graph}")
+        print(f"[cppgraph] graph store: {graph_path}")
         if commit:
             print(f"  source commit: {commit}{' (dirty)' if dirty else ''}")
         else:
@@ -506,14 +567,15 @@ def main(argv: list[str] | None = None) -> int:
         if verdict["recommend"] == "rebuild":
             print("  recommendation: FULL REBUILD (drift too large for an incremental update)")
             print("    re-index the whole target, then `cppgraph build --scip <index.scip> "
-                  f"--out {args.graph}`")
+                  f"--out {graph_path}`")
         else:
             print("  recommendation: incremental update")
-            print(f"    next: scripts/reindex.sh --update {args.graph} <compile_commands.json>")
+            print(f"    next: scripts/reindex.sh --update {graph_path} <compile_commands.json>")
         return 1
 
     if args.command == "explain":
-        store = GraphStore(args.graph)
+        store = GraphStore(_resolve_graph(args, parser))
+        args.symbol = _resolve_symbol(store, args.symbol, parser)
         node = store.get_node(args.symbol)
         if node is None:
             parser.error(f"unknown symbol: {args.symbol} (use `cppgraph find` to look it up)")
@@ -562,7 +624,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "export":
-        store = GraphStore(args.graph)
+        store = GraphStore(_resolve_graph(args, parser))
+        args.symbol = _resolve_symbol(store, args.symbol, parser)
         graph_json = build_export_json(
             store, args.symbol, mode=args.mode, depth=args.depth,
             direction=args.direction, exclude_tests=args.no_tests,
@@ -584,7 +647,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "view":
-        store = GraphStore(args.graph)
+        store = GraphStore(_resolve_graph(args, parser))
+        args.symbol = _resolve_symbol(store, args.symbol, parser)
         graph_json = build_export_json(
             store, args.symbol, mode=args.mode, depth=args.depth,
             direction=args.direction, exclude_tests=args.no_tests,

@@ -41,6 +41,11 @@ when you want to measure at scale; keep such paths out of the shipped code.)
 - Tests with `pytest` under `tests/`. Prefer small fixtures (a tiny checked-in
   or synthetic `.scip`) over depending on a full external index.
 - CLI entry: `cppgraph` (see `src/cppgraph/cli.py`); MCP server `cppgraph-mcp`.
+  Query commands (`find`, `callers`, `callees`, `path`, `impact`, `status`, …)
+  **auto-discover the graph** from the cwd's `.cppgraph/` — run from inside the
+  indexed project and `--graph` is optional — and **accept a plain name** (not
+  only the exact SCIP string), resolving it via `find`; an ambiguous name lists
+  candidates. Same discovery walk as the MCP server (`store.discover_graph`).
 
 ## Working habits
 

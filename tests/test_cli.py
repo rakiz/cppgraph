@@ -461,3 +461,60 @@ def test_view_no_open_writes_standalone_html(graph_path: Path, capsys: pytest.Ca
     html_path = Path(out.split("open it with: open ")[1].strip())
     assert html_path.exists()
     assert "window.GRAPH" in html_path.read_text(encoding="utf-8")
+
+
+# --- symbol resolution: accept a plain name, not just the exact SCIP string ---
+
+def test_callers_resolves_plain_name(graph_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    # "makeResumeToken" is not an exact SCIP symbol, but resolves to the one match.
+    exit_code = main(["callers", "--graph", str(graph_path), "makeResumeToken"])
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "cxx . . $ mongo/Foo#caller(a2)." in out
+
+
+def test_callers_ambiguous_name_errors(tmp_path: Path) -> None:
+    graph = Graph()
+    graph.add_node("cxx . . $ mongo/A#run(a1).", display_name="run")
+    graph.add_node("cxx . . $ mongo/B#run(a2).", display_name="run")
+    path = tmp_path / "g.db"
+    write_sqlite(graph, path)
+    with pytest.raises(SystemExit):
+        main(["callers", "--graph", str(path), "run"])
+
+
+def test_exact_scip_symbol_still_accepted(graph_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    exit_code = main(
+        ["callers", "--graph", str(graph_path), "cxx . . $ mongo/Foo#makeResumeToken(a1)."]
+    )
+    assert exit_code == 0
+
+
+# --- graph auto-discovery: --graph optional when run from inside a project ---
+
+def test_graph_auto_discovered_from_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    proj = tmp_path / "proj"
+    (proj / ".cppgraph").mkdir(parents=True)
+    graph = Graph()
+    graph.add_node("cxx . . $ mongo/Foo#makeResumeToken(a1).", display_name="makeResumeToken")
+    graph.add_edge(
+        "calls", "cxx . . $ mongo/Foo#caller(a2).",
+        "cxx . . $ mongo/Foo#makeResumeToken(a1).", file="foo.cpp", line=9,
+    )
+    write_sqlite(graph, proj / ".cppgraph" / "proj.graph.db")
+    monkeypatch.chdir(proj)
+    # No --graph: discovered from the cwd's .cppgraph/. Combined with name resolution.
+    exit_code = main(["callers", "makeResumeToken"])
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "cxx . . $ mongo/Foo#caller(a2)." in out
+
+
+def test_no_graph_and_none_discovered_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)  # no .cppgraph/ anywhere above
+    with pytest.raises(SystemExit):
+        main(["callers", "makeResumeToken"])

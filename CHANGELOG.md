@@ -36,6 +36,13 @@ Everything so far — the project has not cut a numbered release yet.
 ### Queries (CLI)
 - `find`, `callers`, `callees`, `bases`, `subtypes`, `references`, `path`,
   `impact` (`--kind calls|inherits`), `explain`.
+- **`--graph` is optional**: query commands auto-discover the newest
+  `.cppgraph/*.graph.db` from the cwd (same walk as the MCP server,
+  `store.discover_graph`), so running from inside an indexed project needs no
+  `--graph`. Pass it explicitly to target a specific store or work from outside.
+- **Plain names accepted, not just exact SCIP strings**: `callers foo` resolves
+  `foo` via `find` (one match used directly, several listed to disambiguate, none
+  errors) — the exact SCIP symbol still works as before.
 - `status [--root]`: provenance + drift. Reports the changed **fraction** of
   indexed files and **commits behind**, and recommends a full **rebuild** once
   drift is large (≥25%) instead of always an incremental update.

@@ -40,6 +40,7 @@ from cppgraph.store import (
     GraphStore,
     changed_files_since,
     commits_behind,
+    discover_graph,
     staleness_verdict,
 )
 
@@ -551,26 +552,6 @@ _NO_GRAPH = {
     "scripts/reindex.sh (it writes <project>/.cppgraph/…), then reopen this "
     "Claude Code session from the project directory."
 }
-
-
-def discover_graph(start: str | Path | None = None) -> tuple[Path, Path] | None:
-    """Find the graph for the current project, Serena-style (`--project-from-cwd`).
-
-    Walk up from `start` (default: cwd) looking for a `.cppgraph/` holding at
-    least one `*.graph.db`; return `(graph, project_root)` — the most recently
-    built graph there and the directory that owns the `.cppgraph/`. `None` if no
-    indexed project is found above the cwd. This is what lets a single global
-    registration serve every project: the config effectively lives in each
-    project's own `.cppgraph/`.
-    """
-    d = Path(start or Path.cwd()).resolve()
-    for cur in (d, *d.parents):
-        cpg = cur / ".cppgraph"
-        if cpg.is_dir():
-            graphs = sorted(cpg.glob("*.graph.db"), key=lambda p: p.stat().st_mtime, reverse=True)
-            if graphs:
-                return graphs[0], cur
-    return None
 
 
 def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:

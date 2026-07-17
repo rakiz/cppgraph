@@ -62,19 +62,26 @@ Claude picks the right tool (`find`, `who_calls`, `impact_of`, `find_references`
 
 ## Or use the CLI directly
 
-(`$G` = the graph path reindex printed, e.g. `/path/to/project/.cppgraph/myproject.graph.db`.)
+Run from **inside the indexed project** and it just works — the graph is
+auto-discovered from the cwd's `.cppgraph/` (no `--graph` needed), and commands
+accept a **plain name**, not only the exact SCIP symbol string:
 
 ```bash
-.venv/bin/cppgraph find someMethod --graph "$G"
-.venv/bin/cppgraph callers '<exact symbol from find>' --graph "$G"
-.venv/bin/cppgraph view    '<exact symbol>' --graph "$G" --depth 1
+cd /path/to/project
+cppgraph callers someMethod          # graph discovered, name resolved
+cppgraph callees someMethod
+cppgraph view    someMethod --depth 1
 ```
+
+If a name is ambiguous (e.g. same-named overloads), the CLI lists the candidates
+so you can pass the exact SCIP symbol; `find` shows those strings too. Outside a
+project, or to target a specific store, pass `--graph <path/to/.cppgraph/name.graph.db>`.
 
 ## Keeping it fresh
 
-The graph is a snapshot. `.venv/bin/cppgraph status --graph "$G" --root
-/path/to/project` tells you how far it has drifted and whether to run an
-incremental `scripts/reindex.sh --update` or a full rebuild.
+The graph is a snapshot. `cppgraph status --root /path/to/project` (run from the
+project) tells you how far it has drifted and whether to run an incremental
+`scripts/reindex.sh --update` or a full rebuild.
 
 ## Feedback
 

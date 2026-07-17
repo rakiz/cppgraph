@@ -197,6 +197,26 @@ def project_root_path(project_root_uri: str) -> Path | None:
     return None
 
 
+def discover_graph(start: str | Path | None = None) -> tuple[Path, Path] | None:
+    """Find the graph for the current project, Serena-style (`--project-from-cwd`).
+
+    Walk up from `start` (default: cwd) looking for a `.cppgraph/` holding at
+    least one `*.graph.db`; return `(graph, project_root)` — the most recently
+    built graph there and the directory that owns the `.cppgraph/`. `None` if no
+    indexed project is found above the cwd. Shared by the MCP server (one global
+    registration serves every project) and the CLI (so `--graph` is optional when
+    run from inside an indexed project).
+    """
+    d = Path(start or Path.cwd()).resolve()
+    for cur in (d, *d.parents):
+        cpg = cur / ".cppgraph"
+        if cpg.is_dir():
+            graphs = sorted(cpg.glob("*.graph.db"), key=lambda p: p.stat().st_mtime, reverse=True)
+            if graphs:
+                return graphs[0], cur
+    return None
+
+
 def build_provenance(
     index: scip_pb2.Index,
     *,

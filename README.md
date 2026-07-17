@@ -141,8 +141,9 @@ token-lean output defaults: **[COMPARISON.md](COMPARISON.md)** (reproduce with
 
 ## Visualize
 
-`cppgraph export '<symbol>' --graph <graph.db> --depth 2 --out graph.json` writes
-a bounded neighbourhood in a [graphify](https://github.com/Graphify-Labs/graphify)-compatible
+`cppgraph export <symbol> --depth 2 --out graph.json` (run from the indexed
+project — graph auto-discovered, `<symbol>` a plain name or exact SCIP string)
+writes a bounded neighbourhood in a [graphify](https://github.com/Graphify-Labs/graphify)-compatible
 `graph.json`. Open it in the bundled viewer (`viz/cppgraph-viz.html`, our own
 code + a vendored copy of vis-network, fully offline) — or, since the container
 format is shared, in graphify itself. Details: [viz/README.md](viz/README.md).
