@@ -13,9 +13,9 @@ from cppgraph import updates
 REGISTRY = {
     "latest": "0.3.0",
     "releases": [
-        {"version": "0.1.0", "requires_rebuild": False},
-        {"version": "0.2.0", "requires_rebuild": True},  # schema/extraction change
-        {"version": "0.3.0", "requires_rebuild": False},
+        {"version": "0.1.0", "rebuild": "none"},
+        {"version": "0.2.0", "rebuild": "reindex"},  # graph model / extraction change
+        {"version": "0.3.0", "rebuild": "none"},
     ],
 }
 
@@ -34,14 +34,15 @@ def test_version_ordering_is_numeric_not_lexical() -> None:
     reg = {
         "latest": "10.0.0",
         "releases": [
-            {"version": "2.0.0", "requires_rebuild": True},
-            {"version": "10.0.0", "requires_rebuild": False},
+            {"version": "2.0.0", "rebuild": "reindex"},
+            {"version": "10.0.0", "rebuild": "none"},
         ],
     }
     # on 3.0.0 -> jump to 10.0.0 must NOT re-include the older 2.0.0 boundary
     adv = updates.compute_advice(reg, current="3.0.0", graph_built_with="3.0.0")
     assert adv["update_available"] is True
     assert adv.get("update_requires_rebuild") is False
+    assert adv["update_rebuild"] == "none"
 
 
 def test_update_available_flags_rebuild_when_crossing_boundary() -> None:
@@ -49,6 +50,7 @@ def test_update_available_flags_rebuild_when_crossing_boundary() -> None:
     adv = updates.compute_advice(REGISTRY, current="0.1.0", graph_built_with="0.1.0")
     assert adv["update_available"] is True
     assert adv["update_requires_rebuild"] is True
+    assert adv["update_rebuild"] == "reindex"
     assert adv["rebuild_required_at"] == ["0.2.0"]  # names the boundary version
     assert "0.2.0" in adv["update_message"]
 
@@ -59,9 +61,9 @@ def test_rebuild_boundary_detected_when_several_versions_behind() -> None:
     reg = {
         "latest": "0.3.0",
         "releases": [
-            {"version": "0.1.0", "requires_rebuild": False},
-            {"version": "0.2.0", "requires_rebuild": True},
-            {"version": "0.3.0", "requires_rebuild": False},
+            {"version": "0.1.0", "rebuild": "none"},
+            {"version": "0.2.0", "rebuild": "reindex"},
+            {"version": "0.3.0", "rebuild": "none"},
         ],
     }
     adv = updates.compute_advice(reg, current="0.0.5", graph_built_with="0.0.5")
@@ -74,6 +76,7 @@ def test_update_available_without_rebuild() -> None:
     adv = updates.compute_advice(REGISTRY, current="0.2.0", graph_built_with="0.2.0")
     assert adv["update_available"] is True
     assert adv["update_requires_rebuild"] is False
+    assert adv["update_rebuild"] == "none"
     assert "no graph rebuild" in adv["update_message"].lower()
 
 
@@ -88,12 +91,50 @@ def test_rebuild_now_when_binary_ahead_of_graph_across_boundary() -> None:
     adv = updates.compute_advice(REGISTRY, current="0.3.0", graph_built_with="0.1.0")
     assert adv["update_available"] is False  # already on latest
     assert adv["rebuild_recommended"] is True
-    assert "rebuild" in adv["rebuild_message"].lower()
+    assert adv["rebuild_level"] == "reindex"
+    assert "index" in adv["rebuild_message"].lower()
 
 
 def test_no_rebuild_now_when_graph_built_after_boundary() -> None:
     adv = updates.compute_advice(REGISTRY, current="0.3.0", graph_built_with="0.2.0")
     assert "rebuild_recommended" not in adv
+
+
+def test_store_level_is_cheaper_than_reindex() -> None:
+    # a store-only boundary: flagged as a rebuild, but level "store", and the
+    # message points at `cppgraph build`, not a full re-index.
+    reg = {
+        "latest": "0.2.0",
+        "releases": [
+            {"version": "0.1.0", "rebuild": "none"},
+            {"version": "0.2.0", "rebuild": "store"},
+        ],
+    }
+    adv = updates.compute_advice(reg, current="0.1.0", graph_built_with="0.1.0")
+    assert adv["update_requires_rebuild"] is True
+    assert adv["update_rebuild"] == "store"
+    assert "cppgraph build" in adv["update_message"]
+    assert "re-index" not in adv["update_message"]
+
+    # rebuild-now at store level
+    adv2 = updates.compute_advice(reg, current="0.2.0", graph_built_with="0.1.0")
+    assert adv2["rebuild_recommended"] is True
+    assert adv2["rebuild_level"] == "store"
+
+
+def test_reindex_dominates_store_across_multi_version_jump() -> None:
+    # a jump crossing both a store and a reindex boundary needs the reindex
+    reg = {
+        "latest": "0.3.0",
+        "releases": [
+            {"version": "0.1.0", "rebuild": "store"},
+            {"version": "0.2.0", "rebuild": "reindex"},
+            {"version": "0.3.0", "rebuild": "none"},
+        ],
+    }
+    adv = updates.compute_advice(reg, current="0.0.5", graph_built_with="0.0.5")
+    assert adv["update_rebuild"] == "reindex"
+    assert adv["rebuild_required_at"] == ["0.1.0", "0.2.0"]
 
 
 def test_update_advice_respects_opt_out(monkeypatch: pytest.MonkeyPatch) -> None:

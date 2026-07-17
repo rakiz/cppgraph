@@ -60,6 +60,14 @@ how it finds this project's graph) and just ask, in plain language:
 Claude picks the right tool (`find`, `who_calls`, `impact_of`, `find_references`,
 `path`, `visualize`, `status`, …).
 
+The lookup is forgiving, so a rough name still lands: `find` matches multiple
+words in any order and, if nothing hits exactly, falls back
+case/separator-insensitively (`changestream` finds `change_stream`) and on the
+bare method name when a `Class#method` guess is wrong. Same-named overloads are
+grouped under one result (with their parameter signatures), and asking to hide
+trivial helpers (`hide_trivial`) strips the operator/assert/`makeStatus` noise so
+the real edges stand out.
+
 ## Or use the CLI directly
 
 Run from **inside the indexed project** and it just works — the graph is

@@ -7,15 +7,19 @@ require a full graph rebuild? A rebuild is minutes of indexing, so the whole
 point is to warn *before* the user upgrades and finds themselves blocked.
 
 The source of truth is a small `versions.json` hosted on GitHub (see
-`versions.json` at the repo root): `latest` plus a per-release `requires_rebuild`
-flag. We fetch it best-effort (short timeout, on-disk cache, silent when
-offline) and derive two independent signals:
+`versions.json` at the repo root): `latest` plus a per-release `rebuild` level.
+The level says *which layer of the index stack* a release invalidates — cheapest
+to most expensive: `none` (query-code only, store stays valid), `store` (rebuild
+the SQLite store from the existing `.scip` — no recompile), `reindex` (re-run
+scip-clang, then rebuild the store). We fetch best-effort (short timeout,
+on-disk cache, silent when offline) and derive two independent signals:
 
 - **tool update**: a version newer than the running binary exists;
-  `update_requires_rebuild` if any release in `(current, latest]` needs a rebuild.
+  `update_rebuild` is the max level across `(current, latest]`
+  (`update_requires_rebuild` stays as its boolean shorthand).
 - **rebuild now**: the *installed* binary is already newer than the version the
-  graph was built with, across a `requires_rebuild` boundary — so the graph is
-  silently degraded and should be rebuilt regardless of any further update.
+  graph was built with, across a rebuild boundary — so the graph is silently
+  degraded and should be rebuilt (at `rebuild_level`) regardless of any update.
 
 The comparison/advice logic (`compute_advice`) is pure and unit-tested; the
 network+cache layer around it fails soft, so `status` never breaks or hangs on a
@@ -112,6 +116,34 @@ def _releases_between(
     return [r for r in releases if lo < parse_version(r.get("version")) <= hi]
 
 
+# What a release invalidates in the index stack, cheapest -> most expensive:
+#   "none"    — query-code only; the existing graph store stays valid.
+#   "store"   — the SQLite store format changed; rebuild it from the existing
+#               `.scip` (`cppgraph build`, no recompile — seconds/minutes).
+#   "reindex" — the graph model / builder changed; re-run scip-clang to
+#               regenerate the `.scip`, then rebuild the store (tens of minutes).
+# See TODO.md "Rebuild advice" and DESIGN.md for the stack.
+_REBUILD_LEVELS = ("none", "store", "reindex")
+_LEVEL_RANK = {name: i for i, name in enumerate(_REBUILD_LEVELS)}
+
+
+def _rebuild_level(release: dict[str, Any]) -> str:
+    """The rebuild level a release demands, from its `rebuild` field; `none` if
+    absent or unrecognised (a release that says nothing invalidates nothing)."""
+    lvl = release.get("rebuild")
+    return lvl if isinstance(lvl, str) and lvl in _LEVEL_RANK else "none"
+
+
+def _max_level(releases: list[dict[str, Any]]) -> str:
+    """The most expensive rebuild level across `releases` (they compound: a jump
+    that crosses both a `store` and a `reindex` boundary needs the `reindex`)."""
+    level = "none"
+    for r in releases:
+        if _LEVEL_RANK[_rebuild_level(r)] > _LEVEL_RANK[level]:
+            level = _rebuild_level(r)
+    return level
+
+
 def compute_advice(
     data: dict[str, Any], current: str | None, graph_built_with: str | None
 ) -> dict[str, Any]:
@@ -125,12 +157,14 @@ def compute_advice(
     # versions back still counts, so being multiple versions behind is handled.
     update_available = bool(latest) and latest_v > cur_v
     update_reqs = _releases_between(releases, current, latest) if update_available else []
-    rebuild_versions = [r.get("version") for r in update_reqs if r.get("requires_rebuild")]
+    update_level = _max_level(update_reqs)
+    rebuild_versions = [r.get("version") for r in update_reqs if _rebuild_level(r) != "none"]
 
     # Rebuild-now: the installed binary is ahead of the graph's build version
-    # across a requires_rebuild boundary -> the graph is stale for THIS binary.
+    # across a rebuild boundary -> the graph is stale for THIS binary.
     rebuild_reqs = _releases_between(releases, graph_built_with, current)
-    rebuild_now = bool(graph_built_with) and any(r.get("requires_rebuild") for r in rebuild_reqs)
+    rebuild_level = _max_level(rebuild_reqs)
+    rebuild_now = bool(graph_built_with) and rebuild_level != "none"
 
     advice: dict[str, Any] = {
         "checked": True,
@@ -139,26 +173,51 @@ def compute_advice(
         "update_available": update_available,
     }
     if update_available:
-        advice["update_requires_rebuild"] = bool(rebuild_versions)
+        advice["update_requires_rebuild"] = update_level != "none"
+        advice["update_rebuild"] = update_level  # "none" | "store" | "reindex"
         if rebuild_versions:
             advice["rebuild_required_at"] = rebuild_versions  # boundary version(s) in the jump
         advice["update_message"] = (
             f"cppgraph {latest} is available (you have {current or '?'})."
-            + (
-                f" Upgrading crosses a graph-format change ({', '.join(rebuild_versions)}),"
-                " so it will require a full re-index — budget indexing time before you switch."
-                if rebuild_versions
-                else " No graph rebuild needed to upgrade."
-            )
+            + _update_rebuild_clause(update_level, rebuild_versions)
         )
     if rebuild_now:
         advice["rebuild_recommended"] = True
-        advice["rebuild_message"] = (
-            f"this graph was built with cppgraph {graph_built_with} but you now run "
-            f"{current or '?'}, whose format changed — rebuild it "
-            "(scripts/reindex.sh) for correct and complete results."
-        )
+        advice["rebuild_level"] = rebuild_level  # "store" | "reindex"
+        advice["rebuild_message"] = _rebuild_now_message(graph_built_with, current, rebuild_level)
     return advice
+
+
+def _update_rebuild_clause(level: str, versions: list[Any]) -> str:
+    """The rebuild sentence appended to an update message, worded per level."""
+    if level == "none":
+        return " No graph rebuild needed to upgrade."
+    at = ", ".join(str(v) for v in versions)
+    if level == "store":
+        return (
+            f" Upgrading crosses a store-format change ({at}), so it needs a graph store"
+            " rebuild (`cppgraph build` from the existing .scip — no recompile)."
+        )
+    return (
+        f" Upgrading crosses a graph-format change ({at}), so it will require a full"
+        " re-index (re-run scip-clang) — budget indexing time before you switch."
+    )
+
+
+def _rebuild_now_message(graph_built_with: str | None, current: str | None, level: str) -> str:
+    """The 'your graph is stale for this binary' message, worded per level."""
+    head = (
+        f"this graph was built with cppgraph {graph_built_with} but you now run {current or '?'}, "
+    )
+    if level == "store":
+        return head + (
+            "whose store format changed — rebuild the store (`cppgraph build` from the "
+            "existing .scip, no recompile) for correct results."
+        )
+    return head + (
+        "whose graph format changed — re-index it (scripts/reindex.sh) for correct "
+        "and complete results."
+    )
 
 
 def _cache_path() -> Path:

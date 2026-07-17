@@ -244,8 +244,42 @@ def _merged_source(
     return [{"line": i + 1, "text": lines[i], "is_use": i in hits} for i in sorted(wanted)]
 
 
+def _extract_signature(root: str | None, file: str | None, line0: int | None) -> str | None:
+    """A best-effort readable parameter signature for an overload, read from the
+    source at its definition site.
+
+    `scip-clang` disambiguates overloads by an opaque hash, not by argument
+    types, so grouped overloads are otherwise indistinguishable. Since cppgraph
+    has the checkout (`root`), it reads the def line and captures the text from
+    the first `(` to its matching `)` — display-only, so templates / macros /
+    multi-line params are tolerated (whitespace collapsed). `None` if there's no
+    root, the file can't be read, or no parameter list is found."""
+    if root is None or file is None or line0 is None:
+        return None
+    snippet = read_source_snippet(root, file, line0, context=8)
+    if not snippet:
+        return None
+    text = " ".join(t for i, t in snippet if i >= line0)
+    start = text.find("(")
+    if start < 0:
+        return None
+    depth = 0
+    for j in range(start, len(text)):
+        if text[j] == "(":
+            depth += 1
+        elif text[j] == ")":
+            depth -= 1
+            if depth == 0:
+                return " ".join(text[start : j + 1].split())
+    return None
+
+
 def find_symbols(
-    store: GraphStore, query: str, limit: int = DEFAULT_LIMIT, hide_trivial: bool = False
+    store: GraphStore,
+    query: str,
+    limit: int = DEFAULT_LIMIT,
+    hide_trivial: bool = False,
+    root: str | None = None,
 ) -> dict[str, Any]:
     """Symbols whose SCIP string or display name contains `query`.
 
@@ -255,20 +289,31 @@ def find_symbols(
     lambdas, operators, `*assert`/`makeStatus`, …) are dropped and counted as
     `trivial_hidden`, so a broad query isn't buried in noise.
 
-    On an exact-zero result for a *qualified* query (`Class#method`, a wrong
-    guess), `find` retries once on the bare leaf name and flags the response
-    `relaxed` — so a too-precise guess degrades to a hint instead of a silent
-    empty answer.
+    On an exact-zero result, `find` relaxes once and flags the response
+    `relaxed`: first case/separator-insensitively (the `change_stream` vs
+    `changeStream` vs `changestream` trap), then, for a *qualified* query
+    (`Class#method`, a wrong guess), on the bare leaf name. So a naming miss
+    degrades to a hint instead of a silent empty answer.
+
+    Grouped overloads carry a best-effort `signature` read from source (when
+    `root` is available), since scip-clang distinguishes them only by hash.
     """
     matches = store.find(query)
+    relaxation: str | None = None
     relaxed_query: str | None = None
     if not matches:
-        leaf = _loosen_to_leaf(query)
-        if leaf:
-            loosened = store.find(leaf)
-            if loosened:
-                matches = loosened
-                relaxed_query = leaf
+        fuzzy = store.find(query, fuzzy=True)
+        if fuzzy:
+            matches = fuzzy
+            relaxation = "fuzzy"
+        else:
+            leaf = _loosen_to_leaf(query)
+            if leaf:
+                loosened = store.find(leaf) or store.find(leaf, fuzzy=True)
+                if loosened:
+                    matches = loosened
+                    relaxation = "leaf"
+                    relaxed_query = leaf
     trivial_hidden = 0
     if hide_trivial:
         kept = [n for n in matches if not _is_noise_symbol(n.symbol)]
@@ -288,9 +333,17 @@ def find_symbols(
         members = groups[key]
         entry = _node_dict(members[0], full_symbols=True)
         if len(members) > 1:
-            # An overload set: keep every signature's exact symbol + site.
+            # An overload set: keep every signature's exact symbol + site, plus a
+            # source-derived parameter signature so the arms are distinguishable.
             entry["overloads"] = len(members)
-            entry["signatures"] = [_node_dict(m, full_symbols=True) for m in members]
+            sigs: list[dict[str, Any]] = []
+            for m in members:
+                d = _node_dict(m, full_symbols=True)
+                sig = _extract_signature(root, m.file, m.line)
+                if sig:
+                    d["signature"] = sig
+                sigs.append(d)
+            entry["signatures"] = sigs
         results.append(entry)
 
     result = {
@@ -300,7 +353,13 @@ def find_symbols(
         "truncated": truncated,
         "results": results,
     }
-    if relaxed_query is not None:
+    if relaxation == "fuzzy":
+        result["relaxed"] = True
+        result["note"] = (
+            f"no exact match for {query!r}; matched case/separator-insensitively "
+            "(e.g. `changestream` ~ `change_stream` / `changeStream`)"
+        )
+    elif relaxation == "leaf":
         result["relaxed"] = True
         result["relaxed_query"] = relaxed_query
         result["note"] = (
@@ -389,12 +448,22 @@ def bases(
         return {"error": _UNKNOWN.format(symbol=symbol)}
     nodes = store.bases_of(symbol)
     shown, truncated = _capped(nodes, limit)
-    return {
+    result = {
         "symbol": symbol,
         "total": len(nodes),
         "truncated": truncated,
         "bases": [_node_dict(n, full_symbols) for n in shown],
     }
+    if not nodes:
+        # A bare 0 reads as "no hierarchy", which is often wrong: it may be a
+        # root class, or a holder type (e.g. a factory holder like
+        # DocumentSourceChangeStream) that participates in no `inherits` edge.
+        result["note"] = (
+            "no base classes recorded. This may be a root/standalone type, or a "
+            "holder whose relationships aren't inheritance — check `subclasses`, "
+            "or `find_references` for where the type is used."
+        )
+    return result
 
 
 def subtypes(
@@ -406,12 +475,22 @@ def subtypes(
         return {"error": _UNKNOWN.format(symbol=symbol)}
     nodes = store.subtypes_of(symbol)
     shown, truncated = _capped(nodes, limit)
-    return {
+    result = {
         "symbol": symbol,
         "total": len(nodes),
         "truncated": truncated,
         "subtypes": [_node_dict(n, full_symbols) for n in shown],
     }
+    if not nodes:
+        # A bare 0 misleads: it may be a leaf class, or a holder type (e.g. a
+        # factory holder like DocumentSourceChangeStream) that isn't a real base
+        # — its actual hierarchy is reached via its own bases.
+        result["note"] = (
+            "no subclasses recorded. This may be a leaf class, or a holder type "
+            "that isn't itself a base — check `base_classes` (it may inherit "
+            "rather than be inherited from), or `find_references` for its uses."
+        )
+    return result
 
 
 def references(
@@ -588,6 +667,7 @@ def explain(
     limit: int = EXPLAIN_LIMIT,
     full_symbols: bool = False,
     exclude_tests: bool = True,
+    hide_trivial: bool = False,
 ) -> dict[str, Any]:
     """Definition site + caller/callee summary for `symbol`.
 
@@ -597,8 +677,9 @@ def explain(
     for but the file couldn't be read, so the caller can tell "not requested"
     from "requested, unavailable". Test-file callers/callees are dropped by
     default (`exclude_tests`); `full_symbols=True` keeps the raw SCIP strings in
-    the caller/callee lists.
-    """
+    the caller/callee lists. With `hide_trivial=True`, ubiquitous helpers
+    (operators, `*assert`, `makeStatus`, `source_location`, …) are dropped from
+    the caller/callee lists, each side reporting its `trivial_hidden` count."""
     node = store.get_node(symbol)
     if node is None:
         return {"error": _UNKNOWN.format(symbol=symbol)}
@@ -607,24 +688,37 @@ def explain(
     if exclude_tests:
         caller_edges = _drop_test_edges(store, caller_edges, on="src")
         callee_edges = _drop_test_edges(store, callee_edges, on="dst")
+    callers_trivial = callees_trivial = 0
+    if hide_trivial:
+        kept_callers = [e for e in caller_edges if not _is_trivial_callee(e.src)]
+        kept_callees = [e for e in callee_edges if not _is_trivial_callee(e.dst)]
+        callers_trivial = len(caller_edges) - len(kept_callers)
+        callees_trivial = len(callee_edges) - len(kept_callees)
+        caller_edges, callee_edges = kept_callers, kept_callees
     shown_callers, callers_trunc = _capped(caller_edges, limit)
     shown_callees, callees_trunc = _capped(callee_edges, limit)
+
+    callers_block: dict[str, Any] = {
+        "total": len(caller_edges),
+        "truncated": callers_trunc,
+        "items": [_edge_dict(e, e.src, store, full_symbols) for e in shown_callers],
+    }
+    callees_block: dict[str, Any] = {
+        "total": len(callee_edges),
+        "truncated": callees_trunc,
+        "items": [_edge_dict(e, e.dst, store, full_symbols) for e in shown_callees],
+    }
+    if hide_trivial:
+        callers_block["trivial_hidden"] = callers_trivial
+        callees_block["trivial_hidden"] = callees_trivial
 
     result: dict[str, Any] = {
         "symbol": node.symbol,
         "name": node.display_name or None,
         "defined_at": {"file": node.file, "line": _line1(node.line)},
         "excluded_tests": exclude_tests,
-        "callers": {
-            "total": len(caller_edges),
-            "truncated": callers_trunc,
-            "items": [_edge_dict(e, e.src, store, full_symbols) for e in shown_callers],
-        },
-        "callees": {
-            "total": len(callee_edges),
-            "truncated": callees_trunc,
-            "items": [_edge_dict(e, e.dst, store, full_symbols) for e in shown_callees],
-        },
+        "callers": callers_block,
+        "callees": callees_block,
     }
 
     if include_source and root is not None and node.file is not None and node.line is not None:
@@ -768,12 +862,14 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         """Find C++ symbols by name. Start here: other tools need the exact SCIP
         symbol string this returns, not a human name. A multi-word query is an
         order-free AND (every word must appear); overloads sharing a qualified
-        name group under one result. A qualified query that matches nothing
-        (`Class#method` guessed wrong) is retried once on the bare leaf name and
-        flagged `relaxed`. Set `hide_trivial=True` to drop compiler-generated /
+        name group under one result, each with a source-derived `signature` so
+        the arms are distinguishable. If nothing matches exactly, `find` relaxes
+        once (case/separator-insensitive — `changestream` ~ `change_stream` —
+        then, for a `Class#method` guess, the bare leaf name) and flags the
+        response `relaxed`. Set `hide_trivial=True` to drop compiler-generated /
         boilerplate hits (lambdas, operators, `*assert`, `makeStatus`, …) —
         `trivial_hidden` reports how many were cut."""
-        return _call(find_symbols, query, limit=limit, hide_trivial=hide_trivial)
+        return _call(find_symbols, query, limit=limit, hide_trivial=hide_trivial, root=root)
 
     @mcp.tool()
     def who_calls(
@@ -900,6 +996,7 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         limit: int = EXPLAIN_LIMIT,
         full_symbols: bool = False,
         exclude_tests: bool = True,
+        hide_trivial: bool = False,
     ) -> dict[str, Any]:
         """Definition site + caller/callee summary for `symbol`. Returns
         `file:line` coordinates by default; set `include_source=True` to also get
@@ -907,7 +1004,9 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         separate file read needed). `limit` caps each of the caller/callee lists
         (raise it when `truncated` is true and you need more). Caller/callee lists
         are compact `name` + `file:line` (`full_symbols=True` for raw SCIP) and
-        drop test files unless `exclude_tests=False`."""
+        drop test files unless `exclude_tests=False`. Set `hide_trivial=True` to
+        also drop ubiquitous helpers (operators, `*assert`, `makeStatus`,
+        `source_location`, …) — each list reports its `trivial_hidden` count."""
         return _call(
             explain,
             symbol,
@@ -917,6 +1016,7 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
             limit=limit,
             full_symbols=full_symbols,
             exclude_tests=exclude_tests,
+            hide_trivial=hide_trivial,
         )
 
     @mcp.tool()

@@ -265,7 +265,7 @@ designing the builder so this isn't a later rewrite:
   current (else `reindex.sh --update`); then `impact_of`/`who_calls`/`path`/
   `explain_symbol` answer "what does this change affect?" with compiler-exact
   edges — no grep guessing, no loading files into context.
-  - *Token budgeting*: every fan-out reply is capped (`DEFAULT_LIMIT=25`,
+  - *Token budgeting*: every fan-out reply is capped (`DEFAULT_LIMIT=40`,
     `EXPLAIN_LIMIT=10`) and carries an explicit `total` + `truncated`, so a hub
     symbol with hundreds of callers never floods the model's context; the caller
     can raise the cap per query and always sees the true count.
@@ -285,12 +285,16 @@ designing the builder so this isn't a later rewrite:
     (`scripts/measure_tokens.py`).
   - *Update / rebuild advice*: `status` also reports a `tool` section —
     is a newer cppgraph published, and does adopting it (or the installed
-    version) need a full graph rebuild? The dangerous direction (a graph newer
+    version) need a graph rebuild? The dangerous direction (a graph newer
     than the binary) is already a hard open-time error via `schema_version`; this
     covers the *benign-but-costly* direction, so an upgrade never silently blocks
-    on minutes of re-indexing. Source of truth is a hosted `versions.json`
-    (deliberately tiny: `latest` + per-release `requires_rebuild`; detail lives in
-    the CHANGELOG, not the registry). Fetched best-effort with a 24h on-disk cache,
+    on minutes of re-indexing. The advice is level-aware: a per-release `rebuild`
+    field (`none` / `store` / `reindex`) says which layer of the index stack a
+    release invalidates — query-code only, a store rebuild from the existing
+    `.scip`, or a full re-run of scip-clang — so a cheap store rebuild isn't
+    mistaken for a full re-index. Source of truth is a hosted `versions.json`
+    (deliberately tiny: `latest` + per-release `rebuild`; detail lives in the
+    CHANGELOG, not the registry). Fetched best-effort with a 24h on-disk cache,
     fails soft offline; `cppgraph.updates.compute_advice` is the pure, tested core.
   - *Testable core*: the substance is a pure `(store, …) -> dict` layer
     (unit-tested without a transport); the FastMCP decorators are thin wiring

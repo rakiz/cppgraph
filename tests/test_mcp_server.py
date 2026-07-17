@@ -562,3 +562,93 @@ def test_find_no_relax_for_bare_leaf(tmp_path: Path) -> None:
     r = mcp_server.find_symbols(GraphStore(path), "nonexistent")
     assert r["total"] == 0
     assert "relaxed" not in r
+
+
+def test_find_fuzzy_fallback_separator_insensitive(tmp_path: Path) -> None:
+    # "changestream" (no separator) must match change_stream / changeStream via
+    # the fuzzy fallback, and the response is flagged relaxed.
+    a = "cxx . . $ mongo/change_stream/buildPipeline(a1)."
+    b = "cxx . . $ mongo/DocumentSourceChangeStream#foo(a2)."
+    graph = Graph()
+    graph.nodes[a] = Node(symbol=a, file="cs.cpp", line=1)
+    graph.nodes[b] = Node(symbol=b, file="cs.cpp", line=2)
+    path = tmp_path / "fuzzy.db"
+    write_sqlite(graph, path)
+    st = GraphStore(path)
+
+    r = mcp_server.find_symbols(st, "changestream")
+    assert r["total"] == 2
+    assert r["relaxed"] is True
+    assert "insensitive" in r["note"]
+
+
+def test_find_fuzzy_multi_term(tmp_path: Path) -> None:
+    a = "cxx . . $ mongo/change_stream/pipeline_helpers/buildPipeline(a1)."
+    graph = Graph()
+    graph.nodes[a] = Node(symbol=a, file="ph.cpp", line=1)
+    path = tmp_path / "fz2.db"
+    write_sqlite(graph, path)
+    r = mcp_server.find_symbols(GraphStore(path), "buildPipeline changestream")
+    assert r["total"] == 1
+    assert r["relaxed"] is True
+
+
+def test_explain_hide_trivial(tmp_path: Path) -> None:
+    tgt = "cxx . . $ mongo/Foo#run(a1)."
+    real = "cxx . . $ mongo/Foo#doDomainWork(a2)."
+    op = "cxx . . $ mongo/Foo#operator!=(a3)."
+    graph = Graph()
+    for s in (tgt, real, op):
+        graph.nodes[s] = Node(symbol=s, file="foo.cpp", line=1)
+    graph.add_edge("calls", tgt, real, file="foo.cpp", line=2)
+    graph.add_edge("calls", tgt, op, file="foo.cpp", line=3)
+    path = tmp_path / "ex.db"
+    write_sqlite(graph, path)
+    st = GraphStore(path)
+
+    full = mcp_server.explain(st, tgt)
+    assert full["callees"]["total"] == 2
+    assert "trivial_hidden" not in full["callees"]
+
+    filtered = mcp_server.explain(st, tgt, hide_trivial=True)
+    assert filtered["callees"]["total"] == 1
+    assert filtered["callees"]["trivial_hidden"] == 1
+
+
+def test_subclasses_zero_has_hint(hierarchy: GraphStore) -> None:
+    r = mcp_server.subtypes(hierarchy, LEAF)  # a leaf: no subclasses
+    assert r["total"] == 0
+    assert "note" in r
+    r2 = mcp_server.subtypes(hierarchy, BASE)  # has a subclass: no note
+    assert r2["total"] == 1
+    assert "note" not in r2
+
+
+def test_base_classes_zero_has_hint(hierarchy: GraphStore) -> None:
+    r = mcp_server.bases(hierarchy, BASE)  # a root: no bases
+    assert r["total"] == 0
+    assert "note" in r
+
+
+def test_find_overload_signature_from_source(tmp_path: Path) -> None:
+    src_dir = tmp_path / "src"
+    src_dir.mkdir()
+    (src_dir / "rt.h").write_text(
+        "namespace mongo {\n"
+        "ResumeToken parse(const Document& doc);\n"
+        "ResumeToken parse(const BSONObj& obj, bool strict);\n"
+        "}\n"
+    )
+    p1 = "cxx . . $ mongo/ResumeToken#parse(aaaaaa)."
+    p2 = "cxx . . $ mongo/ResumeToken#parse(bbbbbb)."
+    graph = Graph()
+    graph.nodes[p1] = Node(symbol=p1, file="rt.h", line=1)  # 0-indexed line 1
+    graph.nodes[p2] = Node(symbol=p2, file="rt.h", line=2)
+    path = tmp_path / "sig.db"
+    write_sqlite(graph, path)
+    r = mcp_server.find_symbols(GraphStore(path), "parse", root=str(src_dir))
+    entry = r["results"][0]
+    assert entry["overloads"] == 2
+    sigs = {s["signature"] for s in entry["signatures"]}
+    assert "(const Document& doc)" in sigs
+    assert "(const BSONObj& obj, bool strict)" in sigs

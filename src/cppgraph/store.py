@@ -478,8 +478,8 @@ class GraphStore:
             return None
         return Node(symbol=row[0], display_name=row[1] or "", file=row[2], line=row[3])
 
-    def find(self, query: str) -> list[Node]:
-        """Nodes matching `query`, case-sensitive.
+    def find(self, query: str, fuzzy: bool = False) -> list[Node]:
+        """Nodes matching `query`.
 
         A single-token query is a substring test (`instr(col, ?) > 0`, matching
         the in-memory `Graph.find`'s Python `in` — unlike `LIKE`, which SQLite
@@ -488,20 +488,42 @@ class GraphStore:
         substring in the symbol *or* the display name (tokens may match either,
         and different tokens may match different columns), so
         `find "buildPipeline changeStream"` matches a symbol containing both
-        rather than the literal phrase. This scans the symbols table (a leading
-        wildcard can't use `ix_sym`), which is fine: `find` is a rare
-        interactive lookup, not a hot-path traversal.
+        rather than the literal phrase.
+
+        With `fuzzy=True`, matching is case- *and* separator-insensitive: both
+        sides are lowercased and underscores stripped before the substring test,
+        so `changestream` matches `change_stream` and `changeStream`. This is the
+        fallback the MCP layer uses when an exact query returns nothing (the
+        `change_stream` vs `changeStream` naming trap), never the default —
+        default stays exact and predictable.
+
+        This scans the symbols table (a leading wildcard can't use `ix_sym`),
+        which is fine: `find` is a rare interactive lookup, not a hot-path
+        traversal.
         """
         tokens = query.split()
         if not tokens:
             return []
-        # Each token: present in symbol OR display_name. AND across tokens.
-        clause = " AND ".join(
-            ["(instr(s.symbol, ?) > 0 OR instr(s.display_name, ?) > 0)"] * len(tokens)
-        )
-        params: list[str] = []
-        for t in tokens:
-            params.extend((t, t))
+        if fuzzy:
+            # Normalise both sides: lower-case + drop underscores. `instr` over
+            # the folded columns makes the match case/separator-insensitive.
+            col_sym = "replace(lower(s.symbol), '_', '')"
+            col_name = "replace(lower(s.display_name), '_', '')"
+            clause = " AND ".join(
+                [f"(instr({col_sym}, ?) > 0 OR instr({col_name}, ?) > 0)"] * len(tokens)
+            )
+            params: list[str] = []
+            for t in tokens:
+                norm = t.lower().replace("_", "")
+                params.extend((norm, norm))
+        else:
+            # Each token: present in symbol OR display_name. AND across tokens.
+            clause = " AND ".join(
+                ["(instr(s.symbol, ?) > 0 OR instr(s.display_name, ?) > 0)"] * len(tokens)
+            )
+            params = []
+            for t in tokens:
+                params.extend((t, t))
         rows = self._con.execute(
             f"""
             SELECT s.symbol, s.display_name, f.path, s.line

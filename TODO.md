@@ -11,7 +11,8 @@ Only open items live here. Completed work is in `CHANGELOG.md`; design detail in
   from `git describe`, and `cppgraph status` reads `versions.json` for the
   "update available / rebuild needed" advice — but no release exists yet. Per
   release: tag `vX.Y.Z`, then bump `latest` in `versions.json` and append a
-  `releases` entry (`requires_rebuild`, one-line `notes`, `url`). The advice only
+  `releases` entry (`rebuild` level `none`/`store`/`reindex` — what the release
+  invalidates in the index stack — plus one-line `notes`, `url`). The advice only
   becomes meaningful once at least one tag exists.
 - **Version for non-git installs.** `current_version` falls back to the static
   `pyproject`/`__version__` when the source isn't a git checkout (tarball/PyPI).
