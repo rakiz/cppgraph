@@ -141,25 +141,36 @@ and more room left in the context window.)
 Same question, *"who calls the **method** `makeResumeToken`?"*. `makeResumeToken`
 resolves to **four** distinct symbols across `src/mongo` (a method, two
 test-helper free functions, an anonymous-namespace test symbol). Measured with
-`scripts/measure_tokens.py`:
+`scripts/measure_tokens.py` — the cppgraph rows count the **MCP tool JSON**, i.e.
+what the LLM ingests:
 
 | Approach | Chars | ≈ Tokens\* | Correct? |
 |---|---|---|---|
 | `grep -rn makeResumeToken src/mongo` (untargeted) | 26,540 | ~6,600 | ✗ 4 symbols merged; decls/comments/strings; needs file reads to disambiguate |
 | grep on the known subtree `.../db/pipeline` (best case) | 23,569 | ~5,900 | ✗ same problems; targeting barely helps |
-| cppgraph `find` (639) + `who_calls` on the method (583) | 1,222 | **~300** | ✓ exact — the method's 3 callers, nothing else |
+| cppgraph `find` (1,009) + `who_calls` on the method (613) | 1,622 | **~400** | ✓ exact — the method's 3 callers, nothing else |
 
-**~22× fewer tokens** (untargeted) / ~19× (even against the best-case targeted
+**~16× fewer tokens** (untargeted) / ~15× (even against the best-case targeted
 grep) — and exact, where grep is ambiguous *and* still needs follow-up file
 reads. `find` alone is the step grep can't do: it splits the name into its four
 real symbols with their definition sites.
 
-The flip side, kept honest: a symbol with many *genuine* callers costs more in
-cppgraph too — the free-function `makeResumeToken` here has **122** callers
-(~10,200 tokens for the full attributed list). But that *is* the complete,
-exact answer; grep's 6,600 tokens don't contain an attributed caller list at all.
-The token win is in disambiguation + targeting a specific symbol, which is the
-actual question.
+**Where those tokens go — and the token-lean defaults.** Each fan-out hit could
+carry the raw 150-250-char SCIP symbol string; instead the tools ship a readable
+label derived from that string (`full_symbols=True` to opt out) and drop test
+callers (`exclude_tests=False` to keep them). On a hub symbol the two compound.
+`who_calls(ResumeToken::parse)` (`scripts/measure_tokens.py ResumeToken … 'ResumeToken#parse'`):
+
+| who_calls payload | Chars | ≈ Tokens | |
+|---|---|---|---|
+| raw SCIP strings + test callers kept (pre-optimisation) | 11,102 | ~2,780 | 100 callers |
+| + drop test callers | 3,472 | ~870 | 13 production callers (−69%) |
+| + derive labels from SCIP (**default**) | 1,998 | ~500 | −42% again → **~5.5× leaner** overall |
+
+The flip side, kept honest: a symbol with many *genuine* production callers still
+costs more in cppgraph — but that *is* the complete, attributed answer; grep's
+6,600 tokens don't contain an attributed caller list at all. The token win is in
+disambiguation + targeting a specific symbol, which is the actual question.
 
 \* **Method & honesty.** Tokens ≈ **characters ÷ 4** (`scripts/measure_tokens.py`,
 tunable). That's the rough rule for prose; code and SCIP symbol strings (heavy

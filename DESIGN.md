@@ -317,6 +317,16 @@ designing the builder so this isn't a later rewrite:
     unless `include_source=True` **and** the server was launched with `--root`.
     The premise is that an LLM calling these tools already has file access, so
     coordinates suffice and cost far fewer tokens than pasted source.
+  - *Compact identity*: the raw SCIP string is 150-250 chars of machine noise per
+    hit. `scip-clang` leaves `SymbolInformation.display_name` empty (0% on the
+    MongoDB index), so `_short_label` derives a readable name *from the SCIP
+    string* (strips the scheme prefix, anonymous-namespace file path, overload
+    hash, back-ticks) — still a substring `find` can re-resolve. Fan-out tools
+    emit that label by default and the raw string only with `full_symbols=True`.
+    Test callers/uses are dropped by default (`exclude_tests`, filtered on the
+    far-end node's definition file, catching `~..._Test` teardown sites too).
+    Measured effect on `who_calls` for a hub symbol: ~5.5× smaller payload
+    (`scripts/measure_tokens.py`).
   - *Testable core*: the substance is a pure `(store, …) -> dict` layer
     (unit-tested without a transport); the FastMCP decorators are thin wiring
     over it. Errors (unknown symbol) come back as an `{"error": …}` dict

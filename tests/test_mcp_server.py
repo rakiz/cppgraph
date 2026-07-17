@@ -63,14 +63,71 @@ def test_callers_lists_edges(store: GraphStore) -> None:
     result = mcp_server.callers(store, FOO)
     assert result["symbol"] == FOO
     assert result["total"] == 1
-    assert result["callers"][0]["symbol"] == MID
+    # compact by default: human name, not the SCIP string, and no `symbol` key
+    assert result["callers"][0]["name"] == "mid"
+    assert "symbol" not in result["callers"][0]
     assert result["callers"][0]["line"] == 52  # edge line 51 -> 1-indexed
+
+
+def test_callers_full_symbols_restores_scip(store: GraphStore) -> None:
+    result = mcp_server.callers(store, FOO, full_symbols=True)
+    assert result["callers"][0]["symbol"] == MID
+    assert result["callers"][0]["name"] == "mid"
 
 
 def test_callees_lists_edges(store: GraphStore) -> None:
     result = mcp_server.callees(store, MID)
     assert result["total"] == 1
-    assert result["callees"][0]["symbol"] == FOO
+    assert result["callees"][0]["name"] == "makeResumeToken"
+
+
+def test_callers_exclude_tests_by_default(tmp_path: Path) -> None:
+    # a production caller and a test caller of FOO; the test one is dropped by
+    # default and comes back only with exclude_tests=False.
+    prod = "cxx . . $ mongo/Foo#prodCaller(a4)."
+    testc = "cxx . . $ mongo/FooTest#SomeCase_Test#~SomeCase_Test(a5)."
+    graph = Graph()
+    graph.nodes[FOO] = Node(symbol=FOO, display_name="makeResumeToken", file="foo.cpp", line=234)
+    graph.nodes[prod] = Node(symbol=prod, display_name="prodCaller", file="foo.cpp", line=9)
+    graph.nodes[testc] = Node(symbol=testc, display_name="~SomeCase_Test", file="foo_test.cpp", line=3)
+    graph.add_edge("calls", prod, FOO, file="foo.cpp", line=11)
+    graph.add_edge("calls", testc, FOO, file="foo_test.cpp", line=5)
+    path = tmp_path / "t.db"
+    write_sqlite(graph, path)
+    st = GraphStore(path)
+
+    default = mcp_server.callers(st, FOO)
+    assert default["excluded_tests"] is True
+    assert {c["name"] for c in default["callers"]} == {"prodCaller"}
+
+    including = mcp_server.callers(st, FOO, exclude_tests=False)
+    assert {c["name"] for c in including["callers"]} == {"prodCaller", "~SomeCase_Test"}
+
+
+def test_short_label_strips_scip_noise() -> None:
+    # scheme prefix, anonymous-namespace file path, overload hash, back-ticks
+    raw = ("cxx . . $ mongo/`$anonymous_namespace_src/mongo/db/pipeline/foo_test.cpp`"
+           "/SomeCase_Test#`~SomeCase_Test`(49f6e7a06ebc5aa8).")
+    assert mcp_server._short_label(raw) == "mongo/SomeCase_Test#~SomeCase_Test."
+    plain = "cxx . . $ mongo/PlanExecutorPipeline#_initializeResumableScanState(49f6e7a06ebc5aa8)."
+    assert mcp_server._short_label(plain) == "mongo/PlanExecutorPipeline#_initializeResumableScanState."
+
+
+def test_callers_derives_label_without_display_name(tmp_path: Path) -> None:
+    # callers with no indexed display_name still get a readable name (not the
+    # raw SCIP string), and the SCIP string is gone from the compact payload.
+    callee = "cxx . . $ mongo/Foo#target(a1)."
+    caller = "cxx . . $ mongo/Bar#doWork(deadbeef1234)."
+    graph = Graph()
+    graph.nodes[callee] = Node(symbol=callee, file="foo.cpp", line=1)
+    graph.nodes[caller] = Node(symbol=caller, file="bar.cpp", line=1)
+    graph.add_edge("calls", caller, callee, file="bar.cpp", line=9)
+    path = tmp_path / "d.db"
+    write_sqlite(graph, path)
+    r = mcp_server.callers(GraphStore(path), callee)
+    item = r["callers"][0]
+    assert item["name"] == "mongo/Bar#doWork."
+    assert "symbol" not in item
 
 
 def test_callers_unknown_symbol_is_error(store: GraphStore) -> None:
@@ -95,16 +152,16 @@ def test_path_none_when_no_chain(store: GraphStore) -> None:
 
 def test_impact_transitive_callers(store: GraphStore) -> None:
     result = mcp_server.impact(store, FOO)
-    syms = {r["symbol"] for r in result["reached_by"]}
-    assert syms == {CALLER, MID}
+    names = {r["name"] for r in result["reached_by"]}
+    assert names == {"caller", "mid"}
     assert result["total"] == 2
     assert result["kind"] == "calls"
 
 
 def test_impact_depth_bounds_walk(store: GraphStore) -> None:
     result = mcp_server.impact(store, FOO, depth=1)
-    syms = {r["symbol"] for r in result["reached_by"]}
-    assert syms == {MID}  # only the direct caller at depth 1
+    names = {r["name"] for r in result["reached_by"]}
+    assert names == {"mid"}  # only the direct caller at depth 1
 
 
 BASE = "cxx . . $ mongo/Base#"
@@ -123,12 +180,14 @@ def hierarchy(tmp_path: Path) -> GraphStore:
 
 
 def test_bases_lists_direct_supertypes(hierarchy: GraphStore) -> None:
-    result = mcp_server.bases(hierarchy, DERIVED)
+    result = mcp_server.bases(hierarchy, DERIVED, full_symbols=True)
     assert [b["symbol"] for b in result["bases"]] == [BASE]
+    # no indexed display name -> readable label derived from the SCIP string
+    assert result["bases"][0]["name"] == "mongo/Base#"
 
 
 def test_subtypes_lists_direct_subclasses(hierarchy: GraphStore) -> None:
-    result = mcp_server.subtypes(hierarchy, BASE)
+    result = mcp_server.subtypes(hierarchy, BASE, full_symbols=True)
     assert [s["symbol"] for s in result["subtypes"]] == [DERIVED]
 
 
@@ -164,7 +223,29 @@ def test_references_with_root_reads_snippets(refs_store: GraphStore, tmp_path: P
     (root / "b.cpp").write_text("\n".join(f"line {i}" for i in range(50)))
     result = mcp_server.references(refs_store, TYPE, root=str(root), include_source=True, context=0)
     a = next(u for u in result["uses"] if u["file"] == "a.cpp")
-    assert a["source"] == [{"line": 11, "text": "line 10"}]
+    assert a["lines"] == [11]
+    assert a["source"] == [{"line": 11, "text": "line 10", "is_use": True}]
+
+
+def test_references_merges_overlapping_windows(tmp_path: Path) -> None:
+    # two hits 3 lines apart in the same file, context=2 -> windows overlap; the
+    # shared lines must be sent once, not duplicated per hit.
+    graph = Graph()
+    graph.add_reference(TYPE, "a.cpp", 10)
+    graph.add_reference(TYPE, "a.cpp", 12)
+    path = tmp_path / "m.db"
+    write_sqlite(graph, path)
+    store = GraphStore(path)
+    root = tmp_path / "co"
+    root.mkdir()
+    (root / "a.cpp").write_text("\n".join(f"line {i}" for i in range(50)))
+    result = mcp_server.references(store, TYPE, root=str(root), include_source=True, context=2)
+    (a,) = result["uses"]  # one grouped entry for the file
+    assert a["lines"] == [11, 13]
+    nums = [ln["line"] for ln in a["source"]]
+    assert nums == [9, 10, 11, 12, 13, 14, 15]  # merged, no repeats
+    assert nums == sorted(set(nums))
+    assert [ln["line"] for ln in a["source"] if ln["is_use"]] == [11, 13]
 
 
 def test_references_unavailable_when_not_built(store: GraphStore) -> None:
@@ -178,7 +259,7 @@ def test_references_unknown_symbol_is_error(refs_store: GraphStore) -> None:
 
 
 def test_impact_over_inherits_gives_all_descendants(hierarchy: GraphStore) -> None:
-    result = mcp_server.impact(hierarchy, BASE, kind="inherits")
+    result = mcp_server.impact(hierarchy, BASE, kind="inherits", full_symbols=True)
     assert {r["symbol"] for r in result["reached_by"]} == {DERIVED, LEAF}
     assert result["kind"] == "inherits"
 

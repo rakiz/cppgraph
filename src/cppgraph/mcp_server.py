@@ -28,11 +28,13 @@ out of the box: the checkout root is auto-discovered (the project that owns the
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from cppgraph.cli import SOURCE_EXTS, build_export_json, read_source_snippet
+from cppgraph.export import is_test_file
 from cppgraph.store import (
     GraphStore,
     changed_files_since,
@@ -58,23 +60,111 @@ def _line1(line0: int | None) -> int | None:
     return None if line0 is None else line0 + 1
 
 
-def _node_dict(node: Node) -> dict[str, Any]:
-    return {
-        "symbol": node.symbol,
-        "name": node.display_name or None,
-        "file": node.file,
-        "line": _line1(node.line),
-    }
+# Noise in a raw SCIP symbol string that a human name never needs: the scheme
+# prefix (`cxx . . $ `), the enclosing-file path baked into anonymous-namespace
+# and lambda symbols (`$anonymous_namespace_src/mongo/.../file.cpp/`), the
+# overload disambiguator hash (`(a1b2c3…)`), and the descriptor back-ticks.
+_ANON_RE = re.compile(r"`\$anonymous_namespace_[^`]*`/")
+_HASH_RE = re.compile(r"\([0-9a-f]{6,}\)")
 
 
-def _edge_dict(edge: Edge, other: str) -> dict[str, Any]:
+def _short_label(symbol: str) -> str:
+    """A readable label derived from the SCIP string itself.
+
+    `scip-clang` doesn't populate SymbolInformation.display_name (0% on the
+    MongoDB index), so the graph has no human name to fall back on — but the SCIP
+    string *is* the name, wrapped in machine noise. Strip that noise so the label
+    is a fraction of the raw string yet still a substring `find` can re-resolve.
+    Lossy on purpose (drops the overload hash); the exact string is one
+    `full_symbols=True` away.
+    """
+    s = symbol.split(" $ ", 1)[-1] if " $ " in symbol else symbol
+    s = _ANON_RE.sub("", s)
+    s = _HASH_RE.sub("", s)
+    return s.replace("`", "")
+
+
+def _label(symbol: str, node: Node | None) -> str:
+    """Preferred human label: the indexed display name if present (other indexers
+    may fill it), else one derived from the SCIP string."""
+    return (node.display_name if node is not None else "") or _short_label(symbol)
+
+
+def _node_dict(node: Node, full_symbols: bool = False) -> dict[str, Any]:
+    """Compact node identity. The full SCIP `symbol` string is 150-250 chars of
+    near-noise repeated per hit; by default we emit a readable `name` +
+    `file:line` (a substring `find` can re-resolve) and only carry the raw SCIP
+    string when explicitly asked (`full_symbols`)."""
+    d: dict[str, Any] = {"name": _label(node.symbol, node)}
+    if full_symbols:
+        d["symbol"] = node.symbol
+    d["file"] = node.file
+    d["line"] = _line1(node.line)
+    return d
+
+
+def _edge_dict(
+    edge: Edge, other: str, store: GraphStore | None = None, full_symbols: bool = False
+) -> dict[str, Any]:
     """An edge as seen from one endpoint: `other` is the symbol at the far end
-    (the caller for a callers query, the callee for a callees query)."""
-    return {"symbol": other, "file": edge.file, "line": _line1(edge.line)}
+    (the caller for a callers query, the callee for a callees query). Same
+    compaction as `_node_dict`: a readable label by default, the raw SCIP string
+    only when `full_symbols`."""
+    node = store.get_node(other) if store is not None else None
+    d: dict[str, Any] = {"name": _label(other, node)}
+    if full_symbols:
+        d["symbol"] = other
+    d["file"] = edge.file
+    d["line"] = _line1(edge.line)
+    return d
+
+
+def _far_symbol(edge: Edge, on: str) -> str:
+    return edge.src if on == "src" else edge.dst
+
+
+def _drop_test_edges(store: GraphStore, edges: list[Edge], *, on: str) -> list[Edge]:
+    """Drop edges whose far endpoint (`src` for callers, `dst` for callees) is
+    defined in a test file — resolved via the node's definition site, so a test's
+    destructor teardown site (`~..._Test`) is dropped along with ordinary test
+    callers."""
+    kept: list[Edge] = []
+    for e in edges:
+        node = store.get_node(_far_symbol(e, on))
+        if node is None or not is_test_file(node.file):
+            kept.append(e)
+    return kept
 
 
 def _capped(items: list[Any], limit: int) -> tuple[list[Any], bool]:
     return items[:limit], len(items) > limit
+
+
+def _merged_source(
+    root: str, rel_path: str, hit_lines0: list[int], context: int
+) -> list[dict[str, Any]] | None:
+    """Read one file once and return the union of the `± context` windows around
+    every hit line, deduplicated.
+
+    Overlapping windows (hits within `2·context` lines of each other) are
+    collapsed into a single contiguous run instead of re-sending the shared
+    lines per hit — the "include_source duplicates overlapping lines" cost.
+    Non-adjacent runs stay in the same flat list; the gap shows up as a jump in
+    the emitted line numbers. Each line is 1-indexed and flagged `is_use` when it
+    is itself a reference site. `None` if the file can't be read.
+    """
+    try:
+        lines = (Path(root) / rel_path).read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return None
+    hits = set(hit_lines0)
+    wanted: set[int] = set()
+    for h in hits:
+        wanted.update(range(max(0, h - context), min(len(lines), h + context + 1)))
+    return [
+        {"line": i + 1, "text": lines[i], "is_use": i in hits}
+        for i in sorted(wanted)
+    ]
 
 
 def find_symbols(store: GraphStore, query: str, limit: int = DEFAULT_LIMIT) -> dict[str, Any]:
@@ -89,39 +179,65 @@ def find_symbols(store: GraphStore, query: str, limit: int = DEFAULT_LIMIT) -> d
         "query": query,
         "total": len(matches),
         "truncated": truncated,
-        "results": [_node_dict(n) for n in shown],
+        "results": [_node_dict(n, full_symbols=True) for n in shown],
     }
 
 
-def callers(store: GraphStore, symbol: str, limit: int = DEFAULT_LIMIT) -> dict[str, Any]:
-    """Direct callers of `symbol` (one `calls` hop). Error dict if unknown."""
+def callers(
+    store: GraphStore,
+    symbol: str,
+    limit: int = DEFAULT_LIMIT,
+    full_symbols: bool = False,
+    exclude_tests: bool = True,
+) -> dict[str, Any]:
+    """Direct callers of `symbol` (one `calls` hop). Error dict if unknown.
+
+    Test callers (and destructor teardown sites) are dropped by default
+    (`exclude_tests`); pass `full_symbols=True` for the raw SCIP strings."""
     if not store.has_symbol(symbol):
         return {"error": _UNKNOWN.format(symbol=symbol)}
     edges = store.callers_of(symbol)
+    if exclude_tests:
+        edges = _drop_test_edges(store, edges, on="src")
     shown, truncated = _capped(edges, limit)
     return {
         "symbol": symbol,
         "total": len(edges),
         "truncated": truncated,
-        "callers": [_edge_dict(e, e.src) for e in shown],
+        "excluded_tests": exclude_tests,
+        "callers": [_edge_dict(e, e.src, store, full_symbols) for e in shown],
     }
 
 
-def callees(store: GraphStore, symbol: str, limit: int = DEFAULT_LIMIT) -> dict[str, Any]:
-    """Direct callees of `symbol` (one `calls` hop). Error dict if unknown."""
+def callees(
+    store: GraphStore,
+    symbol: str,
+    limit: int = DEFAULT_LIMIT,
+    full_symbols: bool = False,
+    exclude_tests: bool = True,
+) -> dict[str, Any]:
+    """Direct callees of `symbol` (one `calls` hop). Error dict if unknown.
+
+    Callees defined in test files are dropped by default (`exclude_tests`); pass
+    `full_symbols=True` for the raw SCIP strings."""
     if not store.has_symbol(symbol):
         return {"error": _UNKNOWN.format(symbol=symbol)}
     edges = store.callees_of(symbol)
+    if exclude_tests:
+        edges = _drop_test_edges(store, edges, on="dst")
     shown, truncated = _capped(edges, limit)
     return {
         "symbol": symbol,
         "total": len(edges),
         "truncated": truncated,
-        "callees": [_edge_dict(e, e.dst) for e in shown],
+        "excluded_tests": exclude_tests,
+        "callees": [_edge_dict(e, e.dst, store, full_symbols) for e in shown],
     }
 
 
-def bases(store: GraphStore, symbol: str, limit: int = DEFAULT_LIMIT) -> dict[str, Any]:
+def bases(
+    store: GraphStore, symbol: str, limit: int = DEFAULT_LIMIT, full_symbols: bool = False
+) -> dict[str, Any]:
     """Direct base classes `symbol` inherits from (one `inherits` hop).
 
     Each base is returned with its own definition site (an inheritance edge has
@@ -135,11 +251,13 @@ def bases(store: GraphStore, symbol: str, limit: int = DEFAULT_LIMIT) -> dict[st
         "symbol": symbol,
         "total": len(nodes),
         "truncated": truncated,
-        "bases": [_node_dict(n) for n in shown],
+        "bases": [_node_dict(n, full_symbols) for n in shown],
     }
 
 
-def subtypes(store: GraphStore, symbol: str, limit: int = DEFAULT_LIMIT) -> dict[str, Any]:
+def subtypes(
+    store: GraphStore, symbol: str, limit: int = DEFAULT_LIMIT, full_symbols: bool = False
+) -> dict[str, Any]:
     """Direct subclasses of `symbol` (one `inherits` hop backward), each with
     its own definition site."""
     if not store.has_symbol(symbol):
@@ -150,7 +268,7 @@ def subtypes(store: GraphStore, symbol: str, limit: int = DEFAULT_LIMIT) -> dict
         "symbol": symbol,
         "total": len(nodes),
         "truncated": truncated,
-        "subtypes": [_node_dict(n) for n in shown],
+        "subtypes": [_node_dict(n, full_symbols) for n in shown],
     }
 
 
@@ -161,15 +279,18 @@ def references(
     include_source: bool = False,
     context: int = 0,
     limit: int = DEFAULT_LIMIT,
+    exclude_tests: bool = True,
 ) -> dict[str, Any]:
     """Exact use sites of `symbol` (the `--references` location index).
 
     Answers "where is this type/symbol used?" — the dependency the call graph
     can't express (a plain struct has no callers). Positions are exact (no
-    enclosing-attribution heuristic). Coordinates only by default; with
-    `include_source=True` *and* a `root`, each site also carries a snippet the
-    tool reads itself. `available` is False (not an error) when the graph was
-    built with `--no-references`, so the caller knows to rebuild.
+    enclosing-attribution heuristic). Test-file uses are dropped by default
+    (`exclude_tests`). Coordinates only by default; with `include_source=True`
+    *and* a `root`, sites are grouped by file and each file carries one merged
+    snippet (overlapping `± context` windows are collapsed, not re-sent per hit).
+    `available` is False (not an error) when the graph was built with
+    `--no-references`, so the caller knows to rebuild.
     """
     if not store.has_symbol(symbol):
         return {"error": _UNKNOWN.format(symbol=symbol)}
@@ -180,21 +301,38 @@ def references(
             "available": False,
             "reason": "graph built with --no-references (no location index)",
         }
+    if exclude_tests:
+        refs = [r for r in refs if not is_test_file(r.file)]
     shown, truncated = _capped(refs, limit)
-    items: list[dict[str, Any]] = []
-    for ref in shown:
-        entry: dict[str, Any] = {"file": ref.file, "line": _line1(ref.line)}
-        if include_source and root is not None and ref.file is not None and ref.line is not None:
-            snippet = read_source_snippet(root, ref.file, ref.line, context=context)
-            entry["source"] = (
-                None if snippet is None else [{"line": n + 1, "text": t} for n, t in snippet]
-            )
-        items.append(entry)
+
+    with_src = include_source and root is not None
+    if with_src:
+        # Group by file so a file's overlapping windows are read and merged once.
+        by_file: dict[str, list[int]] = {}
+        order: list[str] = []
+        for ref in shown:
+            if ref.file is None or ref.line is None:
+                continue
+            if ref.file not in by_file:
+                order.append(ref.file)
+            by_file.setdefault(ref.file, []).append(ref.line)
+        items: list[dict[str, Any]] = [
+            {
+                "file": f,
+                "lines": sorted(_line1(ln) for ln in by_file[f]),
+                "source": _merged_source(root, f, by_file[f], context),
+            }
+            for f in order
+        ]
+    else:
+        items = [{"file": ref.file, "line": _line1(ref.line)} for ref in shown]
+
     return {
         "symbol": symbol,
         "available": True,
         "total": len(refs),
         "truncated": truncated,
+        "excluded_tests": exclude_tests,
         "uses": items,
     }
 
@@ -224,28 +362,36 @@ def impact(
     depth: int | None = None,
     limit: int = DEFAULT_LIMIT,
     kind: str = "calls",
+    full_symbols: bool = False,
+    exclude_tests: bool = True,
 ) -> dict[str, Any]:
     """Reverse blast-radius: everything that transitively reaches `symbol`.
 
     `kind="calls"` (default) = transitive callers ("what breaks if I change this
     function?"); `kind="inherits"` = all transitive subclasses of a base type.
     `depth` bounds the backward hops (None = unbounded). Results are symbols
-    (with their definition site); capped like the other fan-out tools.
+    (with their definition site); capped like the other fan-out tools. Symbols
+    defined in test files are dropped by default (`exclude_tests`).
     """
     if not store.has_symbol(symbol):
         return {"error": _UNKNOWN.format(symbol=symbol)}
     affected = sorted(store.impact(symbol, max_depth=depth, kind=kind))
-    shown, truncated = _capped(affected, limit)
-    out: list[dict[str, Any]] = []
-    for sym in shown:
-        node = store.get_node(sym)
-        out.append(_node_dict(node) if node is not None else {"symbol": sym, "file": None, "line": None})
+    nodes = [(sym, store.get_node(sym)) for sym in affected]
+    if exclude_tests:
+        nodes = [(sym, n) for sym, n in nodes if n is None or not is_test_file(n.file)]
+    shown, truncated = _capped(nodes, limit)
+    out: list[dict[str, Any]] = [
+        _node_dict(n, full_symbols) if n is not None
+        else {"symbol": sym, "file": None, "line": None}
+        for sym, n in shown
+    ]
     return {
         "symbol": symbol,
         "kind": kind,
         "depth": depth,
-        "total": len(affected),
+        "total": len(nodes),
         "truncated": truncated,
+        "excluded_tests": exclude_tests,
         "reached_by": out,
     }
 
@@ -257,6 +403,8 @@ def explain(
     include_source: bool = False,
     context: int = 3,
     limit: int = EXPLAIN_LIMIT,
+    full_symbols: bool = False,
+    exclude_tests: bool = True,
 ) -> dict[str, Any]:
     """Definition site + caller/callee summary for `symbol`.
 
@@ -264,13 +412,18 @@ def explain(
     source snippet, but only if `root` (a checkout) is given — otherwise there's
     no file to read. `source` is `None` (not omitted) when a snippet was asked
     for but the file couldn't be read, so the caller can tell "not requested"
-    from "requested, unavailable".
+    from "requested, unavailable". Test-file callers/callees are dropped by
+    default (`exclude_tests`); `full_symbols=True` keeps the raw SCIP strings in
+    the caller/callee lists.
     """
     node = store.get_node(symbol)
     if node is None:
         return {"error": _UNKNOWN.format(symbol=symbol)}
     caller_edges = store.callers_of(symbol)
     callee_edges = store.callees_of(symbol)
+    if exclude_tests:
+        caller_edges = _drop_test_edges(store, caller_edges, on="src")
+        callee_edges = _drop_test_edges(store, callee_edges, on="dst")
     shown_callers, callers_trunc = _capped(caller_edges, limit)
     shown_callees, callees_trunc = _capped(callee_edges, limit)
 
@@ -278,15 +431,16 @@ def explain(
         "symbol": node.symbol,
         "name": node.display_name or None,
         "defined_at": {"file": node.file, "line": _line1(node.line)},
+        "excluded_tests": exclude_tests,
         "callers": {
             "total": len(caller_edges),
             "truncated": callers_trunc,
-            "items": [_edge_dict(e, e.src) for e in shown_callers],
+            "items": [_edge_dict(e, e.src, store, full_symbols) for e in shown_callers],
         },
         "callees": {
             "total": len(callee_edges),
             "truncated": callees_trunc,
-            "items": [_edge_dict(e, e.dst) for e in shown_callees],
+            "items": [_edge_dict(e, e.dst, store, full_symbols) for e in shown_callees],
         },
     }
 
@@ -436,40 +590,61 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         return _call(find_symbols, query, limit=limit)
 
     @mcp.tool()
-    def who_calls(symbol: str, limit: int = DEFAULT_LIMIT) -> dict[str, Any]:
+    def who_calls(
+        symbol: str, limit: int = DEFAULT_LIMIT,
+        full_symbols: bool = False, exclude_tests: bool = True,
+    ) -> dict[str, Any]:
         """Direct callers of a symbol (one call hop). `symbol` is an exact SCIP
-        string from `find`."""
-        return _call(callers, symbol, limit=limit)
+        string from `find`. Each caller is returned by human `name` + `file:line`
+        (compact); set `full_symbols=True` for the raw SCIP strings. Test callers
+        are dropped by default — pass `exclude_tests=False` to include them."""
+        return _call(callers, symbol, limit=limit,
+                     full_symbols=full_symbols, exclude_tests=exclude_tests)
 
     @mcp.tool()
-    def what_it_calls(symbol: str, limit: int = DEFAULT_LIMIT) -> dict[str, Any]:
+    def what_it_calls(
+        symbol: str, limit: int = DEFAULT_LIMIT,
+        full_symbols: bool = False, exclude_tests: bool = True,
+    ) -> dict[str, Any]:
         """Direct callees of a symbol (one call hop). `symbol` is an exact SCIP
-        string from `find`."""
-        return _call(callees, symbol, limit=limit)
+        string from `find`. Compact `name` + `file:line` by default
+        (`full_symbols=True` for raw SCIP); callees in test files dropped unless
+        `exclude_tests=False`."""
+        return _call(callees, symbol, limit=limit,
+                     full_symbols=full_symbols, exclude_tests=exclude_tests)
 
     @mcp.tool()
-    def base_classes(symbol: str, limit: int = DEFAULT_LIMIT) -> dict[str, Any]:
+    def base_classes(
+        symbol: str, limit: int = DEFAULT_LIMIT, full_symbols: bool = False
+    ) -> dict[str, Any]:
         """Direct base classes a type inherits from (`symbol` is an exact SCIP
-        type string from `find`, ending in `#`)."""
-        return _call(bases, symbol, limit=limit)
+        type string from `find`, ending in `#`). Compact `name` + `file:line` by
+        default; `full_symbols=True` for raw SCIP strings."""
+        return _call(bases, symbol, limit=limit, full_symbols=full_symbols)
 
     @mcp.tool()
-    def subclasses(symbol: str, limit: int = DEFAULT_LIMIT) -> dict[str, Any]:
+    def subclasses(
+        symbol: str, limit: int = DEFAULT_LIMIT, full_symbols: bool = False
+    ) -> dict[str, Any]:
         """Direct subclasses of a type (one inheritance hop). For the whole
-        subtree use `impact_of` with kind="inherits"."""
-        return _call(subtypes, symbol, limit=limit)
+        subtree use `impact_of` with kind="inherits". Compact `name` +
+        `file:line` by default; `full_symbols=True` for raw SCIP strings."""
+        return _call(subtypes, symbol, limit=limit, full_symbols=full_symbols)
 
     @mcp.tool()
     def find_references(
-        symbol: str, include_source: bool = False, context: int = 0, limit: int = DEFAULT_LIMIT
+        symbol: str, include_source: bool = False, context: int = 0,
+        limit: int = DEFAULT_LIMIT, exclude_tests: bool = True,
     ) -> dict[str, Any]:
         """Exact use sites of a symbol ("where is this type/symbol used?") — the
         dependency the call graph can't show (a struct has no callers). Returns
         `file:line` coordinates; set `include_source=True` to also get the code
-        at each site **inline** (cppgraph reads it for you — no separate file
-        read needed). `context` sets lines around each site."""
+        **inline** (cppgraph reads it for you — no separate file read needed),
+        grouped by file with overlapping windows merged (no duplicated lines).
+        `context` sets lines around each site. Test-file uses are dropped by
+        default — pass `exclude_tests=False` to include them."""
         return _call(references, symbol, root=root, include_source=include_source,
-                     context=context, limit=limit)
+                     context=context, limit=limit, exclude_tests=exclude_tests)
 
     @mcp.tool()
     def path(src: str, dst: str) -> dict[str, Any]:
@@ -478,25 +653,33 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
 
     @mcp.tool()
     def impact_of(
-        symbol: str, depth: int | None = None, limit: int = DEFAULT_LIMIT, kind: str = "calls"
+        symbol: str, depth: int | None = None, limit: int = DEFAULT_LIMIT,
+        kind: str = "calls", full_symbols: bool = False, exclude_tests: bool = True,
     ) -> dict[str, Any]:
         """Reverse blast-radius: everything that transitively reaches `symbol`.
         kind="calls" (default) = transitive callers ("what could break if I
         change this function?"); kind="inherits" = every transitive subclass of
-        a base type. `depth` bounds the hops."""
-        return _call(impact, symbol, depth=depth, limit=limit, kind=kind)
+        a base type. `depth` bounds the hops. Compact `name` + `file:line` by
+        default (`full_symbols=True` for raw SCIP); symbols in test files dropped
+        unless `exclude_tests=False`."""
+        return _call(impact, symbol, depth=depth, limit=limit, kind=kind,
+                     full_symbols=full_symbols, exclude_tests=exclude_tests)
 
     @mcp.tool()
     def explain_symbol(
-        symbol: str, include_source: bool = False, context: int = 3, limit: int = EXPLAIN_LIMIT
+        symbol: str, include_source: bool = False, context: int = 3,
+        limit: int = EXPLAIN_LIMIT, full_symbols: bool = False, exclude_tests: bool = True,
     ) -> dict[str, Any]:
         """Definition site + caller/callee summary for `symbol`. Returns
         `file:line` coordinates by default; set `include_source=True` to also get
         the definition's source snippet **inline** (cppgraph reads it for you — no
         separate file read needed). `limit` caps each of the caller/callee lists
-        (raise it when `truncated` is true and you need more)."""
+        (raise it when `truncated` is true and you need more). Caller/callee lists
+        are compact `name` + `file:line` (`full_symbols=True` for raw SCIP) and
+        drop test files unless `exclude_tests=False`."""
         return _call(
-            explain, symbol, root=root, include_source=include_source, context=context, limit=limit
+            explain, symbol, root=root, include_source=include_source, context=context,
+            limit=limit, full_symbols=full_symbols, exclude_tests=exclude_tests,
         )
 
     @mcp.tool()

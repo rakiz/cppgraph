@@ -45,6 +45,22 @@ Everything so far — the project has not cut a numbered release yet.
   surface as token-budgeted tools: `find`, `who_calls`, `what_it_calls`,
   `base_classes`, `subclasses`, `find_references`, `path`, `impact_of`,
   `explain_symbol`, `status`, `visualize`.
+- **Token-lean output by default** (all fan-out tools): results carry a readable
+  `name` + `file:line`, not the 150-250-char SCIP symbol string. The name is the
+  indexed display name when present, else a label **derived from the SCIP string**
+  (scheme prefix, anonymous-namespace file path, overload hash and back-ticks
+  stripped) — `scip-clang` leaves display_name empty, so the derivation is what
+  actually makes the output lean. Pass `full_symbols=True` for the raw SCIP
+  strings (`find` always returns them, since it's the name→SCIP resolver).
+  Measured on `who_calls`: ~5.5x smaller payload (test filtering + label
+  shortening combined); see `scripts/measure_tokens.py`.
+- **Test noise filtered by default** (`who_calls`, `what_it_calls`,
+  `find_references`, `impact_of`, `explain_symbol`): callers/callees/uses in test
+  files — including destructor teardown sites — are dropped; `exclude_tests=False`
+  brings them back. Each response echoes `excluded_tests`.
+- **`find_references` snippets deduplicated**: with `include_source`, sites are
+  grouped by file and overlapping `± context` windows are merged into one snippet
+  (shared lines sent once, hit lines flagged `is_use`) instead of re-sent per hit.
 - Project auto-discovery (Serena-style): registered once, globally, the server
   finds the current project's graph from the working directory's `.cppgraph/`
   at launch — one registration serves every indexed project, no collision. In a

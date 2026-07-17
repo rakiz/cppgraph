@@ -121,17 +121,25 @@ codebase that's both **wrong** and **token-expensive**:
   then reads whole files — all of it flows through the model's context.
 
 Measured on MongoDB, question *"who calls the **method** `makeResumeToken`?"*
-(four distinct symbols share that name):
+(four distinct symbols share that name). The cppgraph rows count the **MCP tool
+JSON** — the payload the LLM actually ingests:
 
 | Approach | Tokens ingested\* | Correct? |
 |---|---|---|
 | `grep -rn makeResumeToken src/mongo` (untargeted — realistic) | ~6,600 | ✗ 4 symbols merged, decls/comments; needs file reads to disambiguate |
 | same grep on the known subtree (best case) | ~5,900 | ✗ same problems — targeting barely helps |
-| cppgraph `find` + `who_calls` on the method | **~300** | ✓ exact: the method's 3 callers, nothing else |
+| cppgraph `find` + `who_calls` on the method | **~400** | ✓ exact: the method's 3 callers, nothing else |
 
-→ **~20× fewer tokens, and exact** — and grep still needs follow-up file reads
+→ **~16× fewer tokens, and exact** — and grep still needs follow-up file reads
 that cppgraph doesn't. The trade-off: a one-time index (minutes), amortized over
 every later query.
+
+The fan-out tools are **token-lean by default**: each hit ships a readable label
+(derived from the SCIP string) + `file:line`, not the 150-250-char raw SCIP
+symbol, and test callers are dropped. On a hub symbol these compound — e.g.
+`who_calls(ResumeToken::parse)` goes from ~2,780 tokens (raw strings, 100 callers
+incl. tests) to ~500 (13 production callers, shortened labels): **~5.5× leaner**,
+same exact answer. Pass `full_symbols=True` / `exclude_tests=False` to opt out.
 
 \* ≈ chars÷4 — rough and deliberately **conservative** (code and SCIP symbol
 strings tokenize *denser* than prose, so real counts are higher; the ratio
