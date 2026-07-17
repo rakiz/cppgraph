@@ -31,6 +31,24 @@ def test_graph_find_matches_symbol_or_display_name() -> None:
     assert matches[0].display_name == "makeResumeToken"
 
 
+def test_graph_find_multi_term_is_order_free_and() -> None:
+    graph = Graph()
+    graph.add_node("cxx . . $ mongo/Pipeline#buildPipeline(a1).", display_name="buildPipeline")
+    graph.add_node("cxx . . $ mongo/changeStream/buildPipeline(a2).", display_name="buildPipeline")
+    graph.add_node("cxx . . $ mongo/Pipeline#other(a3).", display_name="other")
+
+    # Both tokens must be present (order-free); only the changeStream one matches.
+    matches = graph.find("buildPipeline changeStream")
+    assert len(matches) == 1
+    assert "changeStream" in matches[0].symbol
+
+    # Reversed order matches the same node.
+    assert graph.find("changeStream buildPipeline") == matches
+
+    # A single token stays a plain substring match (two here).
+    assert len(graph.find("buildPipeline")) == 2
+
+
 def test_graph_find_no_match_returns_empty() -> None:
     graph = Graph()
     graph.add_node("cxx . . $ mongo/Foo#bar(a1).", display_name="bar")

@@ -431,3 +431,76 @@ def test_discover_graph_picks_newest(tmp_path: Path) -> None:
 
 def test_discover_graph_none_when_absent(tmp_path: Path) -> None:
     assert mcp_server.discover_graph(tmp_path) is None
+
+
+# --- 0.1.0 query-quality items -------------------------------------------
+
+
+def test_find_multi_term_and(store: GraphStore) -> None:
+    # "Foo makeResumeToken" — both tokens present only in FOO.
+    result = mcp_server.find_symbols(store, "Foo makeResumeToken")
+    assert result["total"] == 1
+    assert result["results"][0]["symbol"] == FOO
+
+
+def test_find_groups_overloads(tmp_path: Path) -> None:
+    p1 = "cxx . . $ mongo/ResumeToken#parse(aaaaaa)."
+    p2 = "cxx . . $ mongo/ResumeToken#parse(bbbbbb)."
+    graph = Graph()
+    graph.nodes[p1] = Node(symbol=p1, display_name="parse", file="rt.h", line=1)
+    graph.nodes[p2] = Node(symbol=p2, display_name="parse", file="rt.cpp", line=2)
+    path = tmp_path / "ov.db"
+    write_sqlite(graph, path)
+    result = mcp_server.find_symbols(GraphStore(path), "parse")
+    assert result["total"] == 2  # raw matches
+    assert result["groups"] == 1  # one qualified name
+    assert len(result["results"]) == 1
+    entry = result["results"][0]
+    assert entry["overloads"] == 2
+    assert {s["symbol"] for s in entry["signatures"]} == {p1, p2}
+
+
+def test_impact_on_type_redirects_to_references(tmp_path: Path) -> None:
+    ty = "cxx . . $ mongo/ResumeTokenData#"
+    graph = Graph()
+    graph.nodes[ty] = Node(symbol=ty, display_name="ResumeTokenData", file="rt.h", line=1)
+    graph.add_reference(ty, "a.cpp", 5)
+    graph.add_reference(ty, "b.cpp", 9)
+    path = tmp_path / "ty.db"
+    write_sqlite(graph, path)
+    result = mcp_server.impact(GraphStore(path), ty)
+    assert result["is_type"] is True
+    assert result["total"] == 0
+    assert result["reference_sites"] == 2
+    assert "find_references" in result["notice"]
+
+
+def test_what_it_calls_hide_trivial(tmp_path: Path) -> None:
+    caller = "cxx . . $ mongo/Foo#run(a1)."
+    real = "cxx . . $ mongo/Foo#doDomainWork(a2)."
+    op = "cxx . . $ mongo/Foo#operator==(a3)."
+    tassert = "cxx . . $ mongo/tassert(a4)."
+    graph = Graph()
+    for s in (caller, real, op, tassert):
+        graph.nodes[s] = Node(symbol=s, file="foo.cpp", line=1)
+    graph.add_edge("calls", caller, real, file="foo.cpp", line=2)
+    graph.add_edge("calls", caller, op, file="foo.cpp", line=3)
+    graph.add_edge("calls", caller, tassert, file="foo.cpp", line=4)
+    path = tmp_path / "tr.db"
+    write_sqlite(graph, path)
+    st = GraphStore(path)
+
+    full = mcp_server.callees(st, caller)
+    assert full["total"] == 3
+
+    filtered = mcp_server.callees(st, caller, hide_trivial=True)
+    assert filtered["total"] == 1
+    assert filtered["trivial_hidden"] == 2
+    assert "doDomainWork" in filtered["callees"][0]["name"]
+
+
+def test_path_not_found_carries_dispatch_hint(store: GraphStore) -> None:
+    result = mcp_server.call_path(store, FOO, CALLER)
+    assert result["found"] is False
+    assert "hint" in result
+    assert "dispatch" in result["hint"] or "factory" in result["hint"]

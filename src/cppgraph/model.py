@@ -148,12 +148,21 @@ class Graph:
         return visited
 
     def find(self, query: str) -> list[Node]:
-        """Nodes whose symbol or display name contains `query` (substring, case-sensitive).
+        """Nodes matching `query` (case-sensitive).
 
-        SCIP symbol strings aren't memorable — this is how a user locates the
-        exact symbol to pass to `callers_of`/`callees_of`.
+        A single token is a substring test; a multi-token query (whitespace-
+        separated) is an order-free AND — every token must appear in the symbol
+        or the display name. SCIP symbol strings aren't memorable, so this is how
+        a user locates the exact symbol to pass to `callers_of`/`callees_of`.
         """
-        return [n for n in self.nodes.values() if query in n.symbol or query in n.display_name]
+        tokens = query.split()
+        if not tokens:
+            return []
+        return [
+            n
+            for n in self.nodes.values()
+            if all(t in n.symbol or t in n.display_name for t in tokens)
+        ]
 
     def to_dict(self) -> dict:
         return {

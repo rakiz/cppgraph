@@ -49,8 +49,10 @@ if TYPE_CHECKING:
 
 # Default cap on any list a tool returns. Big enough to be useful for reasoning,
 # small enough that a hub symbol's callers don't blow the context budget. The
-# caller can raise it per-query, and always learns the true `total`.
-DEFAULT_LIMIT = 25
+# caller can raise it per-query, and always learns the true `total`. Set to 40
+# (not 25): a real function with ~30 stage/callee edges had genuine edges pushed
+# past a cap of 25, so the default now clears a typical fan-out.
+DEFAULT_LIMIT = 40
 # `explain` bundles callers + callees in one payload, so it caps each side lower.
 EXPLAIN_LIMIT = 10
 
@@ -84,6 +86,55 @@ def _short_label(symbol: str) -> str:
     s = _ANON_RE.sub("", s)
     s = _HASH_RE.sub("", s)
     return s.replace("`", "")
+
+
+def _is_type_symbol(symbol: str) -> bool:
+    """True if the SCIP string denotes a *type* (class/struct/enum), not a
+    callable. SCIP suffixes a type descriptor with `#` and a method/function
+    with `().`; a bare type reference therefore ends in `#`. Types have no
+    call-graph callers, so `impact_of(kind="calls")` on one is meaningless —
+    the blast radius lives in `find_references` instead."""
+    return symbol.rstrip().endswith("#")
+
+
+def _qualified_name(symbol: str) -> str:
+    """The name an overload set shares: the readable label with the parameter
+    signature stripped. `Foo#parse(a1).` and `Foo#parse(a2).` both reduce to
+    `mongo/Foo#parse`, so overloads (distinct SCIP hashes) group under one key.
+    Falls back to the label itself when there's no `(` to cut at."""
+    label = _short_label(symbol)
+    return label.split("(", 1)[0].rstrip(".")
+
+
+# Callees an LLM almost never cares about when reading "what does this call?":
+# ubiquitous comparison/assertion/error-wrapping helpers and compiler builtins
+# that bury the domain edges. Matched against the readable label (substring for
+# families like `operator`, exact for the named helpers). Opt-in via
+# `hide_trivial` so the default stays lossless.
+_TRIVIAL_CALLEE_SUBSTR = ("operator", "source_location", "__builtin_")
+_TRIVIAL_CALLEE_NAMES = frozenset(
+    {
+        "tassert",
+        "uassert",
+        "massert",
+        "iassert",
+        "fassert",
+        "invariant",
+        "makeStatus",
+        "makeStatusOK",
+        "Status",
+        "StatusWith",
+    }
+)
+
+
+def _is_trivial_callee(symbol: str) -> bool:
+    """True if `symbol`'s label is a ubiquitous helper (see `hide_trivial`)."""
+    label = _short_label(symbol)
+    leaf = _qualified_name(symbol).rsplit("#", 1)[-1].rsplit("/", 1)[-1]
+    if leaf in _TRIVIAL_CALLEE_NAMES:
+        return True
+    return any(s in label for s in _TRIVIAL_CALLEE_SUBSTR)
 
 
 def _label(symbol: str, node: Node | None) -> str:
@@ -173,12 +224,31 @@ def find_symbols(store: GraphStore, query: str, limit: int = DEFAULT_LIMIT) -> d
     so an LLM resolves a human name here first, then feeds the exact string on.
     """
     matches = store.find(query)
-    shown, truncated = _capped(matches, limit)
+
+    # Group overloads: signatures sharing a qualified name (distinct SCIP hashes
+    # for the same `Class::method`) collapse into one entry, so querying doesn't
+    # silently surface only one arm of an overload set. Order-preserving.
+    groups: dict[str, list[Node]] = {}
+    for n in matches:
+        groups.setdefault(_qualified_name(n.symbol), []).append(n)
+
+    shown_keys, truncated = _capped(list(groups), limit)
+    results: list[dict[str, Any]] = []
+    for key in shown_keys:
+        members = groups[key]
+        entry = _node_dict(members[0], full_symbols=True)
+        if len(members) > 1:
+            # An overload set: keep every signature's exact symbol + site.
+            entry["overloads"] = len(members)
+            entry["signatures"] = [_node_dict(m, full_symbols=True) for m in members]
+        results.append(entry)
+
     return {
         "query": query,
         "total": len(matches),
+        "groups": len(groups),
         "truncated": truncated,
-        "results": [_node_dict(n, full_symbols=True) for n in shown],
+        "results": results,
     }
 
 
@@ -214,24 +284,36 @@ def callees(
     limit: int = DEFAULT_LIMIT,
     full_symbols: bool = False,
     exclude_tests: bool = True,
+    hide_trivial: bool = False,
 ) -> dict[str, Any]:
     """Direct callees of `symbol` (one `calls` hop). Error dict if unknown.
 
     Callees defined in test files are dropped by default (`exclude_tests`); pass
-    `full_symbols=True` for the raw SCIP strings."""
+    `full_symbols=True` for the raw SCIP strings. With `hide_trivial=True`,
+    ubiquitous helpers (`operator==`, `tassert`/`uassert`, `makeStatus`,
+    `source_location`, …) are dropped so the domain edges stand out; the count of
+    hidden edges is reported as `trivial_hidden`."""
     if not store.has_symbol(symbol):
         return {"error": _UNKNOWN.format(symbol=symbol)}
     edges = store.callees_of(symbol)
     if exclude_tests:
         edges = _drop_test_edges(store, edges, on="dst")
+    trivial_hidden = 0
+    if hide_trivial:
+        kept = [e for e in edges if not _is_trivial_callee(e.dst)]
+        trivial_hidden = len(edges) - len(kept)
+        edges = kept
     shown, truncated = _capped(edges, limit)
-    return {
+    result = {
         "symbol": symbol,
         "total": len(edges),
         "truncated": truncated,
         "excluded_tests": exclude_tests,
         "callees": [_edge_dict(e, e.dst, store, full_symbols) for e in shown],
     }
+    if hide_trivial:
+        result["trivial_hidden"] = trivial_hidden
+    return result
 
 
 def bases(
@@ -347,7 +429,21 @@ def call_path(store: GraphStore, src: str, dst: str) -> dict[str, Any]:
         return {"error": _UNKNOWN.format(symbol=dst)}
     chain = store.shortest_call_path(src, dst)
     if chain is None:
-        return {"src": src, "dst": dst, "found": False, "path": None}
+        return {
+            "src": src,
+            "dst": dst,
+            "found": False,
+            "path": None,
+            "hint": (
+                "No *static* call chain — this does not prove the two are unrelated. "
+                "The flow may cross a runtime-dispatch boundary the static graph can't "
+                "link: a virtual call, or a registered-factory hop (e.g. a "
+                "DocumentSource built by a pipeline parser and later run via "
+                "doGetNext), where the edge exists only at runtime. Try `path` "
+                "against the concrete override/implementation, or bridge the boundary "
+                "with `find_references` / `subclasses`."
+            ),
+        }
     # chain is a list of edges src->...->dst; render as the node sequence.
     nodes = [{"symbol": src, "file": None, "line": None}]
     for edge in chain:
@@ -374,6 +470,32 @@ def impact(
     """
     if not store.has_symbol(symbol):
         return {"error": _UNKNOWN.format(symbol=symbol)}
+
+    # A type has no call-graph callers: `kind="calls"` on one would return a bare
+    # `total: 0` that reads as "nothing depends on this", which is misleading —
+    # the blast radius of a type lives in its reference sites. Redirect explicitly
+    # instead of silently returning 0.
+    if kind == "calls" and _is_type_symbol(symbol):
+        ref_count = len(store.references_of(symbol))
+        return {
+            "symbol": symbol,
+            "kind": kind,
+            "is_type": True,
+            "reached_by": [],
+            "total": 0,
+            "notice": (
+                f"{symbol} is a type, which has no call-graph callers. Its blast "
+                f"radius is its {ref_count} reference site(s) — use `find_references` "
+                '(or impact_of with kind="inherits" for the subclass tree).'
+                if ref_count
+                else f"{symbol} is a type (no call-graph callers). Use `find_references` "
+                'for its use sites, or impact_of with kind="inherits" for subclasses. '
+                "(0 reference sites recorded — the graph may have been built with "
+                "--no-references.)"
+            ),
+            "reference_sites": ref_count,
+        }
+
     affected = sorted(store.impact(symbol, max_depth=depth, kind=kind))
     nodes = [(sym, store.get_node(sym)) for sym in affected]
     if exclude_tests:
@@ -607,13 +729,21 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         limit: int = DEFAULT_LIMIT,
         full_symbols: bool = False,
         exclude_tests: bool = True,
+        hide_trivial: bool = False,
     ) -> dict[str, Any]:
         """Direct callees of a symbol (one call hop). `symbol` is an exact SCIP
         string from `find`. Compact `name` + `file:line` by default
         (`full_symbols=True` for raw SCIP); callees in test files dropped unless
-        `exclude_tests=False`."""
+        `exclude_tests=False`. Set `hide_trivial=True` to drop ubiquitous helpers
+        (operators, tassert/uassert, makeStatus, source_location, …) so the
+        domain edges stand out — `trivial_hidden` reports how many were cut."""
         return _call(
-            callees, symbol, limit=limit, full_symbols=full_symbols, exclude_tests=exclude_tests
+            callees,
+            symbol,
+            limit=limit,
+            full_symbols=full_symbols,
+            exclude_tests=exclude_tests,
+            hide_trivial=hide_trivial,
         )
 
     @mcp.tool()

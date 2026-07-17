@@ -81,6 +81,32 @@ Everything so far — the project has not cut a numbered release yet.
   at launch — one registration serves every indexed project, no collision. In a
   project with no graph yet, tools return a clear "not indexed here" notice.
 
+### Query quality
+Surfaced by the MongoDB change-stream benchmark; fixes the answers that read as
+misleading rather than merely terse.
+- **`find` is a multi-term AND** (order-free): a whitespace-separated query
+  requires every token to appear (in the symbol *or* display name), so
+  `find "buildPipeline changeStream"` narrows instead of returning nothing. A
+  single token stays a plain substring match. Applies to CLI and MCP.
+- **Overloads grouped**: `find` collapses signatures sharing a qualified name
+  (distinct SCIP hashes for the same `Class::method`) into one result carrying
+  every signature under `signatures`, so querying no longer silently surfaces
+  one arm of an overload set. `total` (raw matches) and `groups` both reported.
+- **`impact_of` on a type no longer returns a bare `0`**: a type has no
+  call-graph callers, so `kind="calls"` on one now returns an explicit notice
+  with the reference-site count and points to `find_references` /
+  `kind="inherits"` — never a misleading empty blast radius. Mirrored in the
+  CLI `impact` command.
+- **`what_it_calls` opt-in `hide_trivial`**: drops ubiquitous helpers
+  (`operator==`, `tassert`/`uassert`, `makeStatus`, `source_location`, …) so the
+  domain edges stand out; `trivial_hidden` reports how many were cut. Default
+  stays lossless.
+- **Default fan-out cap raised 25 → 40**: a real function's callee set had
+  genuine edges pushed past 25; the new default clears a typical fan-out.
+- **`path` failure carries a hint**: a missing *static* call chain now explains
+  it may cross a runtime-dispatch boundary (virtual call / registered-factory
+  hop) rather than implying no relationship. Mirrored in the CLI.
+
 ### Export & visualization
 - `cppgraph export`: bounded neighbourhood around a symbol as a
   graphify-compatible `graph.json`. Two views: `--mode deps` (call/inherit

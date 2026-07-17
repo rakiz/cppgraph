@@ -18,49 +18,41 @@ Only open items live here. Completed work is in `CHANGELOG.md`; design detail in
   If we ever publish that way, wire a build-time version from the tag
   (`hatch-vcs`/`setuptools-scm`) so those installs report the truth too.
 
-## Query quality — targeted for 0.2.0
-
-Surfaced by the MongoDB change-stream benchmark (2026-07-17). Ranked by impact.
-
-- **`impact_of` on a type returns 0, silently misleading.** `impact_of
-  ResumeTokenData (kind=calls)` → `total: 0` even though `find_references` shows
-  68 sites — a type has no call-graph callers, so the blast radius question must
-  be asked via references. Detect when the resolved symbol is a type (not a
-  callable) and either redirect to `find_references` or return an explicit notice
-  ("type has no callers — N reference sites; use find_references"), never a bare 0.
-- **`find` is substring-only, no multi-term AND.** `find "buildPipeline
-  changeStream"` → 0 hits while `buildPipeline` alone → 11. Support an AND of
-  tokens (all terms present, order-free) so multi-word queries work.
-- **Overloads aren't grouped.** `ResumeToken::parse` has two signatures (distinct
-  SCIP hashes, `.h`/`.cpp`); querying the wrong one silently misses callers.
-  Group signatures sharing a qualified name under one entry, hashes as sub-lines.
-- **Callee noise (opt-in filter).** `what_it_calls` buries real edges under
-  `operator==`/`tassert`/`makeStatus`/`source_location`. Add an opt-in
-  `hide_trivial` filter (mirror the existing test filtering), and revisit the
-  default `limit` (25 can push real edges out — 40 was needed to see all stages).
-- **`path` across runtime dispatch returns a bare `found: false`.** Plan→exec
-  boundary (`DocumentSourceX` built by `buildPipeline` → `XStage::doGetNext`) is a
-  registered-factory / virtual dispatch hop with no static edge, so end-to-end
-  paths break. Can't be fully resolved without indexing the factory registry;
-  short term, when `path` fails, hint that the flow may cross virtual dispatch /
-  a factory rather than implying no relationship exists.
-
-## Later: a build container that compiles scip-clang native to its host arch
+## A build container that compiles scip-clang native to its host arch
 
 Today's ARM-Linux workaround (`scripts/index-in-container.sh`) runs the x86_64
-scip-clang **emulated**, so indexing is slow. The better long-term option: a
-Docker image that carries the whole build toolchain (Bazel + LLVM deps) and
-compiles a **vanilla** scip-clang for whatever arch the container runs on
-(native, e.g. `linux/arm64` on an ARM host — no emulation), dropping the binary
-into `scratch/bin/` for normal *native* indexing afterwards. Keeps the heavy
-build toolchain off the host, and there's **nothing to host/maintain** — each
-machine that lacks a prebuilt binary builds its own once. Needs scip-clang's
-real Bazel build recipe (pin the version; build is CPU/RAM-heavy, tens of
-minutes). Distinct from item above: build-and-use-locally, not build-and-publish.
+scip-clang emulated, so indexing is slow.
 
-Bonus tie-in: **if we build scip-clang ourselves we could carry the
-`enclosing_range` patch (#504)** — but that turns "vanilla, build locally" into
-"own the whole distributed matrix", so keep it a separate, later decision.
+To close it: a Docker image carrying the build toolchain (Bazel + LLVM deps)
+that compiles a vanilla scip-clang for the arch the container runs on (native,
+e.g. `linux/arm64` on an ARM host — no emulation), dropping the binary into
+`scratch/bin/` for native indexing afterwards. The build toolchain stays in the
+image, not on the host; no prebuilt binary needs hosting, since each machine
+without one builds it once.
+
+Blocked on / costs: needs scip-clang's Bazel build recipe (pin the version); the
+build is CPU/RAM-heavy, tens of minutes.
+
+Related: building scip-clang ourselves would also let us carry the
+`enclosing_range` patch (#504), but that widens scope from "build locally" to
+"maintain the whole distributed build matrix" — a separate item if taken.
+
+## Synthetic factory-registry edges (reconnect plan→exec across dispatch)
+
+`path` today only *hints* that a missing static chain may cross a runtime
+boundary; it can't rebuild the edge. In codebases like MongoDB the plan→exec
+flow hops through a factory table keyed by a string
+(`REGISTER_DOCUMENT_SOURCE("$match", DocumentSourceMatch::createFromBson)`) then
+through virtual dispatch, so there is no static edge from `buildPipeline` to
+`DocumentSourceMatch::doGetNext` even though they're linked at runtime.
+
+To close it: parse the registration macros to learn `"$match" → createFromBson`
+and inject a synthetic edge into the graph, so end-to-end paths resolve.
+
+Blocked on / costs: the registration macros are codebase-specific (each project
+has its own), so this needs per-codebase pattern support, and a synthetic edge
+departs from the graph's otherwise exact, heuristic-free model — decide how to
+mark such edges (e.g. a distinct `kind`) before adding them.
 
 ## Blocked on scip-clang `enclosing_range` (PR #504)
 

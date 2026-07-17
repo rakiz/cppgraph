@@ -479,21 +479,36 @@ class GraphStore:
         return Node(symbol=row[0], display_name=row[1] or "", file=row[2], line=row[3])
 
     def find(self, query: str) -> list[Node]:
-        """Nodes whose symbol or display name *contains* `query`, case-sensitive.
+        """Nodes matching `query`, case-sensitive.
 
-        `instr(col, ?) > 0` is a case-sensitive substring test matching the
-        in-memory `Graph.find`'s Python `in` — unlike `LIKE`, which SQLite runs
-        case-insensitively for ASCII. This scans the symbols table (a leading
+        A single-token query is a substring test (`instr(col, ?) > 0`, matching
+        the in-memory `Graph.find`'s Python `in` — unlike `LIKE`, which SQLite
+        runs case-insensitively for ASCII). A multi-token query (whitespace-
+        separated) is an order-free **AND**: every token must appear as a
+        substring in the symbol *or* the display name (tokens may match either,
+        and different tokens may match different columns), so
+        `find "buildPipeline changeStream"` matches a symbol containing both
+        rather than the literal phrase. This scans the symbols table (a leading
         wildcard can't use `ix_sym`), which is fine: `find` is a rare
         interactive lookup, not a hot-path traversal.
         """
+        tokens = query.split()
+        if not tokens:
+            return []
+        # Each token: present in symbol OR display_name. AND across tokens.
+        clause = " AND ".join(
+            ["(instr(s.symbol, ?) > 0 OR instr(s.display_name, ?) > 0)"] * len(tokens)
+        )
+        params: list[str] = []
+        for t in tokens:
+            params.extend((t, t))
         rows = self._con.execute(
-            """
+            f"""
             SELECT s.symbol, s.display_name, f.path, s.line
             FROM symbols s LEFT JOIN files f ON f.id = s.file_id
-            WHERE instr(s.symbol, ?) > 0 OR instr(s.display_name, ?) > 0
+            WHERE {clause}
             """,
-            (query, query),
+            params,
         ).fetchall()
         return [Node(symbol=r[0], display_name=r[1] or "", file=r[2], line=r[3]) for r in rows]
 

@@ -590,7 +590,13 @@ def main(argv: list[str] | None = None) -> int:
         args.dst = _resolve_symbol(store, args.dst, parser, what="dst symbol")
         chain = store.shortest_call_path(args.src, args.dst)
         if chain is None:
-            print(f"[cppgraph] no call path from {args.src} to {args.dst}")
+            print(f"[cppgraph] no static call path from {args.src} to {args.dst}")
+            print(
+                "  note: this does not prove they're unrelated — the flow may cross a "
+                "runtime-dispatch boundary (a virtual call, or a registered-factory hop) "
+                "that has no static edge. Try the concrete override, or bridge with "
+                "references/subtypes."
+            )
             return 1
         print(f"[cppgraph] {len(chain)} hop(s) from {args.src} to {args.dst}")
         print(f"  {args.src}")
@@ -602,6 +608,14 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "impact":
         store = GraphStore(_resolve_graph(args, parser))
         args.symbol = _resolve_symbol(store, args.symbol, parser)
+        if args.kind == "calls" and args.symbol.rstrip().endswith("#"):
+            n = len(store.references_of(args.symbol))
+            print(
+                f"[cppgraph] {args.symbol} is a type — it has no call-graph callers. "
+                f"Its blast radius is its {n} reference site(s): use `cppgraph references`, "
+                "or `impact --kind inherits` for the subclass tree."
+            )
+            return 0
         affected = store.impact(args.symbol, max_depth=args.depth, kind=args.kind)
         verb = "transitively call" if args.kind == "calls" else "transitively inherit from"
         print(f"[cppgraph] {len(affected)} symbol(s) {verb} {args.symbol}")
