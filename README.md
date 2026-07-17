@@ -135,6 +135,13 @@ JSON** — the payload the LLM actually ingests:
 that cppgraph doesn't. The trade-off: a one-time index (minutes), amortized over
 every later query.
 
+And cheaper isn't at the expense of correct — it's the reverse. Of grep's 156
+dumped lines only **3** are real call sites (**98% noise**: comments, decls, and
+the three *other* symbols sharing the name); cppgraph returns exactly those 3,
+compiler-resolved. On a hub symbol the gap widens: `who_calls(ResumeToken::parse)`
+is **~41×** fewer tokens (grep ~68,600, **96% noise**; cppgraph ~1,690, exact) —
+the ~16× above is deliberately the small example, not the ceiling.
+
 The fan-out tools are **token-lean by default**: each hit ships a readable label
 (derived from the SCIP string) + `file:line`, not the 150-250-char raw SCIP
 symbol, and test callers are dropped. On a hub symbol these compound — e.g.

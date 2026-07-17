@@ -76,7 +76,8 @@ def main(argv: list[str]) -> int:
     print(" cppgraph rows measure the MCP tool JSON, i.e. what the LLM ingests)\n")
 
     print("grep — raw text dumped into context (ambiguous: every name, every kind):")
-    whole_c = len(_run("grep", "-rn", name, src_root))
+    whole_out = _run("grep", "-rn", name, src_root)
+    whole_c = len(whole_out)
     _row("whole tree (untargeted — realistic)", whole_c, f"[{src_root}]")
     sub_c = None
     if subtree:
@@ -126,6 +127,33 @@ def main(argv: list[str]) -> int:
     _row("ANSWER (default) = find + who_calls(target)", answer_compact, "<- exact")
     _row("ANSWER (pre-opt) = raw SCIP + tests", answer_raw,
          f"{answer_raw / max(answer_compact, 1):.1f}x the default payload")
+
+    # Correctness: how much of grep's dump is actually the answer? cppgraph's
+    # answer is exact by construction (compiler-resolved callers); grep matches
+    # the name in comments/strings/decls and across every same-named symbol, so
+    # most of what it dumps is noise for *this* question. We measure it: how many
+    # of grep's lines coincide with a real call site cppgraph attributes to the
+    # target. (Match a grep path by suffix against cppgraph's relative file.)
+    sites = {
+        (c["file"], c["line"])
+        for c in mcp_server.callers(
+            store, target_sym, full_symbols=True, exclude_tests=False, limit=10**9
+        ).get("callers", [])
+    }
+    total_lines = on_target = 0
+    for line in whole_out.splitlines():
+        parts = line.split(":", 2)
+        if len(parts) < 2 or not parts[1].isdigit():
+            continue
+        total_lines += 1
+        path, n = parts[0], int(parts[1])
+        if any(n == sl and path.endswith(sf) for sf, sl in sites):
+            on_target += 1
+    noise = 100 * (1 - on_target / total_lines) if total_lines else 0.0
+    print("\nsignal vs noise (grep is raw text; cppgraph is compiler-exact):")
+    print(f"  grep lines dumped                 : {total_lines}")
+    print(f"  ...that are a real call site      : {on_target}  -> {noise:.1f}% noise for this question")
+    print(f"  cppgraph callers                  : {len(sites)}  -> exact (100% signal, no reading to filter)")
 
     print("\nratios (tokens), for answering the one specific symbol:")
     a = max(answer_compact, 1)

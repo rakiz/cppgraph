@@ -155,6 +155,20 @@ grep) — and exact, where grep is ambiguous *and* still needs follow-up file
 reads. `find` alone is the step grep can't do: it splits the name into its four
 real symbols with their definition sites.
 
+**Cheaper is good; *correct* is better.** Fewer tokens would be a poor trade if
+the answer were worse — it's the opposite. Of grep's **156** dumped lines, only
+**3** are real call sites of the method: **98% is noise** for this question
+(comments, strings, declarations, and the three *other* symbols sharing the
+name). cppgraph returns exactly those 3 callers — **100% signal, compiler-
+resolved**, nothing to read-and-filter. So the LLM ingests ~16× fewer tokens
+*and* they're the right ones.
+
+**It scales up on a hub symbol.** The same question on `ResumeToken::parse`
+(`scripts/measure_tokens.py ResumeToken … 'ResumeToken#parse'`): grep dumps
+**~68,600 tokens** (1,636 lines, **95.6% noise** — only 72 are real calls);
+cppgraph answers in **~1,690 tokens**, exact. That's **~41× fewer tokens** — the
+conservative ~16× above is deliberately the *small* example, not the ceiling.
+
 **Where those tokens go — and the token-lean defaults.** Each fan-out hit could
 carry the raw 150-250-char SCIP symbol string; instead the tools ship a readable
 label derived from that string (`full_symbols=True` to opt out) and drop test

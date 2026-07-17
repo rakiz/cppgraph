@@ -111,7 +111,9 @@ Everything so far — the project has not cut a numbered release yet.
   design question — see `COMPARISON.md`.
 - Token-cost comparison vs an LLM's own `grep`-and-read loop (`README.md` §"Why
   not just grep?"), reproducible with `scripts/measure_tokens.py`: ~16× fewer
-  tokens to answer "who calls this method?", and exact.
+  tokens to answer "who calls this method?" (~41× on a hub symbol), and exact —
+  the script also reports grep's **signal/noise** (e.g. 3 of 156 lines are real
+  call sites → 98% noise; cppgraph is 100% signal, compiler-resolved).
 
 ### Project
 - Licensed **MIT**.
