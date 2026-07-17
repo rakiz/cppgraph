@@ -3,6 +3,19 @@
 Only open items live here. Completed work is in `CHANGELOG.md`; design detail in
 `DESIGN.md`.
 
+## Align CLI query filters with the MCP tools
+
+The MCP tools carry filtering/budget options the CLI equivalents lack: `who_calls`
+/ `what_it_calls` take `limit`, `exclude_tests`, `full_symbols` (and
+`what_it_calls` also `hide_trivial`), while `cppgraph callers` / `callees` print
+every edge with none of these. Same gap on `impact` (`exclude_tests`) and the
+type notices.
+
+To close it: add the matching flags (`--limit`, `--exclude-tests`,
+`--hide-trivial`, `--full-symbols`) to the CLI query commands, reusing the pure
+functions the MCP layer already calls so behaviour stays identical across both
+surfaces.
+
 ## Packaging / open-source
 
 - Contributing notes, CI (lint + pytest), publish.

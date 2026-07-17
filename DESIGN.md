@@ -283,6 +283,19 @@ designing the builder so this isn't a later rewrite:
     far-end node's definition file, catching `~..._Test` teardown sites too).
     Measured effect on `who_calls` for a hub symbol: ~5.5× smaller payload
     (`scripts/measure_tokens.py`).
+  - *Query quality*: `find` matches multiple words as an order-free AND (each
+    must appear), groups overloads sharing a qualified name under one entry —
+    each with a source-derived parameter `signature`, since scip-clang
+    distinguishes them only by hash — and on a zero-hit query relaxes once
+    (case/separator-insensitive, `changestream` ~ `change_stream`, then the bare
+    leaf name), flagging the response `relaxed`. `what_it_calls`, `find`, and
+    `explain_symbol` take an opt-in `hide_trivial` that drops ubiquitous helpers
+    (operators, `*assert`, `makeStatus`, `source_location`, generated lambdas).
+    And where a query would return a bare, misleading zero it returns a pointer
+    instead: `impact_of` on a type (types have no call-graph callers) → a notice
+    plus the reference-site count; an empty `base_classes`/`subclasses` → a
+    `note`; a `path` with no static chain → a `hint` that the flow may cross
+    runtime dispatch (virtual call / factory) rather than being unrelated.
   - *Update / rebuild advice*: `status` also reports a `tool` section —
     is a newer cppgraph published, and does adopting it (or the installed
     version) need a graph rebuild? The dangerous direction (a graph newer

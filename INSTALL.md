@@ -82,6 +82,10 @@ Asset name depends on platform — pick the matching one from the release:
 | Linux x86_64         | `scip-clang-x86_64-linux`    |
 | Linux x86_64 (dev)   | `scip-clang-dev-x86_64-linux`|
 
+Use the plain `scip-clang-x86_64-linux`. The `-dev-` asset is a debug build
+(assertions on, slower) — you only want it if you're diagnosing a scip-clang
+crash, not for normal indexing.
+
 No Homebrew/apt package is needed for `scip-clang` itself — it's a
 self-contained release binary.
 

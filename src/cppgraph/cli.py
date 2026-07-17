@@ -232,7 +232,11 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="graph store path (default: auto-discovered from the cwd's .cppgraph/)",
     )
-    p_find.add_argument("query", help="substring to match against symbol or display name")
+    p_find.add_argument(
+        "query",
+        help="name to match against the symbol or display name; a substring, or "
+        "several space-separated words that must all appear (order-free AND)",
+    )
 
     p_callers = sub.add_parser("callers", help="list callers of a symbol")
     p_callers.add_argument(
@@ -241,7 +245,10 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="graph store path (default: auto-discovered from the cwd's .cppgraph/)",
     )
-    p_callers.add_argument("symbol", help="exact SCIP symbol string (see `find`)")
+    p_callers.add_argument(
+        "symbol",
+        help="a symbol name (resolved via `find`) or an exact SCIP string",
+    )
 
     p_callees = sub.add_parser("callees", help="list callees of a symbol")
     p_callees.add_argument(
@@ -250,7 +257,10 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="graph store path (default: auto-discovered from the cwd's .cppgraph/)",
     )
-    p_callees.add_argument("symbol", help="exact SCIP symbol string (see `find`)")
+    p_callees.add_argument(
+        "symbol",
+        help="a symbol name (resolved via `find`) or an exact SCIP string",
+    )
 
     p_bases = sub.add_parser("bases", help="direct base classes a type inherits from")
     p_bases.add_argument(
@@ -259,7 +269,10 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="graph store path (default: auto-discovered from the cwd's .cppgraph/)",
     )
-    p_bases.add_argument("symbol", help="exact SCIP symbol string of a type (see `find`)")
+    p_bases.add_argument(
+        "symbol",
+        help="a type name (resolved via `find`) or an exact SCIP type string ending in `#`",
+    )
 
     p_subtypes = sub.add_parser("subtypes", help="direct subclasses of a type")
     p_subtypes.add_argument(
@@ -268,7 +281,10 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="graph store path (default: auto-discovered from the cwd's .cppgraph/)",
     )
-    p_subtypes.add_argument("symbol", help="exact SCIP symbol string of a type (see `find`)")
+    p_subtypes.add_argument(
+        "symbol",
+        help="a type name (resolved via `find`) or an exact SCIP type string ending in `#`",
+    )
 
     p_refs = sub.add_parser(
         "references",
@@ -280,7 +296,10 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="graph store path (default: auto-discovered from the cwd's .cppgraph/)",
     )
-    p_refs.add_argument("symbol", help="exact SCIP symbol string (see `find`)")
+    p_refs.add_argument(
+        "symbol",
+        help="a symbol name (resolved via `find`) or an exact SCIP string",
+    )
     p_refs.add_argument(
         "--root",
         default=None,
@@ -305,8 +324,14 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="graph store path (default: auto-discovered from the cwd's .cppgraph/)",
     )
-    p_path.add_argument("src", help="exact SCIP symbol string (see `find`)")
-    p_path.add_argument("dst", help="exact SCIP symbol string (see `find`)")
+    p_path.add_argument(
+        "src",
+        help="a symbol name (resolved via `find`) or an exact SCIP string",
+    )
+    p_path.add_argument(
+        "dst",
+        help="a symbol name (resolved via `find`) or an exact SCIP string",
+    )
 
     p_impact = sub.add_parser(
         "impact", help="reverse blast-radius: everything that transitively calls a symbol"
@@ -317,7 +342,10 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="graph store path (default: auto-discovered from the cwd's .cppgraph/)",
     )
-    p_impact.add_argument("symbol", help="exact SCIP symbol string (see `find`)")
+    p_impact.add_argument(
+        "symbol",
+        help="a symbol name (resolved via `find`) or an exact SCIP string",
+    )
     p_impact.add_argument(
         "--depth", type=int, default=None, help="max hops to walk backwards (default: unbounded)"
     )
@@ -357,7 +385,10 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="graph store path (default: auto-discovered from the cwd's .cppgraph/)",
     )
-    p_explain.add_argument("symbol", help="exact SCIP symbol string (see `find`)")
+    p_explain.add_argument(
+        "symbol",
+        help="a symbol name (resolved via `find`) or an exact SCIP string",
+    )
     p_explain.add_argument(
         "--root",
         default=None,
@@ -386,7 +417,8 @@ def main(argv: list[str] | None = None) -> int:
         help="graph store path (default: auto-discovered from the cwd's .cppgraph/)",
     )
     p_export.add_argument(
-        "symbol", help="exact SCIP symbol string to center the view on (see `find`)"
+        "symbol",
+        help="a symbol name (resolved via `find`) or an exact SCIP string to center the view on",
     )
     p_export.add_argument(
         "--depth",
@@ -438,7 +470,10 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="graph store path (default: auto-discovered from the cwd's .cppgraph/)",
     )
-    p_view.add_argument("symbol", help="exact SCIP symbol string to center on (see `find`)")
+    p_view.add_argument(
+        "symbol",
+        help="a symbol name (resolved via `find`) or an exact SCIP string to center on",
+    )
     p_view.add_argument(
         "--mode",
         choices=("deps", "usage"),

@@ -49,7 +49,8 @@ if TYPE_CHECKING:
 
 # Default cap on any list a tool returns. Big enough to be useful for reasoning,
 # small enough that a hub symbol's callers don't blow the context budget. The
-# caller can raise it per-query, and always learns the true `total`. Set to 40
+# caller can tune it per-query either way — lower to spend fewer tokens, raise to
+# see more — and always learns the true `total`. Set to 40
 # (not 25): a real function with ~30 stage/callee edges had genuine edges pushed
 # past a cap of 25, so the default now clears a typical fan-out.
 DEFAULT_LIMIT = 40
@@ -868,7 +869,8 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         then, for a `Class#method` guess, the bare leaf name) and flags the
         response `relaxed`. Set `hide_trivial=True` to drop compiler-generated /
         boilerplate hits (lambdas, operators, `*assert`, `makeStatus`, …) —
-        `trivial_hidden` reports how many were cut."""
+        `trivial_hidden` reports how many were cut. `limit` caps the list
+        (default 40): lower it to spend fewer tokens, raise it when `truncated`."""
         return _call(find_symbols, query, limit=limit, hide_trivial=hide_trivial, root=root)
 
     @mcp.tool()
@@ -881,7 +883,9 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         """Direct callers of a symbol (one call hop). `symbol` is an exact SCIP
         string from `find`. Each caller is returned by human `name` + `file:line`
         (compact); set `full_symbols=True` for the raw SCIP strings. Test callers
-        are dropped by default — pass `exclude_tests=False` to include them."""
+        are dropped by default — pass `exclude_tests=False` to include them.
+        `limit` caps the list (default 40): lower it to spend fewer tokens when a
+        few callers are enough, raise it when `truncated` is true."""
         return _call(
             callers, symbol, limit=limit, full_symbols=full_symbols, exclude_tests=exclude_tests
         )
@@ -900,6 +904,8 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         `exclude_tests=False`. Set `hide_trivial=True` to drop ubiquitous helpers
         (operators, tassert/uassert, makeStatus, source_location, …) so the
         domain edges stand out — `trivial_hidden` reports how many were cut.
+        `limit` caps the list (default 40): lower it to spend fewer tokens when a
+        few callees are enough, raise it when `truncated` is true.
 
         NOTE: this is an unordered *set* of callees, not an execution sequence.
         It cannot tell you the order calls happen in, nor which are conditional
@@ -921,7 +927,9 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
     ) -> dict[str, Any]:
         """Direct base classes a type inherits from (`symbol` is an exact SCIP
         type string from `find`, ending in `#`). Compact `name` + `file:line` by
-        default; `full_symbols=True` for raw SCIP strings."""
+        default; `full_symbols=True` for raw SCIP strings. `limit` caps the list.
+        An empty result carries a `note` (the type may be a root, or a holder
+        with no base) rather than a bare `0`."""
         return _call(bases, symbol, limit=limit, full_symbols=full_symbols)
 
     @mcp.tool()
@@ -930,7 +938,9 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
     ) -> dict[str, Any]:
         """Direct subclasses of a type (one inheritance hop). For the whole
         subtree use `impact_of` with kind="inherits". Compact `name` +
-        `file:line` by default; `full_symbols=True` for raw SCIP strings."""
+        `file:line` by default; `full_symbols=True` for raw SCIP strings. `limit`
+        caps the list. An empty result carries a `note` (the type may be a leaf,
+        or a holder that isn't itself a base) rather than a bare `0`."""
         return _call(subtypes, symbol, limit=limit, full_symbols=full_symbols)
 
     @mcp.tool()
@@ -946,8 +956,10 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         `file:line` coordinates; set `include_source=True` to also get the code
         **inline** (cppgraph reads it for you — no separate file read needed),
         grouped by file with overlapping windows merged (no duplicated lines).
-        `context` sets lines around each site. Test-file uses are dropped by
-        default — pass `exclude_tests=False` to include them."""
+        `context` sets the lines shown around each site. Test-file uses are
+        dropped by default — pass `exclude_tests=False` to include them. `limit`
+        caps the list. If the graph was built with `--no-references`, `available`
+        is false (rebuild with references to enable this)."""
         return _call(
             references,
             symbol,
@@ -960,7 +972,11 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
 
     @mcp.tool()
     def path(src: str, dst: str) -> dict[str, Any]:
-        """Shortest call chain from `src` to `dst` (exact SCIP strings)."""
+        """Shortest chain of `calls` edges from `src` to `dst` (exact SCIP
+        strings), as an ordered node list with `hops`. Returns `found=false` with
+        a `hint` when there's no *static* path — which may mean the flow crosses
+        runtime dispatch (a virtual call / a registered factory), not that the two
+        are unrelated."""
         return _call(call_path, src, dst)
 
     @mcp.tool()
@@ -977,7 +993,8 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         change this function?"); kind="inherits" = every transitive subclass of
         a base type. `depth` bounds the hops. Compact `name` + `file:line` by
         default (`full_symbols=True` for raw SCIP); symbols in test files dropped
-        unless `exclude_tests=False`."""
+        unless `exclude_tests=False`. `limit` caps the list (default 40): lower it
+        to spend fewer tokens, raise it when `truncated`."""
         return _call(
             impact,
             symbol,
@@ -1001,8 +1018,9 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         """Definition site + caller/callee summary for `symbol`. Returns
         `file:line` coordinates by default; set `include_source=True` to also get
         the definition's source snippet **inline** (cppgraph reads it for you — no
-        separate file read needed). `limit` caps each of the caller/callee lists
-        (raise it when `truncated` is true and you need more). Caller/callee lists
+        separate file read needed), `context` lines around the definition. `limit`
+        caps each of the caller/callee lists (default 10): lower it to spend fewer
+        tokens, raise it when `truncated` is true and you need more. Caller/callee lists
         are compact `name` + `file:line` (`full_symbols=True` for raw SCIP) and
         drop test files unless `exclude_tests=False`. Set `hide_trivial=True` to
         also drop ubiquitous helpers (operators, `*assert`, `makeStatus`,
@@ -1024,9 +1042,11 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         """Graph provenance and drift: is this graph still current for the
         checkout? Run first — if `drift.up_to_date` is false, re-index before
         trusting the topology. Also reports `tool`: whether a newer cppgraph is
-        published and whether adopting it (or the installed version) needs a full
-        graph rebuild — so you can warn before an upgrade blocks on re-indexing.
-        The update check is cached; `force_update_check=True` refetches now."""
+        published and, if so, at which `rebuild` level adopting it costs — `none`
+        (no rebuild), `store` (rebuild the store from the existing .scip), or
+        `reindex` (re-run scip-clang) — so you can warn before an upgrade blocks
+        on indexing. The update check is cached; `force_update_check=True`
+        refetches now."""
         return _call(status_report, root=root, force=force_update_check)
 
     @mcp.tool()
@@ -1043,8 +1063,11 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         dependency graph of X" tool. Keep it small: a big neighbourhood is an
         unreadable hairball, so prefer depth 1-2. mode="deps" (default) = the
         call/inherit subgraph; mode="usage" = a symbol->file graph of where the
-        symbol is used (the right view for a type, which has no call edges). Set
-        exclude_tests=True to drop test files and show production usage only.
+        symbol is used (the right view for a type, which has no call edges).
+        direction (deps mode) = "both" (default) both callers and callees, "out"
+        only what the symbol reaches, "in" only what reaches it. Set
+        exclude_tests=True to drop test files and show production usage only. Set
+        open_browser=False to just get the HTML path without launching a browser.
         Returns the HTML path and the command to open it (in case the browser
         didn't launch)."""
         from cppgraph.viz_html import open_in_browser, write_temp_html

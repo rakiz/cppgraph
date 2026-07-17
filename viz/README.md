@@ -10,12 +10,14 @@ viewer works fully **offline**.
 
 ## Use
 
-Find the symbol string first: `cppgraph find <name> --graph <graph.db>`.
+`view`/`export` take a plain **name** (resolved via `find`) or an exact SCIP
+symbol string — you don't have to look the string up first. Run `cppgraph find
+<name>` only when a name is ambiguous and you want to pick the exact symbol.
 
 ### One-shot (easiest): `cppgraph view`
 
 ```sh
-cppgraph view '<SCIP symbol>' --graph <graph.db> --depth 1
+cppgraph view <name-or-SCIP-symbol> --graph <graph.db> --depth 1
 ```
 
 Builds the neighbourhood, writes a **self-contained** HTML (data + vis-network
@@ -27,7 +29,7 @@ the same as the `visualize` tool, so an LLM can pop the graph open for you.
 ### Or: export a data file, then open the viewer
 
 ```sh
-cppgraph export '<SCIP symbol>' --graph <graph.db> --depth 2 --out graph.json
+cppgraph export <name-or-SCIP-symbol> --graph <graph.db> --depth 2 --out graph.json
 ```
 
 Then open `viz/cppgraph-viz.html` and load `graph.json`:
