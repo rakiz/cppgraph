@@ -327,6 +327,15 @@ designing the builder so this isn't a later rewrite:
     far-end node's definition file, catching `~..._Test` teardown sites too).
     Measured effect on `who_calls` for a hub symbol: ~5.5× smaller payload
     (`scripts/measure_tokens.py`).
+  - *Update / rebuild advice*: `status` also reports a `tool` section —
+    is a newer cppgraph published, and does adopting it (or the installed
+    version) need a full graph rebuild? The dangerous direction (a graph newer
+    than the binary) is already a hard open-time error via `schema_version`; this
+    covers the *benign-but-costly* direction, so an upgrade never silently blocks
+    on minutes of re-indexing. Source of truth is a hosted `versions.json`
+    (deliberately tiny: `latest` + per-release `requires_rebuild`; detail lives in
+    the CHANGELOG, not the registry). Fetched best-effort with a 24h on-disk cache,
+    fails soft offline; `cppgraph.updates.compute_advice` is the pure, tested core.
   - *Testable core*: the substance is a pure `(store, …) -> dict` layer
     (unit-tested without a transport); the FastMCP decorators are thin wiring
     over it. Errors (unknown symbol) come back as an `{"error": …}` dict

@@ -17,6 +17,13 @@ from cppgraph import mcp_server
 from cppgraph.model import Graph, Node
 from cppgraph.store import GraphStore, write_sqlite
 
+@pytest.fixture(autouse=True)
+def _no_network_update_check(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep `status_report` offline-deterministic: never hit the version registry
+    unless a test opts in. (The update logic itself is tested in test_updates.py.)"""
+    monkeypatch.setenv("CPPGRAPH_NO_UPDATE_CHECK", "1")
+
+
 FOO = "cxx . . $ mongo/Foo#makeResumeToken(a1)."
 CALLER = "cxx . . $ mongo/Foo#caller(a2)."
 MID = "cxx . . $ mongo/Foo#mid(a3)."

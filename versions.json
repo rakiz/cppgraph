@@ -1,0 +1,5 @@
+{
+  "$comment": "Release registry consumed by `cppgraph status` (update/rebuild advice) and by scripts/install.sh (default checkout target). `latest` is the newest STABLE version tag (null until the first release is cut → installers fall back to the main branch). Each `releases` entry: `version` (matches the git tag, with or without a leading 'v'), `requires_rebuild` (does adopting it force a full graph re-index?), optional one-line `notes`, and an optional `url` to that release's changelog (keep detail in the CHANGELOG/GitHub release, not here). Sort releases oldest->newest. Example entry: {\"version\": \"0.1.0\", \"requires_rebuild\": true, \"notes\": \"reference index format changed\", \"url\": \"https://github.com/rakiz/cppgraph/releases/tag/v0.1.0\"}.",
+  "latest": null,
+  "releases": []
+}

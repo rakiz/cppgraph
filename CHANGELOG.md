@@ -61,6 +61,14 @@ Everything so far — the project has not cut a numbered release yet.
 - **`find_references` snippets deduplicated**: with `include_source`, sites are
   grouped by file and overlapping `± context` windows are merged into one snippet
   (shared lines sent once, hit lines flagged `is_use`) instead of re-sent per hit.
+- **Update / rebuild advice in `status`**: a `tool` section reports whether a
+  newer cppgraph is published and — the part that stings — whether adopting it
+  (or the version already installed) needs a full graph rebuild, so an upgrade
+  never silently blocks on minutes of re-indexing. Source of truth is a hosted
+  `versions.json` (repo root) with a per-release `requires_rebuild` flag; fetched
+  best-effort with an on-disk cache (24h TTL, `force_update_check=True` refetches),
+  fails soft when offline. Opt out with `CPPGRAPH_NO_UPDATE_CHECK=1`; override the
+  URL with `CPPGRAPH_VERSIONS_URL`. Logic in `cppgraph.updates`.
 - Project auto-discovery (Serena-style): registered once, globally, the server
   finds the current project's graph from the working directory's `.cppgraph/`
   at launch — one registration serves every indexed project, no collision. In a

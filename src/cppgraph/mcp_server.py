@@ -35,6 +35,7 @@ from typing import TYPE_CHECKING, Any
 
 from cppgraph.cli import SOURCE_EXTS, build_export_json, read_source_snippet
 from cppgraph.export import is_test_file
+from cppgraph.updates import update_advice
 from cppgraph.store import (
     GraphStore,
     changed_files_since,
@@ -456,12 +457,19 @@ def explain(
     return result
 
 
-def status_report(store: GraphStore, root: str | None = None) -> dict[str, Any]:
+def status_report(
+    store: GraphStore, root: str | None = None, check_updates: bool = True, force: bool = False
+) -> dict[str, Any]:
     """The graph's provenance and, with `root`, whether the checkout has drifted.
 
     The "should I trust this graph?" check an LLM runs first: `drift.up_to_date`
     False means re-index before relying on the topology. Only C++ source changes
     count as drift (docs/build-config edits don't change the call graph).
+
+    Also reports `tool` advice (unless `check_updates=False`): whether a newer
+    cppgraph is published and — crucially — whether adopting it, or the version
+    already installed, needs a full graph rebuild. Best-effort and cached; `force`
+    bypasses the cache. See `cppgraph.updates`.
     """
     m = store.meta()
     commit = m.get("source_commit")
@@ -484,6 +492,8 @@ def status_report(store: GraphStore, root: str | None = None) -> dict[str, Any]:
         "source_commit": commit,
         "drift": {"checked": False},
     }
+    if check_updates:
+        result["tool"] = update_advice(m.get("cppgraph_version"), force=force)
     if root is None or not commit:
         if root is not None and not commit:
             result["drift"] = {"checked": False, "reason": "no source commit recorded in the graph"}
@@ -683,11 +693,14 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         )
 
     @mcp.tool()
-    def status() -> dict[str, Any]:
+    def status(force_update_check: bool = False) -> dict[str, Any]:
         """Graph provenance and drift: is this graph still current for the
         checkout? Run first — if `drift.up_to_date` is false, re-index before
-        trusting the topology."""
-        return _call(status_report, root=root)
+        trusting the topology. Also reports `tool`: whether a newer cppgraph is
+        published and whether adopting it (or the installed version) needs a full
+        graph rebuild — so you can warn before an upgrade blocks on re-indexing.
+        The update check is cached; `force_update_check=True` refetches now."""
+        return _call(status_report, root=root, force=force_update_check)
 
     @mcp.tool()
     def visualize(

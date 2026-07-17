@@ -1,6 +1,15 @@
 #!/usr/bin/env bash
 # One-time cppgraph setup: Python venv + deps + the scip-clang indexer binary.
 #
+# Version selection (cppgraph is pure Python, so a version is just a git tag —
+# no build, checkout + editable install is the whole story):
+#   scripts/setup.sh                 install the current checkout as-is (dev
+#                                    default); if the tree is clean and a stable
+#                                    release exists, check out that tag first
+#   scripts/setup.sh --version 0.2.0 pin to a released version (tag v0.2.0)
+#   scripts/setup.sh --nightly       track the main branch (bleeding edge)
+#   scripts/setup.sh --branch foo    check out an arbitrary branch
+#
 # Supported (for local indexing, because scip-clang only ships these binaries):
 #   - macOS Apple Silicon (arm64)
 #   - Linux x86_64
@@ -13,6 +22,45 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."  # repo root
+
+# --- version / ref selection ------------------------------------------------
+ref_mode="default"; ref_arg=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --version) ref_arg="${2:?--version needs a value (e.g. 0.2.0)}"; ref_mode="version"; shift 2 ;;
+    --branch)  ref_arg="${2:?--branch needs a value}"; ref_mode="branch"; shift 2 ;;
+    --nightly) ref_mode="nightly"; shift ;;
+    -h|--help) sed -n '2,15p' "$0"; exit 0 ;;
+    *) echo "unknown argument: $1 (see --help)" >&2; exit 2 ;;
+  esac
+done
+
+latest_stable() {  # newest stable tag from versions.json, or empty
+  python3 - <<'PY' 2>/dev/null || true
+import json
+try:
+    v = json.load(open("versions.json")).get("latest")
+    print(f"v{str(v).lstrip('v')}" if v else "")
+except Exception:
+    pass
+PY
+}
+
+case "$ref_mode" in
+  version) target_ref="v${ref_arg#v}" ;;   # tags are v-prefixed
+  branch)  target_ref="$ref_arg" ;;
+  nightly) target_ref="main" ;;
+  default) target_ref="$(latest_stable)" ;; # empty when no release cut yet
+esac
+
+if [ -n "$target_ref" ]; then
+  if [ "$ref_mode" = "default" ] && ! (git diff --quiet && git diff --cached --quiet); then
+    echo "==> Working tree has changes — installing it as-is (skipping checkout of $target_ref)."
+  else
+    echo "==> Checking out $target_ref"
+    git checkout "$target_ref"
+  fi
+fi
 
 os="$(uname -s)"; arch="$(uname -m)"
 case "$os/$arch" in
@@ -59,6 +107,7 @@ fi
 
 echo "==> Verifying"
 .venv/bin/python -c "from cppgraph.proto import scip_pb2; scip_pb2.Index()" && echo "  python package OK"
+.venv/bin/python -c "from cppgraph.updates import current_version as v; print('  cppgraph version:', v() or '(unknown)')"
 scratch/bin/scip-clang --version | head -1
 
 cat <<'EOF'

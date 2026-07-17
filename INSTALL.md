@@ -12,6 +12,25 @@ uv venv
 uv pip install -e ".[dev]"
 ```
 
+### Choosing a version
+
+cppgraph is pure Python, so a version is just a **git tag** — no build step,
+checking out the tag and installing editable is all there is. `scripts/setup.sh`
+wraps this (it also fetches `scip-clang`, see §2):
+
+```bash
+scripts/setup.sh                 # current checkout as-is; if clean and a stable
+                                 # release exists, check out that tag first
+scripts/setup.sh --version 0.2.0 # pin to a released version (tag v0.2.0)
+scripts/setup.sh --nightly       # track main (bleeding edge)
+scripts/setup.sh --branch foo    # an arbitrary branch (rarely needed)
+```
+
+The installed version is reported by `cppgraph status` (the `tool` section) and
+comes from `git describe`, so it always reflects the tag you have checked out —
+no reinstall needed after a `git checkout`. Until the first release is tagged,
+`versions.json` has no `latest`, so the default simply installs `main`.
+
 Verify:
 
 ```bash

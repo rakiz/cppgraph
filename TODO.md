@@ -6,6 +6,17 @@ Only open items live here. Completed work is in `CHANGELOG.md`; design detail in
 ## Packaging / open-source
 
 - Contributing notes, CI (lint + pytest), publish.
+- **Cut the actual releases.** The plumbing is in place — `scripts/setup.sh`
+  installs by tag (`--version`/`--nightly`/`--branch`), `current_version` derives
+  from `git describe`, and `cppgraph status` reads `versions.json` for the
+  "update available / rebuild needed" advice — but no release exists yet. Per
+  release: tag `vX.Y.Z`, then bump `latest` in `versions.json` and append a
+  `releases` entry (`requires_rebuild`, one-line `notes`, `url`). The advice only
+  becomes meaningful once at least one tag exists.
+- **Version for non-git installs.** `current_version` falls back to the static
+  `pyproject`/`__version__` when the source isn't a git checkout (tarball/PyPI).
+  If we ever publish that way, wire a build-time version from the tag
+  (`hatch-vcs`/`setuptools-scm`) so those installs report the truth too.
 
 ## Blocked on scip-clang `enclosing_range` (PR #504)
 
