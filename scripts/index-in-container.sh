@@ -38,6 +38,33 @@ if [ -z "$ENGINE" ] || ! command -v "$ENGINE" >/dev/null 2>&1; then
 fi
 echo "==> Using container engine: $ENGINE" >&2
 
+# Preflight: we build/run an x86_64 image. On a non-x86_64 Linux host that needs
+# QEMU binfmt emulation; without it the daemon pulls the amd64 image fine but the
+# first RUN dies with a cryptic "exec /bin/sh: exec format error". Detect the
+# missing registration up front and print the one-line fix instead.
+HOST_ARCH="$(uname -m 2>/dev/null || echo unknown)"
+case "$(uname -s 2>/dev/null)":"$HOST_ARCH" in
+  Linux:x86_64|Linux:amd64) ;;                        # native, no emulation needed
+  Linux:*)
+    if ! ls /proc/sys/fs/binfmt_misc/qemu-x86_64 >/dev/null 2>&1; then
+      cat >&2 <<EOF
+error: this host is $HOST_ARCH but the indexer image is x86_64, and QEMU binfmt
+emulation for amd64 is not registered — the build would fail with
+"exec /bin/sh: exec format error". Register it once (persists until reboot):
+
+  $ENGINE run --privileged --rm tonistiigi/binfmt --install amd64
+
+or install it permanently on Ubuntu/Debian:
+
+  sudo apt-get install -y qemu-user-static binfmt-support
+
+Verify with:  $ENGINE run --rm --platform linux/amd64 alpine uname -m   # -> x86_64
+Then re-run this script.
+EOF
+      exit 1
+    fi ;;
+esac
+
 COMPDB="$1"; SRC_FILTER="${2:-}"
 if [ ! -f "$COMPDB" ]; then
   echo "error: compile_commands.json not found: $COMPDB" >&2

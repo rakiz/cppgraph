@@ -18,6 +18,33 @@ Only open items live here. Completed work is in `CHANGELOG.md`; design detail in
   If we ever publish that way, wire a build-time version from the tag
   (`hatch-vcs`/`setuptools-scm`) so those installs report the truth too.
 
+## Query quality — targeted for 0.2.0
+
+Surfaced by the MongoDB change-stream benchmark (2026-07-17). Ranked by impact.
+
+- **`impact_of` on a type returns 0, silently misleading.** `impact_of
+  ResumeTokenData (kind=calls)` → `total: 0` even though `find_references` shows
+  68 sites — a type has no call-graph callers, so the blast radius question must
+  be asked via references. Detect when the resolved symbol is a type (not a
+  callable) and either redirect to `find_references` or return an explicit notice
+  ("type has no callers — N reference sites; use find_references"), never a bare 0.
+- **`find` is substring-only, no multi-term AND.** `find "buildPipeline
+  changeStream"` → 0 hits while `buildPipeline` alone → 11. Support an AND of
+  tokens (all terms present, order-free) so multi-word queries work.
+- **Overloads aren't grouped.** `ResumeToken::parse` has two signatures (distinct
+  SCIP hashes, `.h`/`.cpp`); querying the wrong one silently misses callers.
+  Group signatures sharing a qualified name under one entry, hashes as sub-lines.
+- **Callee noise (opt-in filter).** `what_it_calls` buries real edges under
+  `operator==`/`tassert`/`makeStatus`/`source_location`. Add an opt-in
+  `hide_trivial` filter (mirror the existing test filtering), and revisit the
+  default `limit` (25 can push real edges out — 40 was needed to see all stages).
+- **`path` across runtime dispatch returns a bare `found: false`.** Plan→exec
+  boundary (`DocumentSourceX` built by `buildPipeline` → `XStage::doGetNext`) is a
+  registered-factory / virtual dispatch hop with no static edge, so end-to-end
+  paths break. Can't be fully resolved without indexing the factory registry;
+  short term, when `path` fails, hint that the flow may cross virtual dispatch /
+  a factory rather than implying no relationship exists.
+
 ## Later: a build container that compiles scip-clang native to its host arch
 
 Today's ARM-Linux workaround (`scripts/index-in-container.sh`) runs the x86_64

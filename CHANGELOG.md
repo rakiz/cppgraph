@@ -100,6 +100,11 @@ Everything so far — the project has not cut a numbered release yet.
   `compile_commands.json` (CMake / Bazel incl. MongoDB's `//:compiledb` / `bear`).
   Dockerfile in `docker/`. Alternatively index on any x86_64 box and copy the
   `.graph.db` over.
+- **Emulation preflight for `index-in-container.sh`.** On a non-x86_64 host,
+  checks that QEMU `binfmt_misc` amd64 emulation is registered *before* building;
+  if missing it stops with the one-line fix (`… tonistiigi/binfmt --install amd64`)
+  instead of letting the amd64 build die on the opaque `exec /bin/sh: exec format
+  error`. The fix command echoes the detected engine (docker/podman).
 - **`reindex.sh` reuses a prebuilt `.scip`.** On a host without a native
   scip-clang, a full re-index skips indexing and builds straight from an existing
   `<project>/.cppgraph/<name>.scip` (from the container step or copied in), so
