@@ -12,6 +12,10 @@ Z"), in a handful of commands.
 - **Supported platforms for indexing** (limited by the `scip-clang` binary):
   - macOS Apple Silicon (arm64) ✅
   - Linux x86_64 ✅
+  - **ARM-Linux (aarch64, e.g. Ubuntu arm64)** → indexing runs via an x86_64
+    container (needs Docker/Podman + amd64 emulation); the graph then builds
+    natively. See [INSTALL.md](INSTALL.md) → "ARM-Linux / Windows: index via a
+    container".
   - **Windows** → run everything inside **WSL2 (Ubuntu)**; it behaves as Linux x86_64.
   - **Intel Mac** → not supported (no `scip-clang` binary). You can still *use* a
     graph someone else built — ask the maintainer for a prebuilt `graph.db` and

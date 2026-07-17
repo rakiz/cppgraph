@@ -40,9 +40,11 @@ deterministic; the scripts fail loudly with actionable messages.
 > 5, 6) you may run directly.
 
 1. **Check the platform.** Local indexing needs **macOS arm64** or **Linux
-   x86_64**. On **Windows**, do everything inside **WSL2 (Ubuntu)**. On an
-   **Intel Mac** indexing is not supported — stop and tell the user (they can
-   still use a graph built elsewhere).
+   x86_64**. On **ARM-Linux (aarch64)**, indexing runs via an x86_64 container
+   (Docker/Podman + amd64 emulation) — see [INSTALL.md](INSTALL.md) "ARM-Linux /
+   Windows: index via a container". On **Windows**, do everything inside **WSL2
+   (Ubuntu)**. On an **Intel Mac** indexing is not supported — stop and tell the
+   user (they can still use a graph built elsewhere).
 2. **Clone and set up** (needs [`uv`](https://docs.astral.sh/uv/) and `curl`):
    ```bash
    git clone https://github.com/rakiz/cppgraph && cd cppgraph
@@ -51,17 +53,10 @@ deterministic; the scripts fail loudly with actionable messages.
 3. **Get a `compile_commands.json`.** Ask the user where theirs is. If they don't
    have one, it must be generated — and generating it may run a **full build**
    (long/heavy). Apply the RULE above: propose the right command, get the OK, or
-   let them run it. Detect the build system:
-   - `CMakeLists.txt` → re-configure with `-DCMAKE_EXPORT_COMPILE_COMMANDS=ON`
-     (the compdb lands in the build dir; symlink/copy it to the project root);
-   - `WORKSPACE`/`BUILD` (Bazel) → the `hedron_compile_commands` rule
-     (`bazel run @hedron_compile_commands//:refresh_all`), or the project's own
-     target if it ships one (e.g. MongoDB: `bazel build //:compiledb`);
-   - `Makefile`/other → `bear -- <their build command>`.
-
-   See [AGENTS.md](AGENTS.md) → "The compilation database" for details. Also ask
-   for the project's **source root** and, optionally, a **subtree filter** to
-   skip vendored code (e.g. `src/`).
+   let them run it. How to produce one per build system (CMake / Bazel / Make):
+   [AGENTS.md](AGENTS.md) → "The compilation database". Also ask for the project's
+   **source root** and, optionally, a **subtree filter** to skip vendored code
+   (e.g. `src/`).
 4. **Build the graph** — **heavy: apply the RULE above** (one-time; minutes to
    tens of minutes, *not hours*). Present this exact command, with a realistic
    estimate, and let the user choose to run it or have you run it. Prefer a
@@ -112,50 +107,19 @@ large C++ codebase).
 
 ## Why not just grep?
 
-Your AI assistant already answers "what calls X?" — with `grep`. On a large C++
-codebase that's both **wrong** and **token-expensive**:
+Your AI assistant already answers "what calls X?" with `grep` — but on a large
+C++ codebase that's **wrong** (matches by name: merges distinct symbols, includes
+comments/decls, misses `ptr->method()` / virtual dispatch / templates) and
+**token-expensive** (noisy output, then whole-file reads to disambiguate, all
+through the model's context).
 
-- **Wrong.** grep matches by name: it merges distinct symbols sharing a name,
-  includes comments/strings/declarations, and misses calls it can't see
-  textually (`ptr->method()`, virtual dispatch, templates).
-- **Expensive.** The grep output is noisy, and to disambiguate, the assistant
-  then reads whole files — all of it flows through the model's context.
-
-Measured on MongoDB, question *"who calls the **method** `makeResumeToken`?"*
-(four distinct symbols share that name). The cppgraph rows count the **MCP tool
-JSON** — the payload the LLM actually ingests:
-
-| Approach | Tokens ingested\* | Correct? |
-|---|---|---|
-| `grep -rn makeResumeToken src/mongo` (untargeted — realistic) | ~6,600 | ✗ 4 symbols merged, decls/comments; needs file reads to disambiguate |
-| same grep on the known subtree (best case) | ~5,900 | ✗ same problems — targeting barely helps |
-| cppgraph `find` + `who_calls` on the method | **~400** | ✓ exact: the method's 3 callers, nothing else |
-
-→ **~16× fewer tokens, and exact** — and grep still needs follow-up file reads
-that cppgraph doesn't. The trade-off: a one-time index (minutes), amortized over
-every later query.
-
-And cheaper isn't at the expense of correct — it's the reverse. Of grep's 156
-dumped lines only **3** are real call sites (**98% noise**: comments, decls, and
-the three *other* symbols sharing the name); cppgraph returns exactly those 3,
-compiler-resolved. On a hub symbol the gap widens: `who_calls(ResumeToken::parse)`
-is **~41×** fewer tokens (grep ~68,600, **96% noise**; cppgraph ~1,690, exact) —
-the ~16× above is deliberately the small example, not the ceiling.
-
-The fan-out tools are **token-lean by default**: each hit ships a readable label
-(derived from the SCIP string) + `file:line`, not the 150-250-char raw SCIP
-symbol, and test callers are dropped. On a hub symbol these compound — e.g.
-`who_calls(ResumeToken::parse)` goes from ~2,780 tokens (raw strings, 100 callers
-incl. tests) to ~500 (13 production callers, shortened labels): **~5.5× leaner**,
-same exact answer. Pass `full_symbols=True` / `exclude_tests=False` to opt out.
-
-\* ≈ chars÷4 — rough and deliberately **conservative** (code and SCIP symbol
-strings tokenize *denser* than prose, so real counts are higher; the ratio
-holds). grep is run over all of `src/mongo` because you don't know up front where
-the symbol lives — and the LLM isn't told how to scope it. A symbol with many
-*genuine* callers costs more in cppgraph too, but that's the complete, attributed
-list grep can't produce at all. Reproduce with `scripts/measure_tokens.py`; method
-in [COMPARISON.md](COMPARISON.md).
+Measured on MongoDB, *"who calls the method `makeResumeToken`?"*: grep ingests
+~6,600 tokens and is wrong (4 symbols merged); cppgraph `find` + `who_calls`
+ingests **~400** and is exact — **~16× fewer, and correct**. On a hub symbol the
+gap widens to **~41×** (`ResumeToken::parse`). The trade-off is a one-time index
+(minutes), amortized over every later query. Full numbers, noise ratios, and the
+token-lean output defaults: **[COMPARISON.md](COMPARISON.md)** (reproduce with
+`scripts/measure_tokens.py`).
 
 ## Documentation
 

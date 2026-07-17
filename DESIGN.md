@@ -133,66 +133,24 @@ independent of how the caller is attributed.
 
 ## Store
 
-**Phase 1 (shipped):** in-memory graph + a flat `graph.json` (`Graph.save_json`
-in `model.py`). Every query does `load_json` → the entire file is parsed into
-Python dicts in RAM before answering.
+The graph is an **interned SQLite** store. The design principle: **keep the hot
+topology (who-calls-who) raw, all-integer and indexed; keep the cold payload
+(symbol strings, paths) separate, materialized only for results actually shown.**
+The move that does the work is **symbol interning** — each distinct symbol gets an
+integer id, edges reference ids, not the 127-char symbol strings. This is what
+keeps size and memory bounded *and* makes queries fast (integer joins beat string
+ops); `callers_of` runs off a B-tree index without loading the whole graph.
 
-**Store decision — measured, not guessed.** Indexing a full large codebase
-(6004 TUs) produced **643,967 nodes / 2,735,021 edges → a 1.19 GB `graph.json`**.
-That settles JSON vs SQLite: flat JSON does not scale. The redundancy is the
-**symbol strings** — they average **127 characters** and each is referenced
-**~8.5×** in the edge set alone, because edges store `src`/`dst` as full symbol
-strings (`model.py`). That is ~700 MB of repeated strings out of the 1.19 GB.
-But the decisive cost isn't disk: `load_json` pulls the whole 1.19 GB into RAM
-**per query** just to answer one `callers_of`.
+Scale on a large index (6004 TUs → 643,967 nodes / 2,735,021 edges): the store is
+**~338 MB**, and `callers_of` answers in **~0.08 ms**. Symbol strings are the bulk
+of the raw data (avg 127 chars, referenced ~8.5× across the edge set), which is
+exactly why interning them out is the decisive win.
 
-### Storage architecture: hot topology raw, cold payload as-is
-
-The guiding principle — and the maintainer's constraint: **shrink storage
-meaningfully without hurting query performance**:
-
-> **Keep the hot data raw and indexed; keep the cold payload separate (and
-> compressible later if ever needed).**
-
-- **Hot = the graph topology** (who-calls-who) that traversal walks millions of
-  times. All-integer, indexed, never string-keyed on the hot path.
-- **Cold = what the topology points to** (the 127-char symbol strings, file
-  paths, display names) — materialized only for the handful of results actually
-  shown.
-
-The one move that does the work is **symbol interning (dictionary encoding)**:
-assign each distinct symbol an integer id; edges reference ids, not 127-char
-strings. This *both* shrinks storage *and speeds up queries* (integer
-comparison/join beats string ops) — the opposite of blind whole-file
-compression, which would kill perf by forcing a full decompress per query and is
-explicitly rejected.
-
-**Measured on the full graph** (prototype conversion of the real 1.19 GB
-`graph.json`; throwaway script, not committed):
-
-| Representation | Size | vs Phase 1 |
-| --- | --- | --- |
-| flat JSON, `indent=2` (Phase 1 today) | 1249 MB | — |
-| compact JSON (drop `indent=2` alone) | 1085 MB | 1.2× |
-| **SQLite, interned, plain TEXT** | **338 MB** | **3.7×** |
-
-Query timing on that SQLite: `callers_of(makeResumeToken)` returns in
-**0.08 ms** off the B-tree index — versus ~3.4 s just to `load_json` the JSON
-into RAM today, per query, at 4–6 GB RSS.
-
-**Decision: ship the store as interned SQLite, plain TEXT, no compression codec.**
-3.7× smaller is enough, and the *major* wins are the bounded memory and the
-per-query speed, not maximal shrinkage. Two things that made `indent=2` removal
-and codec compression not worth it up front:
-
-- Dropping `indent=2` alone is only 1.2× — the symbols dwarf the whitespace, so
-  it's irrelevant next to interning.
-- **zstd on the symbol column is deferred, not adopted.** It would push size
-  toward ~8× but (a) adds a non-stdlib dependency, (b) costs a per-row decode at
-  display time, and (c) **breaks `find`**: `Graph.find` (`model.py`) does a
-  substring match on `symbol`/`display_name`, which SQL does with `LIKE` on
-  plain TEXT but *cannot* do on a compressed blob without a separate full-text
-  index or a plaintext copy. Only revisit if 338 MB ever becomes a real problem.
+Payload is stored as **plain TEXT, no compression codec**: `find` needs a `LIKE`
+substring match on `symbol`/`display_name`, which SQL can't do on a compressed
+blob without a separate FTS index. (A symbol-column codec like zstd could shrink
+further but adds a non-stdlib dependency and a per-row decode at display time —
+not worth it at this size.)
 
 Store schema (stdlib `sqlite3`):
 
@@ -235,11 +193,9 @@ unversioned store predates this and is read as legacy. `status` surfaces it
 alongside `built_at` and the indexing tool/version, so "when/how was this
 indexed?" is answerable without the `.scip`.
 
-Cost accepted with this move (deliberately, over the flat-JSON simplicity):
-the artifact is no longer greppable/`jq`-able or textually diffable, and the
-write path + the document-local incremental rebuild (see below) become row
-management (delete by `file_id`, keep the symbol table consistent) instead of a
-one-line `json.dump`. Worth it for the memory and speed gains.
+Trade-off: the artifact is a binary SQLite file, not a greppable/`jq`-able text
+blob, and the write path + incremental rebuild (see below) are row management
+(delete by `file_id`, keep the symbol table consistent).
 
 The `.scip` input (797 MB) is read once at build, disposable, gitignored —
 left uncompressed; gzipping it saves nothing measurable on the build path.

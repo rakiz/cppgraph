@@ -5,7 +5,10 @@ differ for other platforms are noted inline.
 
 ## 1. Python environment (required, every machine)
 
-Requires Python >= 3.13 (`pyproject.toml`). `uv` manages the venv.
+Requires Python >= 3.13 (`pyproject.toml`). `uv` manages the venv — and fetches
+a 3.13 automatically if the system Python is older (e.g. Ubuntu 22.04 ships 3.10),
+so no `deadsnakes`/`pyenv` needed. Prereqs: `uv` and `curl` (`setup.sh` assumes
+both; install uv with `curl -LsSf https://astral.sh/uv/install.sh | sh`).
 
 ```bash
 uv venv
@@ -60,12 +63,15 @@ Verified version: **v0.4.0** from
 https://github.com/sourcegraph/scip-clang (mirrors to `scip-code` releases
 too — the GitHub API resolves either).
 
+Normally you don't do this by hand — `scripts/setup.sh` downloads the right
+asset with `curl`. To fetch it manually (only `curl` needed, no `gh`), pick the
+asset for your platform and save it as `scratch/bin/scip-clang`:
+
 ```bash
 mkdir -p scratch/bin
-gh release download v0.4.0 --repo sourcegraph/scip-clang \
-  --pattern "scip-clang-arm64-darwin" --dir scratch/bin --clobber
-chmod +x scratch/bin/scip-clang-arm64-darwin
-mv scratch/bin/scip-clang-arm64-darwin scratch/bin/scip-clang
+curl -fL --retry 3 -o scratch/bin/scip-clang \
+  https://github.com/sourcegraph/scip-clang/releases/download/v0.4.0/scip-clang-arm64-darwin
+chmod +x scratch/bin/scip-clang
 ```
 
 Asset name depends on platform — pick the matching one from the release:
@@ -119,10 +125,28 @@ still needs a native scip-clang.)
 
 Requires **Docker or Podman** with `linux/amd64` emulation — the script
 auto-detects either (force one with `CPPGRAPH_CONTAINER=podman`). Podman is
-daemonless, rootless and fully FOSS (`apt install podman qemu-user-static`);
-Docker Desktop / recent Docker Engine set up `binfmt`/qemu automatically. Two
-gotchas, both handled/flagged:
+daemonless, rootless and fully FOSS. Neither is assumed to be present; if you have
+no container engine yet, install one (Ubuntu):
 
+```bash
+sudo apt-get install -y docker.io      # Docker Engine
+# or, rootless/daemonless:  sudo apt-get install -y podman
+```
+
+Three gotchas:
+
+- **amd64 emulation must be registered** (native-Linux ARM hosts — e.g. Ubuntu
+  arm64 — do *not* get it automatically; only Docker Desktop does). Register it
+  once, and use `tonistiigi/binfmt`, **not** `qemu-user-static`: the latter often
+  registers without the `F` (fix-binary) flag, so emulation "exists" but dies
+  inside the build with `exec /bin/sh: exec format error`.
+  ```bash
+  docker run --privileged --rm tonistiigi/binfmt --install amd64
+  docker run --rm --platform linux/amd64 alpine uname -m   # must print: x86_64
+  ```
+  The script preflights this and stops with the fix if it's missing. If `docker`
+  itself needs `sudo`, either prefix the commands or join the group once:
+  `sudo usermod -aG docker $USER` (then re-login).
 - **Paths must match.** `compile_commands.json` holds absolute paths; the wrapper
   bind-mounts the project at its *same* absolute path in the container so they
   resolve. Keep the source tree where it was built.
@@ -222,20 +246,14 @@ scripts/reindex.sh /path/to/project/compile_commands.json src/subsystem/ subsyst
 scripts/reindex.sh /path/to/project/compile_commands.json
 ```
 
-Outputs land under `scratch/<name>.{compdb.json,scip,graph.db}` —
-gitignored, per-machine, never committed (see AGENTS.md "Large artifacts").
-The `graph.db` is the interned SQLite store queried by `cppgraph
-find/callers/callees/path/impact` (see DESIGN.md § Store).
+Outputs land in the target project's own `.cppgraph/<name>.{compdb.json,scip,graph.db}`
+— next to the code they describe (like `.vscode/`), gitignored, per-machine, never
+committed (see AGENTS.md "Large artifacts"). The `graph.db` is the interned SQLite
+store queried by `cppgraph find/callers/callees/path/impact` (see DESIGN.md § Store).
 
-Reference timings, indexing a large C++ codebase (~6000 TUs) on a 14-core
-arm64 Mac with `scip-clang` v0.4.0:
-- one subsystem — 519 TUs, ~151s, 0 errors, 23 MB `.scip`.
-- the whole tree — 6004 TUs, ~1253s (indexing 1228s + merging 19s),
-  0 errored TUs, 797 MB `.scip` → 323 MB `graph.db`
-  (643,967 nodes, 2,735,021 edges; ~23s to build the store). The same graph
-  as flat JSON was 1.19 GB — the interned SQLite store shrinks it 3.7× and
-  makes queries hit a B-tree index instead of loading the whole file per
-  query. See `DESIGN.md` § Store.
+Reference timings and store sizes on a large C++ codebase (~6000 TUs): see
+`DESIGN.md` § Store. (On ARM via the emulated container, indexing is
+substantially slower than those native figures.)
 
 **Gotcha** (already handled by the script, documented here so it isn't
 rediscovered on the next project): a build system's generated
