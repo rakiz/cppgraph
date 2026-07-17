@@ -21,6 +21,7 @@ The comparison/advice logic (`compute_advice`) is pure and unit-tested; the
 network+cache layer around it fails soft, so `status` never breaks or hangs on a
 missing network.
 """
+
 from __future__ import annotations
 
 import json
@@ -108,11 +109,7 @@ def _releases_between(
     """Releases with `low < version <= high` (half-open at the bottom), so a jump
     *to* `high` includes `high` itself but not the version you're already on."""
     lo, hi = parse_version(low), parse_version(high)
-    return [
-        r
-        for r in releases
-        if lo < parse_version(r.get("version")) <= hi
-    ]
+    return [r for r in releases if lo < parse_version(r.get("version")) <= hi]
 
 
 def compute_advice(
@@ -182,9 +179,7 @@ def _load_cache(path: Path, ttl: float) -> dict[str, Any] | None:
 def _store_cache(path: Path, data: dict[str, Any]) -> None:
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            json.dumps({"fetched_at": time.time(), "data": data}), encoding="utf-8"
-        )
+        path.write_text(json.dumps({"fetched_at": time.time(), "data": data}), encoding="utf-8")
     except OSError:
         pass
 

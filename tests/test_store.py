@@ -178,8 +178,9 @@ def test_open_rejects_a_newer_schema(tmp_path: Path) -> None:
     write_sqlite(_graph_with_edge(), db)
     # simulate a store written by a future cppgraph
     con = sqlite3.connect(db)
-    con.execute("UPDATE meta SET value = ? WHERE key = 'schema_version'",
-                (str(SCHEMA_VERSION + 1),))
+    con.execute(
+        "UPDATE meta SET value = ? WHERE key = 'schema_version'", (str(SCHEMA_VERSION + 1),)
+    )
     con.commit()
     con.close()
     with pytest.raises(IncompatibleStoreError):
@@ -398,7 +399,9 @@ def _partial_index(*paths: str) -> scip_pb2.Index:
     return index
 
 
-def _add_call(doc: scip_pb2.Document, caller: str, callee: str, *, def_line: int, call_line: int) -> None:
+def _add_call(
+    doc: scip_pb2.Document, caller: str, callee: str, *, def_line: int, call_line: int
+) -> None:
     """Add a callable definition and a call to `callee` attributed to it."""
     d = doc.occurrences.add(symbol=caller, symbol_roles=scip_pb2.SymbolRole.Definition)
     d.range.extend([def_line, 0, 3])
@@ -527,8 +530,12 @@ def test_update_recomputes_meta_counts_and_provenance(tmp_path: Path) -> None:
 
 def test_implements_edges_are_stored(tmp_path: Path) -> None:
     graph = Graph()
-    graph.add_edge("implements", "cxx . . $ mongo/Dog#sound(d1).",
-                   "cxx . . $ mongo/Animal#sound(a1).", file="animal.h")
+    graph.add_edge(
+        "implements",
+        "cxx . . $ mongo/Dog#sound(d1).",
+        "cxx . . $ mongo/Animal#sound(a1).",
+        file="animal.h",
+    )
     store = _store(tmp_path, graph)
     # implements edges don't participate in call queries, but must round-trip.
     assert store.has_symbol("cxx . . $ mongo/Dog#sound(d1).")
@@ -537,12 +544,14 @@ def test_implements_edges_are_stored(tmp_path: Path) -> None:
 
 def test_staleness_verdict_up_to_date() -> None:
     from cppgraph.store import staleness_verdict
+
     v = staleness_verdict(0, 0, indexed_files=1000)
     assert v["up_to_date"] is True
 
 
 def test_staleness_verdict_small_drift_recommends_update() -> None:
     from cppgraph.store import staleness_verdict
+
     v = staleness_verdict(changed=10, deleted=2, indexed_files=1000, commits_behind=3)
     assert v["up_to_date"] is False
     assert v["recommend"] == "update"
@@ -552,6 +561,7 @@ def test_staleness_verdict_small_drift_recommends_update() -> None:
 
 def test_staleness_verdict_large_drift_recommends_rebuild() -> None:
     from cppgraph.store import REBUILD_FILE_FRACTION, staleness_verdict
+
     heavy = int(1000 * REBUILD_FILE_FRACTION) + 5
     v = staleness_verdict(changed=heavy, deleted=0, indexed_files=1000)
     assert v["recommend"] == "rebuild"
@@ -559,6 +569,7 @@ def test_staleness_verdict_large_drift_recommends_rebuild() -> None:
 
 def test_staleness_verdict_unknown_denominator_defaults_to_update() -> None:
     from cppgraph.store import staleness_verdict
+
     v = staleness_verdict(changed=5, deleted=0, indexed_files=0)
     assert v["recommend"] == "update"
     assert v["changed_fraction"] is None

@@ -13,6 +13,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
+    "ruff>=0.10",
 ]
 # The MCP server (Phase 3) is optional: the core build/query CLI works without
 # it. Install with `pip install -e .[mcp]` to expose the graph to an LLM.
@@ -34,3 +35,10 @@ packages = ["src/cppgraph"]
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+extend-exclude = ["src/cppgraph/proto"]  # generated protobuf bindings
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "UP"]

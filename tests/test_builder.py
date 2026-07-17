@@ -152,8 +152,8 @@ def test_references_exclude_definitions_and_locals() -> None:
     local = "local 4"
     doc = scip_pb2.Document(relative_path="f.cpp")
     doc.occurrences.append(_occurrence(sym, 5, roles=DEFINITION))  # def, not a ref
-    doc.occurrences.append(_occurrence(sym, 9))                    # a real ref
-    doc.occurrences.append(_occurrence(local, 9))                  # local, skipped
+    doc.occurrences.append(_occurrence(sym, 9))  # a real ref
+    doc.occurrences.append(_occurrence(local, 9))  # local, skipped
     index = scip_pb2.Index(documents=[doc])
 
     graph = build_graph(index, include_references=True)

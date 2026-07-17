@@ -34,11 +34,15 @@ def test_find_reports_matches(graph_path: Path, capsys: pytest.CaptureFixture[st
     assert "makeResumeToken" in out
 
 
-def test_find_no_match_returns_nonzero(graph_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_find_no_match_returns_nonzero(
+    graph_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     assert main(["find", "--graph", str(graph_path), "nope"]) == 1
 
 
-def test_callers_lists_caller_with_location(graph_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_callers_lists_caller_with_location(
+    graph_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     exit_code = main(
         ["callers", "--graph", str(graph_path), "cxx . . $ mongo/Foo#makeResumeToken(a1)."]
     )
@@ -49,9 +53,7 @@ def test_callers_lists_caller_with_location(graph_path: Path, capsys: pytest.Cap
 
 
 def test_callees_lists_callee(graph_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    exit_code = main(
-        ["callees", "--graph", str(graph_path), "cxx . . $ mongo/Foo#caller(a2)."]
-    )
+    exit_code = main(["callees", "--graph", str(graph_path), "cxx . . $ mongo/Foo#caller(a2)."])
     out = capsys.readouterr().out
     assert exit_code == 0
     assert "makeResumeToken(a1)." in out
@@ -98,16 +100,25 @@ def test_build_records_source_commit_provenance(
     index = scip_pb2.Index()
     index.metadata.project_root = "file:///some/repo"
     doc = index.documents.add(relative_path="foo.cpp")
-    occ = doc.occurrences.add(symbol="cxx . . $ mongo/Foo#bar(a1).",
-                              symbol_roles=scip_pb2.SymbolRole.Definition)
+    occ = doc.occurrences.add(
+        symbol="cxx . . $ mongo/Foo#bar(a1).", symbol_roles=scip_pb2.SymbolRole.Definition
+    )
     occ.range.extend([0, 0, 3])
     scip_path = tmp_path / "index.scip"
     scip_path.write_bytes(index.SerializeToString())
     out = tmp_path / "graph.db"
 
     exit_code = main(
-        ["build", "--scip", str(scip_path), "--out", str(out),
-         "--source-commit", "cafebabe", "--source-dirty"]
+        [
+            "build",
+            "--scip",
+            str(scip_path),
+            "--out",
+            str(out),
+            "--source-commit",
+            "cafebabe",
+            "--source-dirty",
+        ]
     )
     assert exit_code == 0
     assert "cafebabe" in capsys.readouterr().out
@@ -118,13 +129,16 @@ def test_build_records_source_commit_provenance(
     assert meta["project_root"] == "file:///some/repo"
 
 
-def test_update_applies_partial_reindex(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_update_applies_partial_reindex(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     # Start from a store where foo.cpp has a() calling old().
     original = Graph()
-    original.add_edge("calls", "cxx . . $ mongo/Foo#a(a1).",
-                      "cxx . . $ mongo/Foo#old(o1).", file="foo.cpp", line=5)
+    original.add_edge(
+        "calls",
+        "cxx . . $ mongo/Foo#a(a1).",
+        "cxx . . $ mongo/Foo#old(o1).",
+        file="foo.cpp",
+        line=5,
+    )
     db = tmp_path / "graph.db"
     write_sqlite(original, db)
 
@@ -132,16 +146,18 @@ def test_update_applies_partial_reindex(
     index = scip_pb2.Index()
     index.metadata.project_root = "file:///some/repo"
     doc = index.documents.add(relative_path="foo.cpp")
-    d = doc.occurrences.add(symbol="cxx . . $ mongo/Foo#a(a1).",
-                            symbol_roles=scip_pb2.SymbolRole.Definition)
+    d = doc.occurrences.add(
+        symbol="cxx . . $ mongo/Foo#a(a1).", symbol_roles=scip_pb2.SymbolRole.Definition
+    )
     d.range.extend([2, 0, 3])
     c = doc.occurrences.add(symbol="cxx . . $ mongo/Foo#new(n1).")
     c.range.extend([6, 0, 3])
     scip_path = tmp_path / "partial.scip"
     scip_path.write_bytes(index.SerializeToString())
 
-    exit_code = main(["update", "--graph", str(db), "--scip", str(scip_path),
-                      "--source-commit", "newsha"])
+    exit_code = main(
+        ["update", "--graph", str(db), "--scip", str(scip_path), "--source-commit", "newsha"]
+    )
     assert exit_code == 0
 
     store = GraphStore(db)
@@ -160,10 +176,20 @@ def explain_graph(tmp_path: Path) -> Path:
     node.file = "src/foo.cpp"
     node.line = 3  # 0-indexed -> source line 4
     # one caller and one callee so explain can summarize both directions
-    graph.add_edge("calls", "cxx . . $ mongo/Foo#caller(a2).",
-                   "cxx . . $ mongo/Foo#bar(a1).", file="src/foo.cpp", line=20)
-    graph.add_edge("calls", "cxx . . $ mongo/Foo#bar(a1).",
-                   "cxx . . $ mongo/Foo#callee(a3).", file="src/foo.cpp", line=5)
+    graph.add_edge(
+        "calls",
+        "cxx . . $ mongo/Foo#caller(a2).",
+        "cxx . . $ mongo/Foo#bar(a1).",
+        file="src/foo.cpp",
+        line=20,
+    )
+    graph.add_edge(
+        "calls",
+        "cxx . . $ mongo/Foo#bar(a1).",
+        "cxx . . $ mongo/Foo#callee(a3).",
+        file="src/foo.cpp",
+        line=5,
+    )
     path = tmp_path / "graph.db"
     write_sqlite(graph, path)
     return path
@@ -183,13 +209,19 @@ def test_explain_shows_definition_and_source_snippet(
     root = tmp_path / "checkout"
     _write_source(root)
     exit_code = main(
-        ["explain", "--graph", str(explain_graph),
-         "cxx . . $ mongo/Foo#bar(a1).", "--root", str(root)]
+        [
+            "explain",
+            "--graph",
+            str(explain_graph),
+            "cxx . . $ mongo/Foo#bar(a1).",
+            "--root",
+            str(root),
+        ]
     )
     out = capsys.readouterr().out
     assert exit_code == 0
-    assert "src/foo.cpp:4" in out          # def location, 1-indexed
-    assert "int Foo::bar() {" in out        # the snippet line
+    assert "src/foo.cpp:4" in out  # def location, 1-indexed
+    assert "int Foo::bar() {" in out  # the snippet line
     assert "1 caller(s)" in out
     assert "1 callee(s)" in out
 
@@ -199,8 +231,14 @@ def test_explain_missing_source_is_graceful(
 ) -> None:
     # --root points nowhere useful: still reports location + counts, no crash.
     exit_code = main(
-        ["explain", "--graph", str(explain_graph),
-         "cxx . . $ mongo/Foo#bar(a1).", "--root", str(tmp_path / "absent")]
+        [
+            "explain",
+            "--graph",
+            str(explain_graph),
+            "cxx . . $ mongo/Foo#bar(a1).",
+            "--root",
+            str(tmp_path / "absent"),
+        ]
     )
     out = capsys.readouterr().out
     assert exit_code == 0
@@ -212,14 +250,12 @@ def test_explain_without_root_returns_coordinates_only(
     explain_graph: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     # No --root => coordinates only, source never read (the single switch).
-    exit_code = main(
-        ["explain", "--graph", str(explain_graph), "cxx . . $ mongo/Foo#bar(a1)."]
-    )
+    exit_code = main(["explain", "--graph", str(explain_graph), "cxx . . $ mongo/Foo#bar(a1)."])
     out = capsys.readouterr().out
     assert exit_code == 0
-    assert "src/foo.cpp:4" in out        # coordinates still reported
-    assert "source:" not in out          # but no snippet section
-    assert "int Foo::bar()" not in out   # source text was not read
+    assert "src/foo.cpp:4" in out  # coordinates still reported
+    assert "source:" not in out  # but no snippet section
+    assert "int Foo::bar()" not in out  # source text was not read
     assert "1 caller(s)" in out
     assert "1 callee(s)" in out
     assert "tip:" not in out  # non-interactive (captured) => no human hint
@@ -229,9 +265,7 @@ def test_explain_tip_shown_only_when_interactive(
     explain_graph: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
-    exit_code = main(
-        ["explain", "--graph", str(explain_graph), "cxx . . $ mongo/Foo#bar(a1)."]
-    )
+    exit_code = main(["explain", "--graph", str(explain_graph), "cxx . . $ mongo/Foo#bar(a1)."])
     out = capsys.readouterr().out
     assert exit_code == 0
     assert "tip: pass --root" in out
@@ -285,9 +319,7 @@ def test_status_up_to_date(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -
     assert "up to date" in capsys.readouterr().out.lower()
 
 
-def test_status_detects_stale_checkout(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_status_detects_stale_checkout(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     root = tmp_path / "repo"
     head = _init_repo(root)
     db = _store_at(tmp_path, head)
@@ -315,7 +347,9 @@ def test_status_ignores_non_source_changes(
     assert "up to date" in capsys.readouterr().out.lower()
 
 
-def test_impact_lists_transitive_callers(graph_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_impact_lists_transitive_callers(
+    graph_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     exit_code = main(
         ["impact", "--graph", str(graph_path), "cxx . . $ mongo/Foo#makeResumeToken(a1)."]
     )
@@ -347,21 +381,34 @@ def test_references_without_index_returns_nonzero(
     graph_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     # graph_path has no reference index; the symbol exists as a node
-    code = main(["references", "--graph", str(graph_path), "cxx . . $ mongo/Foo#makeResumeToken(a1)."])
+    code = main(
+        ["references", "--graph", str(graph_path), "cxx . . $ mongo/Foo#makeResumeToken(a1)."]
+    )
     out = capsys.readouterr().out
     assert code == 1
     assert "--no-references" in out
 
 
-def test_references_with_root_shows_snippet(refs_graph: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_references_with_root_shows_snippet(
+    refs_graph: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     root = tmp_path / "co"
     root.mkdir()
     (root / "a.cpp").write_text("\n".join(f"line {i}" for i in range(50)))
     (root / "b.cpp").write_text("\n".join(f"line {i}" for i in range(50)))
-    assert main(
-        ["references", "--graph", str(refs_graph), "--root", str(root),
-         "cxx . . $ mongo/ResumeTokenData#"]
-    ) == 0
+    assert (
+        main(
+            [
+                "references",
+                "--graph",
+                str(refs_graph),
+                "--root",
+                str(root),
+                "cxx . . $ mongo/ResumeTokenData#",
+            ]
+        )
+        == 0
+    )
     out = capsys.readouterr().out
     assert "line 10" in out  # the source at a.cpp:10 (0-indexed)
 
@@ -369,21 +416,29 @@ def test_references_with_root_shows_snippet(refs_graph: Path, tmp_path: Path, ca
 @pytest.fixture
 def hierarchy_graph(tmp_path: Path) -> Path:
     graph = Graph()
-    graph.add_edge("inherits", "cxx . . $ mongo/Derived#", "cxx . . $ mongo/Base#", file="d.h", line=2)
-    graph.add_edge("inherits", "cxx . . $ mongo/Leaf#", "cxx . . $ mongo/Derived#", file="l.h", line=3)
+    graph.add_edge(
+        "inherits", "cxx . . $ mongo/Derived#", "cxx . . $ mongo/Base#", file="d.h", line=2
+    )
+    graph.add_edge(
+        "inherits", "cxx . . $ mongo/Leaf#", "cxx . . $ mongo/Derived#", file="l.h", line=3
+    )
     path = tmp_path / "h.db"
     write_sqlite(graph, path)
     return path
 
 
-def test_bases_lists_direct_supertypes(hierarchy_graph: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_bases_lists_direct_supertypes(
+    hierarchy_graph: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     assert main(["bases", "--graph", str(hierarchy_graph), "cxx . . $ mongo/Derived#"]) == 0
     out = capsys.readouterr().out
     assert "1 base class(es)" in out
     assert "mongo/Base#" in out
 
 
-def test_subtypes_lists_direct_subclasses(hierarchy_graph: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_subtypes_lists_direct_subclasses(
+    hierarchy_graph: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     assert main(["subtypes", "--graph", str(hierarchy_graph), "cxx . . $ mongo/Base#"]) == 0
     out = capsys.readouterr().out
     assert "1 subclass(es)" in out
@@ -393,30 +448,49 @@ def test_subtypes_lists_direct_subclasses(hierarchy_graph: Path, capsys: pytest.
 def test_impact_kind_inherits_walks_hierarchy(
     hierarchy_graph: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    assert main(
-        ["impact", "--graph", str(hierarchy_graph), "--kind", "inherits", "cxx . . $ mongo/Base#"]
-    ) == 0
+    assert (
+        main(
+            [
+                "impact",
+                "--graph",
+                str(hierarchy_graph),
+                "--kind",
+                "inherits",
+                "cxx . . $ mongo/Base#",
+            ]
+        )
+        == 0
+    )
     out = capsys.readouterr().out
     assert "2 symbol(s) transitively inherit from" in out
     assert "mongo/Derived#" in out
     assert "mongo/Leaf#" in out
 
 
-def test_export_writes_graphify_json(graph_path: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_export_writes_graphify_json(
+    graph_path: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     import json as _json
 
     out = tmp_path / "g.json"
-    rc = main([
-        "export", "--graph", str(graph_path),
-        "cxx . . $ mongo/Foo#makeResumeToken(a1).",
-        "--depth", "1", "--out", str(out),
-    ])
+    rc = main(
+        [
+            "export",
+            "--graph",
+            str(graph_path),
+            "cxx . . $ mongo/Foo#makeResumeToken(a1).",
+            "--depth",
+            "1",
+            "--out",
+            str(out),
+        ]
+    )
     assert rc == 0
     data = _json.loads(out.read_text())
     ids = {n["id"] for n in data["nodes"]}
     assert "cxx . . $ mongo/Foo#makeResumeToken(a1)." in ids
     assert "cxx . . $ mongo/Foo#caller(a2)." in ids  # depth-1 in-neighbour
-    assert any(l["relation"] == "calls" for l in data["links"])
+    assert any(lk["relation"] == "calls" for lk in data["links"])
     assert "exported" in capsys.readouterr().out
 
 
@@ -425,7 +499,9 @@ def test_export_unknown_symbol_errors(graph_path: Path) -> None:
         main(["export", "--graph", str(graph_path), "nope", "--out", "/tmp/x.json"])
 
 
-def test_export_usage_mode_emits_file_graph(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_export_usage_mode_emits_file_graph(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     import json as _json
 
     from cppgraph.model import Graph
@@ -443,17 +519,25 @@ def test_export_usage_mode_emits_file_graph(tmp_path: Path, capsys: pytest.Captu
     rc = main(["export", "--graph", str(db), sym, "--mode", "usage", "--out", str(out)])
     assert rc == 0
     data = _json.loads(out.read_text())
-    files = {l["target"] for l in data["links"]}
+    files = {lk["target"] for lk in data["links"]}
     assert files == {"file:a/foo.cpp", "file:b/bar.h"}
     assert "usage graph" in capsys.readouterr().out
 
 
-def test_view_no_open_writes_standalone_html(graph_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    rc = main([
-        "view", "--graph", str(graph_path),
-        "cxx . . $ mongo/Foo#makeResumeToken(a1).",
-        "--depth", "1", "--no-open",
-    ])
+def test_view_no_open_writes_standalone_html(
+    graph_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    rc = main(
+        [
+            "view",
+            "--graph",
+            str(graph_path),
+            "cxx . . $ mongo/Foo#makeResumeToken(a1).",
+            "--depth",
+            "1",
+            "--no-open",
+        ]
+    )
     assert rc == 0
     out = capsys.readouterr().out
     assert "open it with" in out and ".html" in out
@@ -464,6 +548,7 @@ def test_view_no_open_writes_standalone_html(graph_path: Path, capsys: pytest.Ca
 
 
 # --- symbol resolution: accept a plain name, not just the exact SCIP string ---
+
 
 def test_callers_resolves_plain_name(graph_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     # "makeResumeToken" is not an exact SCIP symbol, but resolves to the one match.
@@ -483,7 +568,9 @@ def test_callers_ambiguous_name_errors(tmp_path: Path) -> None:
         main(["callers", "--graph", str(path), "run"])
 
 
-def test_exact_scip_symbol_still_accepted(graph_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_exact_scip_symbol_still_accepted(
+    graph_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     exit_code = main(
         ["callers", "--graph", str(graph_path), "cxx . . $ mongo/Foo#makeResumeToken(a1)."]
     )
@@ -491,6 +578,7 @@ def test_exact_scip_symbol_still_accepted(graph_path: Path, capsys: pytest.Captu
 
 
 # --- graph auto-discovery: --graph optional when run from inside a project ---
+
 
 def test_graph_auto_discovered_from_cwd(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
@@ -500,8 +588,11 @@ def test_graph_auto_discovered_from_cwd(
     graph = Graph()
     graph.add_node("cxx . . $ mongo/Foo#makeResumeToken(a1).", display_name="makeResumeToken")
     graph.add_edge(
-        "calls", "cxx . . $ mongo/Foo#caller(a2).",
-        "cxx . . $ mongo/Foo#makeResumeToken(a1).", file="foo.cpp", line=9,
+        "calls",
+        "cxx . . $ mongo/Foo#caller(a2).",
+        "cxx . . $ mongo/Foo#makeResumeToken(a1).",
+        file="foo.cpp",
+        line=9,
     )
     write_sqlite(graph, proj / ".cppgraph" / "proj.graph.db")
     monkeypatch.chdir(proj)

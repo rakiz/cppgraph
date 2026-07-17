@@ -74,9 +74,7 @@ def to_graphify_graph(nodes: list[Node], edges: list[Edge]) -> dict:
     }
 
 
-def to_file_usage_graph(
-    symbol: str, label: str, references: list[Reference]
-) -> dict:
+def to_file_usage_graph(symbol: str, label: str, references: list[Reference]) -> dict:
     """A drawable ``symbol -> file`` usage graph from a symbol's references.
 
     cppgraph records references as exact *locations* (``file:line``) with no

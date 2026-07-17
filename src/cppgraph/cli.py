@@ -22,14 +22,23 @@ from cppgraph.store import (
     write_sqlite,
 )
 
-
 # Extensions the graph is built from — drift in a non-C++ file (docs, build
 # config, settings) never changes the code graph, so `status` ignores it to keep
 # the staleness signal meaningful. (A build-flag change that alters an existing
 # TU is a structural case handled by a full rebuild, not this heuristic.)
 SOURCE_EXTS = (
-    ".cpp", ".cc", ".cxx", ".c", ".cu",
-    ".h", ".hpp", ".hh", ".hxx", ".ipp", ".inl", ".cuh",
+    ".cpp",
+    ".cc",
+    ".cxx",
+    ".c",
+    ".cu",
+    ".h",
+    ".hpp",
+    ".hh",
+    ".hxx",
+    ".ipp",
+    ".inl",
+    ".cuh",
 )
 
 
@@ -101,8 +110,7 @@ def _resolve_symbol(
             print(f"[cppgraph] resolved {query!r} -> {sym}", file=sys.stderr)
         return sym
     print(
-        f"[cppgraph] {query!r} is ambiguous ({len(matches)} matches) — "
-        "pass the exact SCIP symbol:",
+        f"[cppgraph] {query!r} is ambiguous ({len(matches)} matches) — pass the exact SCIP symbol:",
         file=sys.stderr,
     )
     for node in matches[:10]:
@@ -188,64 +196,102 @@ def main(argv: list[str] | None = None) -> int:
         "update",
         help="incrementally apply a partial re-index (only changed TUs) to an existing store",
     )
-    p_update.add_argument("--graph", required=True, help="path to the graph store to update in place")
     p_update.add_argument(
-        "--scip", required=True,
+        "--graph", required=True, help="path to the graph store to update in place"
+    )
+    p_update.add_argument(
+        "--scip",
+        required=True,
         help="SCIP index of only the re-indexed (changed) translation units",
     )
     p_update.add_argument(
-        "--deleted", action="append", default=[], metavar="PATH",
+        "--deleted",
+        action="append",
+        default=[],
+        metavar="PATH",
         help="a source file removed from the tree (no Document in --scip); repeatable",
     )
     p_update.add_argument(
-        "--source-commit", default=None,
+        "--source-commit",
+        default=None,
         help="commit hash of the sources after the change (the new provenance anchor); "
         "auto-detected via git on the SCIP project_root if omitted",
     )
     p_update.add_argument(
-        "--source-dirty", action="store_true",
+        "--source-dirty",
+        action="store_true",
         help="mark the updated sources as having uncommitted changes",
     )
 
-    p_find = sub.add_parser("find", help="find symbols by name (SCIP symbol strings aren't memorable)")
-    p_find.add_argument("--graph", required=False, default=None,
-        help="graph store path (default: auto-discovered from the cwd's .cppgraph/)")
+    p_find = sub.add_parser(
+        "find", help="find symbols by name (SCIP symbol strings aren't memorable)"
+    )
+    p_find.add_argument(
+        "--graph",
+        required=False,
+        default=None,
+        help="graph store path (default: auto-discovered from the cwd's .cppgraph/)",
+    )
     p_find.add_argument("query", help="substring to match against symbol or display name")
 
     p_callers = sub.add_parser("callers", help="list callers of a symbol")
-    p_callers.add_argument("--graph", required=False, default=None,
-        help="graph store path (default: auto-discovered from the cwd's .cppgraph/)")
+    p_callers.add_argument(
+        "--graph",
+        required=False,
+        default=None,
+        help="graph store path (default: auto-discovered from the cwd's .cppgraph/)",
+    )
     p_callers.add_argument("symbol", help="exact SCIP symbol string (see `find`)")
 
     p_callees = sub.add_parser("callees", help="list callees of a symbol")
-    p_callees.add_argument("--graph", required=False, default=None,
-        help="graph store path (default: auto-discovered from the cwd's .cppgraph/)")
+    p_callees.add_argument(
+        "--graph",
+        required=False,
+        default=None,
+        help="graph store path (default: auto-discovered from the cwd's .cppgraph/)",
+    )
     p_callees.add_argument("symbol", help="exact SCIP symbol string (see `find`)")
 
     p_bases = sub.add_parser("bases", help="direct base classes a type inherits from")
-    p_bases.add_argument("--graph", required=False, default=None,
-        help="graph store path (default: auto-discovered from the cwd's .cppgraph/)")
+    p_bases.add_argument(
+        "--graph",
+        required=False,
+        default=None,
+        help="graph store path (default: auto-discovered from the cwd's .cppgraph/)",
+    )
     p_bases.add_argument("symbol", help="exact SCIP symbol string of a type (see `find`)")
 
     p_subtypes = sub.add_parser("subtypes", help="direct subclasses of a type")
-    p_subtypes.add_argument("--graph", required=False, default=None,
-        help="graph store path (default: auto-discovered from the cwd's .cppgraph/)")
+    p_subtypes.add_argument(
+        "--graph",
+        required=False,
+        default=None,
+        help="graph store path (default: auto-discovered from the cwd's .cppgraph/)",
+    )
     p_subtypes.add_argument("symbol", help="exact SCIP symbol string of a type (see `find`)")
 
     p_refs = sub.add_parser(
         "references",
         help="exact use sites of a symbol (unless the graph was built --no-references)",
     )
-    p_refs.add_argument("--graph", required=False, default=None,
-        help="graph store path (default: auto-discovered from the cwd's .cppgraph/)")
+    p_refs.add_argument(
+        "--graph",
+        required=False,
+        default=None,
+        help="graph store path (default: auto-discovered from the cwd's .cppgraph/)",
+    )
     p_refs.add_argument("symbol", help="exact SCIP symbol string (see `find`)")
     p_refs.add_argument(
-        "--root", default=None,
+        "--root",
+        default=None,
         help="checkout root to read source snippets from (a runtime argument, "
         "never stored). Omit for coordinates (file:line) only.",
     )
     p_refs.add_argument(
-        "--context", type=int, default=0, metavar="N",
+        "--context",
+        type=int,
+        default=0,
+        metavar="N",
         help="lines of source context around each use site, with --root (default: 0)",
     )
     p_refs.add_argument(
@@ -253,20 +299,32 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     p_path = sub.add_parser("path", help="shortest call chain from one symbol to another")
-    p_path.add_argument("--graph", required=False, default=None,
-        help="graph store path (default: auto-discovered from the cwd's .cppgraph/)")
+    p_path.add_argument(
+        "--graph",
+        required=False,
+        default=None,
+        help="graph store path (default: auto-discovered from the cwd's .cppgraph/)",
+    )
     p_path.add_argument("src", help="exact SCIP symbol string (see `find`)")
     p_path.add_argument("dst", help="exact SCIP symbol string (see `find`)")
 
-    p_impact = sub.add_parser("impact", help="reverse blast-radius: everything that transitively calls a symbol")
-    p_impact.add_argument("--graph", required=False, default=None,
-        help="graph store path (default: auto-discovered from the cwd's .cppgraph/)")
+    p_impact = sub.add_parser(
+        "impact", help="reverse blast-radius: everything that transitively calls a symbol"
+    )
+    p_impact.add_argument(
+        "--graph",
+        required=False,
+        default=None,
+        help="graph store path (default: auto-discovered from the cwd's .cppgraph/)",
+    )
     p_impact.add_argument("symbol", help="exact SCIP symbol string (see `find`)")
     p_impact.add_argument(
         "--depth", type=int, default=None, help="max hops to walk backwards (default: unbounded)"
     )
     p_impact.add_argument(
-        "--kind", choices=("calls", "inherits"), default="calls",
+        "--kind",
+        choices=("calls", "inherits"),
+        default="calls",
         help="edge kind to walk: 'calls' = call blast-radius (default); "
         "'inherits' = all transitive subclasses of a base type",
     )
@@ -275,10 +333,15 @@ def main(argv: list[str] | None = None) -> int:
         "status",
         help="show the graph's source commit and, with --root, whether the checkout has drifted",
     )
-    p_status.add_argument("--graph", required=False, default=None,
-        help="graph store path (default: auto-discovered from the cwd's .cppgraph/)")
     p_status.add_argument(
-        "--root", default=None,
+        "--graph",
+        required=False,
+        default=None,
+        help="graph store path (default: auto-discovered from the cwd's .cppgraph/)",
+    )
+    p_status.add_argument(
+        "--root",
+        default=None,
         help="checkout root to compare against (runtime argument). With it, "
         "reports whether the working tree has drifted from the graph's source "
         "commit (exit 1 if stale) and lists the changed files.",
@@ -288,18 +351,26 @@ def main(argv: list[str] | None = None) -> int:
         "explain",
         help="summarize a symbol: definition site, source snippet, callers/callees",
     )
-    p_explain.add_argument("--graph", required=False, default=None,
-        help="graph store path (default: auto-discovered from the cwd's .cppgraph/)")
+    p_explain.add_argument(
+        "--graph",
+        required=False,
+        default=None,
+        help="graph store path (default: auto-discovered from the cwd's .cppgraph/)",
+    )
     p_explain.add_argument("symbol", help="exact SCIP symbol string (see `find`)")
     p_explain.add_argument(
-        "--root", default=None,
+        "--root",
+        default=None,
         help="checkout root to read a source snippet from (a runtime argument, "
         "never stored in the graph — lets the same graph serve any local clone). "
         "Omit it to get coordinates (file:line) only, e.g. when the caller already "
         "has file access and will read the source itself.",
     )
     p_explain.add_argument(
-        "--context", type=int, default=3, metavar="N",
+        "--context",
+        type=int,
+        default=3,
+        metavar="N",
         help="lines of source context to show around the definition (default: 3)",
     )
 
@@ -308,22 +379,35 @@ def main(argv: list[str] | None = None) -> int:
         help="export a viewable subgraph around a symbol as graphify-compatible "
         "graph.json (open it in viz/ or in graphify)",
     )
-    p_export.add_argument("--graph", required=False, default=None,
-        help="graph store path (default: auto-discovered from the cwd's .cppgraph/)")
-    p_export.add_argument("symbol", help="exact SCIP symbol string to center the view on (see `find`)")
     p_export.add_argument(
-        "--depth", type=int, default=2, metavar="N",
+        "--graph",
+        required=False,
+        default=None,
+        help="graph store path (default: auto-discovered from the cwd's .cppgraph/)",
+    )
+    p_export.add_argument(
+        "symbol", help="exact SCIP symbol string to center the view on (see `find`)"
+    )
+    p_export.add_argument(
+        "--depth",
+        type=int,
+        default=2,
+        metavar="N",
         help="neighbourhood radius in hops around the symbol (default: 2). The "
         "full graph is too large to render; a bounded neighbourhood is the unit "
         "you actually view.",
     )
     p_export.add_argument(
-        "--direction", choices=("in", "out", "both"), default="both",
+        "--direction",
+        choices=("in", "out", "both"),
+        default="both",
         help="which way to walk edges: 'out' (what it reaches), 'in' (what "
         "reaches it), or 'both' (default)",
     )
     p_export.add_argument(
-        "--mode", choices=("deps", "usage"), default="deps",
+        "--mode",
+        choices=("deps", "usage"),
+        default="deps",
         help="'deps' (default): the call/inherit dependency subgraph around the "
         "symbol (uses --depth/--direction). 'usage': a symbol->file graph of "
         "where the symbol is used, from its exact reference locations — the right "
@@ -331,12 +415,15 @@ def main(argv: list[str] | None = None) -> int:
         "with references.",
     )
     p_export.add_argument(
-        "--no-tests", action="store_true",
+        "--no-tests",
+        action="store_true",
         help="drop test / test-support files (usage) or symbols defined in them "
         "(deps) — show production usage only",
     )
     p_export.add_argument(
-        "--out", default="graph.json", metavar="PATH",
+        "--out",
+        default="graph.json",
+        metavar="PATH",
         help="output path for the graph.json (default: ./graph.json)",
     )
 
@@ -345,19 +432,42 @@ def main(argv: list[str] | None = None) -> int:
         help="one-shot visualize: build the subgraph, write a self-contained "
         "HTML to a temp dir, and open it in your browser",
     )
-    p_view.add_argument("--graph", required=False, default=None,
-        help="graph store path (default: auto-discovered from the cwd's .cppgraph/)")
+    p_view.add_argument(
+        "--graph",
+        required=False,
+        default=None,
+        help="graph store path (default: auto-discovered from the cwd's .cppgraph/)",
+    )
     p_view.add_argument("symbol", help="exact SCIP symbol string to center on (see `find`)")
-    p_view.add_argument("--mode", choices=("deps", "usage"), default="deps",
-                        help="'deps' (call/inherit subgraph) or 'usage' (symbol->file usage graph)")
-    p_view.add_argument("--depth", type=int, default=2, metavar="N",
-                        help="neighbourhood radius for --mode deps (default: 2)")
-    p_view.add_argument("--direction", choices=("in", "out", "both"), default="both",
-                        help="edge direction for --mode deps (default: both)")
-    p_view.add_argument("--no-tests", action="store_true",
-                        help="drop test / test-support files (production view only)")
-    p_view.add_argument("--no-open", action="store_true",
-                        help="write the HTML but don't launch the browser (just print the path)")
+    p_view.add_argument(
+        "--mode",
+        choices=("deps", "usage"),
+        default="deps",
+        help="'deps' (call/inherit subgraph) or 'usage' (symbol->file usage graph)",
+    )
+    p_view.add_argument(
+        "--depth",
+        type=int,
+        default=2,
+        metavar="N",
+        help="neighbourhood radius for --mode deps (default: 2)",
+    )
+    p_view.add_argument(
+        "--direction",
+        choices=("in", "out", "both"),
+        default="both",
+        help="edge direction for --mode deps (default: both)",
+    )
+    p_view.add_argument(
+        "--no-tests",
+        action="store_true",
+        help="drop test / test-support files (production view only)",
+    )
+    p_view.add_argument(
+        "--no-open",
+        action="store_true",
+        help="write the HTML but don't launch the browser (just print the path)",
+    )
 
     args = parser.parse_args(argv)
 
@@ -566,8 +676,10 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  drift: {frac * 100:.0f}% of {verdict['indexed_files']} indexed files changed")
         if verdict["recommend"] == "rebuild":
             print("  recommendation: FULL REBUILD (drift too large for an incremental update)")
-            print("    re-index the whole target, then `cppgraph build --scip <index.scip> "
-                  f"--out {graph_path}`")
+            print(
+                "    re-index the whole target, then `cppgraph build --scip <index.scip> "
+                f"--out {graph_path}`"
+            )
         else:
             print("  recommendation: incremental update")
             print(f"    next: scripts/reindex.sh --update {graph_path} <compile_commands.json>")
@@ -627,8 +739,12 @@ def main(argv: list[str] | None = None) -> int:
         store = GraphStore(_resolve_graph(args, parser))
         args.symbol = _resolve_symbol(store, args.symbol, parser)
         graph_json = build_export_json(
-            store, args.symbol, mode=args.mode, depth=args.depth,
-            direction=args.direction, exclude_tests=args.no_tests,
+            store,
+            args.symbol,
+            mode=args.mode,
+            depth=args.depth,
+            direction=args.direction,
+            exclude_tests=args.no_tests,
         )
         if graph_json is None:
             parser.error(f"unknown symbol: {args.symbol} (use `cppgraph find` to look it up)")
@@ -640,18 +756,26 @@ def main(argv: list[str] | None = None) -> int:
             if n_links == 0:
                 print("  (0 references — was the graph built with references? see `status`)")
         else:
-            print(f"[cppgraph] exported {n_nodes} nodes, {n_links} edges "
-                  f"(depth {args.depth}, {args.direction}) -> {args.out}")
-        print(f"  open viz/cppgraph-viz.html and load {args.out} "
-              f"(or use `cppgraph view` for a one-shot open)")
+            print(
+                f"[cppgraph] exported {n_nodes} nodes, {n_links} edges "
+                f"(depth {args.depth}, {args.direction}) -> {args.out}"
+            )
+        print(
+            f"  open viz/cppgraph-viz.html and load {args.out} "
+            f"(or use `cppgraph view` for a one-shot open)"
+        )
         return 0
 
     if args.command == "view":
         store = GraphStore(_resolve_graph(args, parser))
         args.symbol = _resolve_symbol(store, args.symbol, parser)
         graph_json = build_export_json(
-            store, args.symbol, mode=args.mode, depth=args.depth,
-            direction=args.direction, exclude_tests=args.no_tests,
+            store,
+            args.symbol,
+            mode=args.mode,
+            depth=args.depth,
+            direction=args.direction,
+            exclude_tests=args.no_tests,
         )
         if graph_json is None:
             parser.error(f"unknown symbol: {args.symbol} (use `cppgraph find` to look it up)")

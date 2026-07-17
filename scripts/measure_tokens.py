@@ -33,12 +33,12 @@ Example (a symbol with real callers *and* test noise, so both optimisations show
     /path/to/mongo/src/mongo/db/pipeline \\
     'ResumeToken#parse'
 """
+
 from __future__ import annotations
 
 import json
 import subprocess
 import sys
-from pathlib import Path
 
 from cppgraph import mcp_server
 from cppgraph.store import GraphStore
@@ -116,17 +116,26 @@ def main(argv: list[str]) -> int:
 
     print(f"\n  who_calls({target_sym.split('mongo/', 1)[-1][:48]}) — where our tokens go:")
     _row("verbose: raw SCIP + tests kept (pre-opt)", raw_c, f"{n_all} callers")
-    _row("+ #2 drop test callers", no_tests_c,
-         f"{n_prod} prod  ({100 * (1 - no_tests_c / max(raw_c, 1)):.0f}% smaller)")
-    _row("+ #1 derive labels from SCIP (DEFAULT)", compact_c,
-         f"{100 * (1 - compact_c / max(no_tests_c, 1)):.0f}% smaller again")
+    _row(
+        "+ #2 drop test callers",
+        no_tests_c,
+        f"{n_prod} prod  ({100 * (1 - no_tests_c / max(raw_c, 1)):.0f}% smaller)",
+    )
+    _row(
+        "+ #1 derive labels from SCIP (DEFAULT)",
+        compact_c,
+        f"{100 * (1 - compact_c / max(no_tests_c, 1)):.0f}% smaller again",
+    )
 
     answer_compact = find_c + compact_c
     answer_raw = find_c + raw_c
     print()
     _row("ANSWER (default) = find + who_calls(target)", answer_compact, "<- exact")
-    _row("ANSWER (pre-opt) = raw SCIP + tests", answer_raw,
-         f"{answer_raw / max(answer_compact, 1):.1f}x the default payload")
+    _row(
+        "ANSWER (pre-opt) = raw SCIP + tests",
+        answer_raw,
+        f"{answer_raw / max(answer_compact, 1):.1f}x the default payload",
+    )
 
     # Correctness: how much of grep's dump is actually the answer? cppgraph's
     # answer is exact by construction (compiler-resolved callers); grep matches
@@ -152,8 +161,12 @@ def main(argv: list[str]) -> int:
     noise = 100 * (1 - on_target / total_lines) if total_lines else 0.0
     print("\nsignal vs noise (grep is raw text; cppgraph is compiler-exact):")
     print(f"  grep lines dumped                 : {total_lines}")
-    print(f"  ...that are a real call site      : {on_target}  -> {noise:.1f}% noise for this question")
-    print(f"  cppgraph callers                  : {len(sites)}  -> exact (100% signal, no reading to filter)")
+    print(
+        f"  ...that are a real call site      : {on_target}  -> {noise:.1f}% noise for this question"  # noqa: E501
+    )
+    print(
+        f"  cppgraph callers                  : {len(sites)}  -> exact (100% signal, no reading to filter)"  # noqa: E501
+    )
 
     print("\nratios (tokens), for answering the one specific symbol:")
     a = max(answer_compact, 1)

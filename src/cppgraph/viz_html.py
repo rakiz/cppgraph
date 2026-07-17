@@ -41,8 +41,7 @@ def _viz_dir() -> Path:
     if candidate.is_dir():
         return candidate
     raise FileNotFoundError(
-        f"could not locate the viz/ assets (looked in {candidate}); "
-        "run from a source checkout"
+        f"could not locate the viz/ assets (looked in {candidate}); run from a source checkout"
     )
 
 

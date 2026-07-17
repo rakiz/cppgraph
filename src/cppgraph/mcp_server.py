@@ -35,7 +35,6 @@ from typing import TYPE_CHECKING, Any
 
 from cppgraph.cli import SOURCE_EXTS, build_export_json, read_source_snippet
 from cppgraph.export import is_test_file
-from cppgraph.updates import update_advice
 from cppgraph.store import (
     GraphStore,
     changed_files_since,
@@ -43,6 +42,7 @@ from cppgraph.store import (
     discover_graph,
     staleness_verdict,
 )
+from cppgraph.updates import update_advice
 
 if TYPE_CHECKING:
     from cppgraph.model import Edge, Node
@@ -163,10 +163,7 @@ def _merged_source(
     wanted: set[int] = set()
     for h in hits:
         wanted.update(range(max(0, h - context), min(len(lines), h + context + 1)))
-    return [
-        {"line": i + 1, "text": lines[i], "is_use": i in hits}
-        for i in sorted(wanted)
-    ]
+    return [{"line": i + 1, "text": lines[i], "is_use": i in hits} for i in sorted(wanted)]
 
 
 def find_symbols(store: GraphStore, query: str, limit: int = DEFAULT_LIMIT) -> dict[str, Any]:
@@ -383,7 +380,8 @@ def impact(
         nodes = [(sym, n) for sym, n in nodes if n is None or not is_test_file(n.file)]
     shown, truncated = _capped(nodes, limit)
     out: list[dict[str, Any]] = [
-        _node_dict(n, full_symbols) if n is not None
+        _node_dict(n, full_symbols)
+        if n is not None
         else {"symbol": sym, "file": None, "line": None}
         for sym, n in shown
     ]
@@ -482,7 +480,8 @@ def status_report(
             "built_at": m.get("built_at"),
             "indexed_with": " ".join(
                 v for v in (m.get("index_tool"), m.get("index_tool_version")) if v
-            ) or None,
+            )
+            or None,
             "schema_version": m.get("schema_version"),
             "cppgraph_version": m.get("cppgraph_version"),
             "has_references": m.get("has_references") == "true",
@@ -502,7 +501,10 @@ def status_report(
 
     changes = changed_files_since(root, commit)
     if changes is None:
-        result["drift"] = {"checked": False, "reason": f"{root} is not a git checkout (or git unavailable)"}
+        result["drift"] = {
+            "checked": False,
+            "reason": f"{root} is not a git checkout (or git unavailable)",
+        }
         return result
     changed = [f for f in changes[0] if f.endswith(SOURCE_EXTS)]
     deleted = [f for f in changes[1] if f.endswith(SOURCE_EXTS)]
@@ -542,8 +544,12 @@ def make_export(
     """Build the graph.json dict for a symbol, or None if unknown (see
     `cppgraph.cli.build_export_json`)."""
     return build_export_json(
-        store, symbol, mode=mode, depth=depth,
-        direction=direction, exclude_tests=exclude_tests,
+        store,
+        symbol,
+        mode=mode,
+        depth=depth,
+        direction=direction,
+        exclude_tests=exclude_tests,
     )
 
 
@@ -582,27 +588,33 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
 
     @mcp.tool()
     def who_calls(
-        symbol: str, limit: int = DEFAULT_LIMIT,
-        full_symbols: bool = False, exclude_tests: bool = True,
+        symbol: str,
+        limit: int = DEFAULT_LIMIT,
+        full_symbols: bool = False,
+        exclude_tests: bool = True,
     ) -> dict[str, Any]:
         """Direct callers of a symbol (one call hop). `symbol` is an exact SCIP
         string from `find`. Each caller is returned by human `name` + `file:line`
         (compact); set `full_symbols=True` for the raw SCIP strings. Test callers
         are dropped by default — pass `exclude_tests=False` to include them."""
-        return _call(callers, symbol, limit=limit,
-                     full_symbols=full_symbols, exclude_tests=exclude_tests)
+        return _call(
+            callers, symbol, limit=limit, full_symbols=full_symbols, exclude_tests=exclude_tests
+        )
 
     @mcp.tool()
     def what_it_calls(
-        symbol: str, limit: int = DEFAULT_LIMIT,
-        full_symbols: bool = False, exclude_tests: bool = True,
+        symbol: str,
+        limit: int = DEFAULT_LIMIT,
+        full_symbols: bool = False,
+        exclude_tests: bool = True,
     ) -> dict[str, Any]:
         """Direct callees of a symbol (one call hop). `symbol` is an exact SCIP
         string from `find`. Compact `name` + `file:line` by default
         (`full_symbols=True` for raw SCIP); callees in test files dropped unless
         `exclude_tests=False`."""
-        return _call(callees, symbol, limit=limit,
-                     full_symbols=full_symbols, exclude_tests=exclude_tests)
+        return _call(
+            callees, symbol, limit=limit, full_symbols=full_symbols, exclude_tests=exclude_tests
+        )
 
     @mcp.tool()
     def base_classes(
@@ -624,8 +636,11 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
 
     @mcp.tool()
     def find_references(
-        symbol: str, include_source: bool = False, context: int = 0,
-        limit: int = DEFAULT_LIMIT, exclude_tests: bool = True,
+        symbol: str,
+        include_source: bool = False,
+        context: int = 0,
+        limit: int = DEFAULT_LIMIT,
+        exclude_tests: bool = True,
     ) -> dict[str, Any]:
         """Exact use sites of a symbol ("where is this type/symbol used?") — the
         dependency the call graph can't show (a struct has no callers). Returns
@@ -634,8 +649,15 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         grouped by file with overlapping windows merged (no duplicated lines).
         `context` sets lines around each site. Test-file uses are dropped by
         default — pass `exclude_tests=False` to include them."""
-        return _call(references, symbol, root=root, include_source=include_source,
-                     context=context, limit=limit, exclude_tests=exclude_tests)
+        return _call(
+            references,
+            symbol,
+            root=root,
+            include_source=include_source,
+            context=context,
+            limit=limit,
+            exclude_tests=exclude_tests,
+        )
 
     @mcp.tool()
     def path(src: str, dst: str) -> dict[str, Any]:
@@ -644,8 +666,12 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
 
     @mcp.tool()
     def impact_of(
-        symbol: str, depth: int | None = None, limit: int = DEFAULT_LIMIT,
-        kind: str = "calls", full_symbols: bool = False, exclude_tests: bool = True,
+        symbol: str,
+        depth: int | None = None,
+        limit: int = DEFAULT_LIMIT,
+        kind: str = "calls",
+        full_symbols: bool = False,
+        exclude_tests: bool = True,
     ) -> dict[str, Any]:
         """Reverse blast-radius: everything that transitively reaches `symbol`.
         kind="calls" (default) = transitive callers ("what could break if I
@@ -653,13 +679,24 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         a base type. `depth` bounds the hops. Compact `name` + `file:line` by
         default (`full_symbols=True` for raw SCIP); symbols in test files dropped
         unless `exclude_tests=False`."""
-        return _call(impact, symbol, depth=depth, limit=limit, kind=kind,
-                     full_symbols=full_symbols, exclude_tests=exclude_tests)
+        return _call(
+            impact,
+            symbol,
+            depth=depth,
+            limit=limit,
+            kind=kind,
+            full_symbols=full_symbols,
+            exclude_tests=exclude_tests,
+        )
 
     @mcp.tool()
     def explain_symbol(
-        symbol: str, include_source: bool = False, context: int = 3,
-        limit: int = EXPLAIN_LIMIT, full_symbols: bool = False, exclude_tests: bool = True,
+        symbol: str,
+        include_source: bool = False,
+        context: int = 3,
+        limit: int = EXPLAIN_LIMIT,
+        full_symbols: bool = False,
+        exclude_tests: bool = True,
     ) -> dict[str, Any]:
         """Definition site + caller/callee summary for `symbol`. Returns
         `file:line` coordinates by default; set `include_source=True` to also get
@@ -669,8 +706,14 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         are compact `name` + `file:line` (`full_symbols=True` for raw SCIP) and
         drop test files unless `exclude_tests=False`."""
         return _call(
-            explain, symbol, root=root, include_source=include_source, context=context,
-            limit=limit, full_symbols=full_symbols, exclude_tests=exclude_tests,
+            explain,
+            symbol,
+            root=root,
+            include_source=include_source,
+            context=context,
+            limit=limit,
+            full_symbols=full_symbols,
+            exclude_tests=exclude_tests,
         )
 
     @mcp.tool()
@@ -706,8 +749,12 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         if store is None:
             return dict(_NO_GRAPH)
         graph_json = make_export(
-            store, symbol, mode=mode, depth=depth,
-            direction=direction, exclude_tests=exclude_tests,
+            store,
+            symbol,
+            mode=mode,
+            depth=depth,
+            direction=direction,
+            exclude_tests=exclude_tests,
         )
         if graph_json is None:
             return {"error": _UNKNOWN.format(symbol=symbol)}
@@ -733,13 +780,15 @@ def main(argv: list[str] | None = None) -> int:
         description="MCP server exposing the cppgraph query surface to an LLM.",
     )
     parser.add_argument(
-        "--graph", default=None,
+        "--graph",
+        default=None,
         help="path to a graph store built by `cppgraph build`. Omit to "
         "auto-discover the current project's graph from the cwd's `.cppgraph/` "
         "(the default; lets one global registration serve every project).",
     )
     parser.add_argument(
-        "--root", default=None,
+        "--root",
+        default=None,
         help="checkout root for `status` drift checks and source snippets "
         "(defaults to the discovered project directory)",
     )

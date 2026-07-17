@@ -85,7 +85,7 @@ def test_file_usage_graph_maps_references_to_file_edges() -> None:
 
     refs = [
         Reference(symbol=A, file="a/foo.cpp", line=1),
-        Reference(symbol=A, file="a/foo.cpp", line=8),   # same file -> weight 2
+        Reference(symbol=A, file="a/foo.cpp", line=8),  # same file -> weight 2
         Reference(symbol=A, file="b/bar.h", line=3),
     ]
     g = to_file_usage_graph(A, "ResumeTokenData", refs)
@@ -96,7 +96,7 @@ def test_file_usage_graph_maps_references_to_file_edges() -> None:
     foo = next(n for n in g["nodes"] if n["id"] == "file:a/foo.cpp")
     assert foo["label"] == "foo.cpp" and foo["kind"] == "file"
 
-    links = {l["target"]: l for l in g["links"]}
+    links = {lk["target"]: lk for lk in g["links"]}
     assert links["file:a/foo.cpp"]["relation"] == "references"
     assert links["file:a/foo.cpp"]["weight"] == 2
     assert links["file:b/bar.h"]["weight"] == 1
@@ -104,6 +104,7 @@ def test_file_usage_graph_maps_references_to_file_edges() -> None:
 
 def test_file_usage_graph_empty_when_no_references() -> None:
     from cppgraph.export import to_file_usage_graph
+
     g = to_file_usage_graph(A, "x", [])
     assert g["nodes"] == [{"id": A, "label": "x", "_origin": "cppgraph"}]
     assert g["links"] == []
@@ -111,6 +112,7 @@ def test_file_usage_graph_empty_when_no_references() -> None:
 
 def test_is_test_file_recognizes_mongo_conventions() -> None:
     from cppgraph.export import is_test_file
+
     assert is_test_file("src/mongo/db/pipeline/resume_token_test.cpp")
     assert is_test_file("src/mongo/db/pipeline/change_stream_test_helpers.cpp")
     assert is_test_file("src/mongo/foo_unittest.cpp")
@@ -137,4 +139,4 @@ def test_file_usage_graph_can_exclude_tests_via_build_helper(tmp_path: Path) -> 
     full = build_export_json(store, sym, mode="usage")
     assert len(full["links"]) == 2
     prod = build_export_json(store, sym, mode="usage", exclude_tests=True)
-    assert {l["target"] for l in prod["links"]} == {"file:src/mongo/resume_token.cpp"}
+    assert {lk["target"] for lk in prod["links"]} == {"file:src/mongo/resume_token.cpp"}

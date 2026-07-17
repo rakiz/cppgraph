@@ -52,8 +52,10 @@ when you want to measure at scale; keep such paths out of the shipped code.)
 - **Red/green TDD.** Write a failing test first, especially when fixing a bug or
   changing behavior; then make it pass. New code and changes get tests. The test
   for `src/cppgraph/foo.py` lives at `tests/test_foo.py`.
-- **Format before you commit, only what you touched.** Never a full-repo
-  reformat in an unrelated commit.
+- **Format and lint before you commit, only what you touched.** `ruff format`
+  and `ruff check --fix` (config in `pyproject.toml`, line length 100; generated
+  `proto/` is excluded). Never a full-repo reformat in an unrelated commit — if a
+  repo-wide format is needed, make it its own dedicated commit.
 - **Token economy.** For multi-file exploration or noisy searches, spawn a
   subagent and keep only the findings in the main context — don't fill it with
   raw greps or file dumps.

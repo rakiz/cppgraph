@@ -99,9 +99,7 @@ def build_graph(index: scip_pb2.Index, *, include_references: bool = True) -> Gr
                         edge_kind = "inherits"
                     else:
                         edge_kind = "implements"
-                    graph.add_edge(
-                        edge_kind, sym_info.symbol, rel.symbol, doc.relative_path
-                    )
+                    graph.add_edge(edge_kind, sym_info.symbol, rel.symbol, doc.relative_path)
 
         # One pass over definition occurrences: record every symbol's
         # definition site (so types/fields, not just callables, can be located

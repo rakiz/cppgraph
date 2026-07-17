@@ -3,6 +3,7 @@
 The comparison logic is pure and tested directly against a fixture registry; the
 network+cache layer is exercised only for its fail-soft behaviour (no real HTTP).
 """
+
 from __future__ import annotations
 
 import pytest
@@ -13,7 +14,7 @@ REGISTRY = {
     "latest": "0.3.0",
     "releases": [
         {"version": "0.1.0", "requires_rebuild": False},
-        {"version": "0.2.0", "requires_rebuild": True},   # schema/extraction change
+        {"version": "0.2.0", "requires_rebuild": True},  # schema/extraction change
         {"version": "0.3.0", "requires_rebuild": False},
     ],
 }
@@ -85,7 +86,7 @@ def test_no_update_when_current_is_latest() -> None:
 def test_rebuild_now_when_binary_ahead_of_graph_across_boundary() -> None:
     # graph built with 0.1.0, binary already upgraded to 0.3.0 -> crossed 0.2.0
     adv = updates.compute_advice(REGISTRY, current="0.3.0", graph_built_with="0.1.0")
-    assert adv["update_available"] is False           # already on latest
+    assert adv["update_available"] is False  # already on latest
     assert adv["rebuild_recommended"] is True
     assert "rebuild" in adv["rebuild_message"].lower()
 

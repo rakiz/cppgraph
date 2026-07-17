@@ -17,6 +17,7 @@ from cppgraph import mcp_server
 from cppgraph.model import Graph, Node
 from cppgraph.store import GraphStore, write_sqlite
 
+
 @pytest.fixture(autouse=True)
 def _no_network_update_check(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep `status_report` offline-deterministic: never hit the version registry
@@ -96,7 +97,9 @@ def test_callers_exclude_tests_by_default(tmp_path: Path) -> None:
     graph = Graph()
     graph.nodes[FOO] = Node(symbol=FOO, display_name="makeResumeToken", file="foo.cpp", line=234)
     graph.nodes[prod] = Node(symbol=prod, display_name="prodCaller", file="foo.cpp", line=9)
-    graph.nodes[testc] = Node(symbol=testc, display_name="~SomeCase_Test", file="foo_test.cpp", line=3)
+    graph.nodes[testc] = Node(
+        symbol=testc, display_name="~SomeCase_Test", file="foo_test.cpp", line=3
+    )
     graph.add_edge("calls", prod, FOO, file="foo.cpp", line=11)
     graph.add_edge("calls", testc, FOO, file="foo_test.cpp", line=5)
     path = tmp_path / "t.db"
@@ -113,11 +116,16 @@ def test_callers_exclude_tests_by_default(tmp_path: Path) -> None:
 
 def test_short_label_strips_scip_noise() -> None:
     # scheme prefix, anonymous-namespace file path, overload hash, back-ticks
-    raw = ("cxx . . $ mongo/`$anonymous_namespace_src/mongo/db/pipeline/foo_test.cpp`"
-           "/SomeCase_Test#`~SomeCase_Test`(49f6e7a06ebc5aa8).")
+    raw = (
+        "cxx . . $ mongo/`$anonymous_namespace_src/mongo/db/pipeline/foo_test.cpp`"
+        "/SomeCase_Test#`~SomeCase_Test`(49f6e7a06ebc5aa8)."
+    )
     assert mcp_server._short_label(raw) == "mongo/SomeCase_Test#~SomeCase_Test."
     plain = "cxx . . $ mongo/PlanExecutorPipeline#_initializeResumableScanState(49f6e7a06ebc5aa8)."
-    assert mcp_server._short_label(plain) == "mongo/PlanExecutorPipeline#_initializeResumableScanState."
+    assert (
+        mcp_server._short_label(plain)
+        == "mongo/PlanExecutorPipeline#_initializeResumableScanState."
+    )
 
 
 def test_callers_derives_label_without_display_name(tmp_path: Path) -> None:
@@ -291,7 +299,9 @@ def test_explain_includes_source_when_requested(store: GraphStore, tmp_path: Pat
     assert 235 in lines
 
 
-def test_explain_source_requested_but_missing_is_graceful(store: GraphStore, tmp_path: Path) -> None:
+def test_explain_source_requested_but_missing_is_graceful(
+    store: GraphStore, tmp_path: Path
+) -> None:
     result = mcp_server.explain(store, FOO, root=str(tmp_path), include_source=True)
     assert result["source"] is None  # requested, file absent -> explicit None, no crash
 
@@ -315,7 +325,8 @@ def _init_repo(root: Path) -> str:
     subprocess.run(["git", "add", "-A"], cwd=root, check=True)
     subprocess.run(
         ["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init"],
-        cwd=root, check=True,
+        cwd=root,
+        check=True,
     )
     return subprocess.run(
         ["git", "rev-parse", "HEAD"], cwd=root, capture_output=True, text=True, check=True
@@ -370,7 +381,7 @@ def test_make_export_deps_returns_subgraph(store: GraphStore) -> None:
     g = mcp_server.make_export(store, FOO, mode="deps", depth=1, direction="in")
     ids = {n["id"] for n in g["nodes"]}
     assert FOO in ids and MID in ids  # depth-1 in-neighbour
-    assert any(l["relation"] == "calls" for l in g["links"])
+    assert any(lk["relation"] == "calls" for lk in g["links"])
 
 
 def test_make_export_usage_returns_file_graph(tmp_path: Path) -> None:
@@ -382,7 +393,7 @@ def test_make_export_usage_returns_file_graph(tmp_path: Path) -> None:
     path = tmp_path / "refs.db"
     write_sqlite(graph, path)
     g = mcp_server.make_export(GraphStore(path), sym, mode="usage")
-    assert {l["target"] for l in g["links"]} == {"file:a/foo.cpp", "file:b/bar.h"}
+    assert {lk["target"] for lk in g["links"]} == {"file:a/foo.cpp", "file:b/bar.h"}
 
 
 def test_make_export_unknown_symbol_is_none(store: GraphStore) -> None:
@@ -403,12 +414,16 @@ def test_discover_graph_finds_nearest_cppgraph(tmp_path: Path) -> None:
 
 
 def test_discover_graph_picks_newest(tmp_path: Path) -> None:
-    import os, time
+    import os
+    import time
+
     cpg = tmp_path / ".cppgraph"
     cpg.mkdir()
-    old = cpg / "old.graph.db"; old.write_bytes(b"o")
+    old = cpg / "old.graph.db"
+    old.write_bytes(b"o")
     time.sleep(0.01)
-    new = cpg / "new.graph.db"; new.write_bytes(b"n")
+    new = cpg / "new.graph.db"
+    new.write_bytes(b"n")
     os.utime(old, (1, 1))  # force old to be older
     graph, _ = mcp_server.discover_graph(tmp_path)
     assert graph.name == "new.graph.db"

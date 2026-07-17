@@ -25,7 +25,7 @@ import subprocess
 from collections import deque
 from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from importlib import metadata as importlib_metadata
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -106,7 +106,9 @@ def _git(root: Path, *args: str) -> str | None:
     try:
         result = subprocess.run(
             ["git", "-C", str(root), *args],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True,
+            text=True,
+            timeout=5,
         )
     except (OSError, subprocess.SubprocessError):
         return None
@@ -115,9 +117,7 @@ def _git(root: Path, *args: str) -> str | None:
     return result.stdout.strip()
 
 
-def changed_files_since(
-    root: str | Path, base_commit: str
-) -> tuple[list[str], list[str]] | None:
+def changed_files_since(root: str | Path, base_commit: str) -> tuple[list[str], list[str]] | None:
     """Files that differ in `root`'s working tree from `base_commit`.
 
     Returns `(changed, deleted)` relative paths, or `None` if `root` isn't a
@@ -180,9 +180,7 @@ def staleness_verdict(
     verdict["indexed_files"] = indexed_files or None
     verdict["changed_fraction"] = round(fraction, 3) if fraction is not None else None
     verdict["recommend"] = (
-        "rebuild"
-        if fraction is not None and fraction >= REBUILD_FILE_FRACTION
-        else "update"
+        "rebuild" if fraction is not None and fraction >= REBUILD_FILE_FRACTION else "update"
     )
     return verdict
 
@@ -191,7 +189,7 @@ def project_root_path(project_root_uri: str) -> Path | None:
     """The local filesystem path behind a SCIP `Metadata.project_root`, which is
     a `file://` URI."""
     if project_root_uri.startswith("file://"):
-        return Path(project_root_uri[len("file://"):])
+        return Path(project_root_uri[len("file://") :])
     if project_root_uri:
         return Path(project_root_uri)
     return None
@@ -259,7 +257,7 @@ def build_provenance(
     if dirty is not None:
         meta["source_dirty"] = "true" if dirty else "false"
 
-    meta["built_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    meta["built_at"] = datetime.now(UTC).isoformat(timespec="seconds")
     try:
         meta["cppgraph_version"] = importlib_metadata.version("cppgraph")
     except importlib_metadata.PackageNotFoundError:
@@ -267,9 +265,7 @@ def build_provenance(
     return meta
 
 
-def write_sqlite(
-    graph: Graph, path: str | Path, *, meta: dict[str, str] | None = None
-) -> None:
+def write_sqlite(graph: Graph, path: str | Path, *, meta: dict[str, str] | None = None) -> None:
     """Serialise an in-memory `Graph` to an interned SQLite store, overwriting
     any existing file at `path`.
 
@@ -305,13 +301,10 @@ def write_sqlite(
             sym_rows.append((i, node.symbol, node.display_name, file_id(node.file), node.line))
 
         edge_rows = [
-            (e.kind, sym_ids[e.src], sym_ids[e.dst], file_id(e.file), e.line)
-            for e in graph.edges
+            (e.kind, sym_ids[e.src], sym_ids[e.dst], file_id(e.file), e.line) for e in graph.edges
         ]
         # add_reference interns the symbol as a node, so sym_ids covers it.
-        ref_rows = [
-            (sym_ids[r.symbol], file_id(r.file), r.line) for r in graph.references
-        ]
+        ref_rows = [(sym_ids[r.symbol], file_id(r.file), r.line) for r in graph.references]
 
         all_meta = dict(meta or {})
         all_meta["schema_version"] = str(SCHEMA_VERSION)
@@ -321,8 +314,9 @@ def write_sqlite(
             all_meta.setdefault("has_references", "true")
             all_meta.setdefault("ref_count", str(len(graph.references)))
 
-        con.executemany("INSERT INTO files VALUES (?, ?)",
-                        [(fid, p) for p, fid in file_ids.items()])
+        con.executemany(
+            "INSERT INTO files VALUES (?, ?)", [(fid, p) for p, fid in file_ids.items()]
+        )
         con.executemany("INSERT INTO symbols VALUES (?, ?, ?, ?, ?)", sym_rows)
         con.executemany("INSERT INTO edges VALUES (?, ?, ?, ?, ?)", edge_rows)
         con.executemany("INSERT INTO refs VALUES (?, ?, ?)", ref_rows)
@@ -435,9 +429,7 @@ class GraphStore:
     # --- id resolution -----------------------------------------------------
 
     def _symbol_id(self, symbol: str) -> int | None:
-        row = self._con.execute(
-            "SELECT id FROM symbols WHERE symbol = ?", (symbol,)
-        ).fetchone()
+        row = self._con.execute("SELECT id FROM symbols WHERE symbol = ?", (symbol,)).fetchone()
         return row[0] if row else None
 
     def has_symbol(self, symbol: str) -> bool:
@@ -463,7 +455,7 @@ class GraphStore:
         out: dict[int, str] = {}
         ids_list = list(ids)
         for start in range(0, len(ids_list), _ID_CHUNK):
-            chunk = ids_list[start:start + _ID_CHUNK]
+            chunk = ids_list[start : start + _ID_CHUNK]
             placeholders = ",".join("?" * len(chunk))
             for sid, symbol in self._con.execute(
                 f"SELECT id, symbol FROM symbols WHERE id IN ({placeholders})", chunk
@@ -635,8 +627,9 @@ class GraphStore:
                 """,
                 (node_id,),
             ).fetchall():
-                edge = Edge(kind="calls", src=node_symbol, dst=e_dst_symbol,
-                            file=path_str, line=line)
+                edge = Edge(
+                    kind="calls", src=node_symbol, dst=e_dst_symbol, file=path_str, line=line
+                )
                 if e_dst_id == dst_id:
                     return path + [edge]
                 if e_dst_id not in visited:
@@ -644,9 +637,7 @@ class GraphStore:
                     queue.append((e_dst_id, e_dst_symbol, path + [edge]))
         return None
 
-    def impact(
-        self, symbol: str, max_depth: int | None = None, kind: str = "calls"
-    ) -> set[str]:
+    def impact(self, symbol: str, max_depth: int | None = None, kind: str = "calls") -> set[str]:
         """Symbols that transitively reach `symbol` backward along `kind` edges.
 
         Reverse BFS over `ix_dst`; `max_depth` bounds the backward hops
@@ -767,7 +758,7 @@ class GraphStore:
         values = list(dict.fromkeys(values))  # dedup, keep order
         mapping: dict[str, int] = {}
         for start in range(0, len(values), _ID_CHUNK):
-            chunk = values[start:start + _ID_CHUNK]
+            chunk = values[start : start + _ID_CHUNK]
             ph = ",".join("?" * len(chunk))
             for vid, val in self._con.execute(
                 f"SELECT id, {col} FROM {table} WHERE {col} IN ({ph})", chunk
@@ -782,9 +773,7 @@ class GraphStore:
                 mapping[v] = next_id
                 new_rows.append((next_id, v))
                 next_id += 1
-            self._con.executemany(
-                f"INSERT INTO {table}(id, {col}) VALUES (?, ?)", new_rows
-            )
+            self._con.executemany(f"INSERT INTO {table}(id, {col}) VALUES (?, ?)", new_rows)
         return mapping
 
     def _file_ids(self, paths: Iterable[str]) -> list[int]:
@@ -822,16 +811,14 @@ class GraphStore:
             gc_candidates: set[int] = set()
             edges_removed = 0
             for start in range(0, len(changed_ids), _ID_CHUNK):
-                chunk = changed_ids[start:start + _ID_CHUNK]
+                chunk = changed_ids[start : start + _ID_CHUNK]
                 ph = ",".join("?" * len(chunk))
                 for src_id, dst_id in con.execute(
                     f"SELECT src_id, dst_id FROM edges WHERE file_id IN ({ph})", chunk
                 ):
                     gc_candidates.add(src_id)
                     gc_candidates.add(dst_id)
-                for (sid,) in con.execute(
-                    f"SELECT id FROM symbols WHERE file_id IN ({ph})", chunk
-                ):
+                for (sid,) in con.execute(f"SELECT id FROM symbols WHERE file_id IN ({ph})", chunk):
                     gc_candidates.add(sid)
                 for (sid,) in con.execute(
                     f"SELECT symbol_id FROM refs WHERE file_id IN ({ph})", chunk
@@ -873,11 +860,15 @@ class GraphStore:
                 ],
             )
             con.executemany(
-                "INSERT INTO edges(kind, src_id, dst_id, file_id, line) "
-                "VALUES (?, ?, ?, ?, ?)",
+                "INSERT INTO edges(kind, src_id, dst_id, file_id, line) VALUES (?, ?, ?, ?, ?)",
                 [
-                    (e.kind, sym_id[e.src], sym_id[e.dst],
-                     file_id.get(e.file) if e.file else None, e.line)
+                    (
+                        e.kind,
+                        sym_id[e.src],
+                        sym_id[e.dst],
+                        file_id.get(e.file) if e.file else None,
+                        e.line,
+                    )
                     for e in partial.edges
                 ],
             )
@@ -893,9 +884,7 @@ class GraphStore:
             # edge or ref location) so `find` doesn't surface stale symbols.
             symbols_removed = 0
             for sid in gc_candidates:
-                row = con.execute(
-                    "SELECT file_id FROM symbols WHERE id = ?", (sid,)
-                ).fetchone()
+                row = con.execute("SELECT file_id FROM symbols WHERE id = ?", (sid,)).fetchone()
                 if row is None or row[0] is not None:
                     continue  # already gone, or still defined somewhere
                 referenced = con.execute(
@@ -919,9 +908,7 @@ class GraphStore:
             all_meta["edge_count"] = str(edge_count)
             if ref_count:
                 all_meta["ref_count"] = str(ref_count)
-            con.executemany(
-                "INSERT OR REPLACE INTO meta VALUES (?, ?)", all_meta.items()
-            )
+            con.executemany("INSERT OR REPLACE INTO meta VALUES (?, ?)", all_meta.items())
 
         return UpdateStats(
             files_changed=len(changed_files),
