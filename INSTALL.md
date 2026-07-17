@@ -87,6 +87,53 @@ scratch/bin/scip-clang --version
 # Based on Clang/LLVM 2078da43e25a4623cab2d0d60decddf709aaea28
 ```
 
+### ARM-Linux / Windows: index via a container (Docker or Podman)
+
+`scip-clang` ships **no ARM-Linux (aarch64) binary** — only `x86_64-linux` and
+`arm64-darwin` — and nothing for Windows. But indexing is the **only** step that
+needs x86: cppgraph builds the graph and serves queries in pure Python, natively,
+on any platform. `scripts/setup.sh` reflects this — it installs the tool (venv)
+on *every* platform and simply skips the native indexer where none exists,
+pointing you here. So on an ARM-Linux workstation (or Intel Mac / Windows), run
+scip-clang in an x86_64 container, then build the graph natively:
+
+```bash
+# 1. produce the .scip in an x86_64 container (emulated on ARM via qemu). Uses
+#    docker or podman (auto-detected; CPPGRAPH_CONTAINER to force one). Same args
+#    as reindex.sh; writes <project>/.cppgraph/<name>.scip and prints the exact
+#    build command to run next.
+scripts/index-in-container.sh /path/to/project/compile_commands.json src/ myproject
+
+# 2. build the graph natively (no container) — the command above prints this:
+.venv/bin/cppgraph build \
+  --scip /path/to/project/.cppgraph/myproject.scip \
+  --out  /path/to/project/.cppgraph/myproject.graph.db
+```
+
+`reindex.sh` also picks this up automatically: on a platform without a native
+scip-clang, if a matching `<name>.scip` already sits in `<project>/.cppgraph/`
+(from the container step, or copied from another machine that indexed the same
+checkout), it **skips indexing and builds straight from it** — so the workflow is
+"generate the `.scip` once, then `reindex.sh` as usual". (Incremental `--update`
+still needs a native scip-clang.)
+
+Requires **Docker or Podman** with `linux/amd64` emulation — the script
+auto-detects either (force one with `CPPGRAPH_CONTAINER=podman`). Podman is
+daemonless, rootless and fully FOSS (`apt install podman qemu-user-static`);
+Docker Desktop / recent Docker Engine set up `binfmt`/qemu automatically. Two
+gotchas, both handled/flagged:
+
+- **Paths must match.** `compile_commands.json` holds absolute paths; the wrapper
+  bind-mounts the project at its *same* absolute path in the container so they
+  resolve. Keep the source tree where it was built.
+- **Toolchain headers.** If your project builds with a custom/vendored compiler,
+  add it to `docker/Dockerfile` — a `'X.h' file not found` during indexing means
+  the container lacks that toolchain, not a scip-clang bug.
+
+Alternatively, index on any x86_64 machine/CI and copy the resulting
+`<name>.graph.db` into `<project>/.cppgraph/` on the ARM host — the MCP server
+auto-discovers it and everything downstream is platform-independent.
+
 ## 3. `protoc` (optional — only if regenerating SCIP protobuf bindings)
 
 `src/cppgraph/proto/scip_pb2.py` and `scip_pb2.pyi` are **generated and committed**

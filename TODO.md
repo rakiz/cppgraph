@@ -18,6 +18,23 @@ Only open items live here. Completed work is in `CHANGELOG.md`; design detail in
   If we ever publish that way, wire a build-time version from the tag
   (`hatch-vcs`/`setuptools-scm`) so those installs report the truth too.
 
+## Later: a build container that compiles scip-clang native to its host arch
+
+Today's ARM-Linux workaround (`scripts/index-in-container.sh`) runs the x86_64
+scip-clang **emulated**, so indexing is slow. The better long-term option: a
+Docker image that carries the whole build toolchain (Bazel + LLVM deps) and
+compiles a **vanilla** scip-clang for whatever arch the container runs on
+(native, e.g. `linux/arm64` on an ARM host — no emulation), dropping the binary
+into `scratch/bin/` for normal *native* indexing afterwards. Keeps the heavy
+build toolchain off the host, and there's **nothing to host/maintain** — each
+machine that lacks a prebuilt binary builds its own once. Needs scip-clang's
+real Bazel build recipe (pin the version; build is CPU/RAM-heavy, tens of
+minutes). Distinct from item above: build-and-use-locally, not build-and-publish.
+
+Bonus tie-in: **if we build scip-clang ourselves we could carry the
+`enclosing_range` patch (#504)** — but that turns "vanilla, build locally" into
+"own the whole distributed matrix", so keep it a separate, later decision.
+
 ## Blocked on scip-clang `enclosing_range` (PR #504)
 
 Both need exact reference→enclosing-symbol attribution — the nearest-preceding

@@ -84,11 +84,33 @@ Everything so far — the project has not cut a numbered release yet.
   the browser — works under `file://` and offline.
 - Bundled viewer `viz/cppgraph-viz.html` (MIT), vis-network vendored locally.
 
+### Setup & platforms
+- `scripts/setup.sh`: one-shot venv + deps + scip-clang, with version selection
+  (`--version`/`--nightly`/`--branch`). Installs the (pure-Python) tool on
+  **every** platform; where no native scip-clang exists (arm64-linux, Intel Mac,
+  Windows) it skips only the indexer and points at the container flow.
+- **ARM-Linux / Windows indexing via a container.** scip-clang ships no
+  arm64-linux binary; `scripts/index-in-container.sh` runs it in an `linux/amd64`
+  container (emulated on ARM) to emit the `.scip`, then you build the graph
+  natively (pure Python, any platform). Uses **docker or podman** (auto-detected;
+  `CPPGRAPH_CONTAINER` to force one). Same CLI as `reindex.sh`; after writing the
+  `.scip` it **resumes automatically** with the native `cppgraph build`
+  (`CPPGRAPH_INDEX_NO_BUILD=1` to stop at the index). Helps with prerequisites it
+  can't assume: missing container engine (suggests `podman`) and missing
+  `compile_commands.json` (CMake / Bazel incl. MongoDB's `//:compiledb` / `bear`).
+  Dockerfile in `docker/`. Alternatively index on any x86_64 box and copy the
+  `.graph.db` over.
+- **`reindex.sh` reuses a prebuilt `.scip`.** On a host without a native
+  scip-clang, a full re-index skips indexing and builds straight from an existing
+  `<project>/.cppgraph/<name>.scip` (from the container step or copied in), so
+  "generate the index once, then `reindex.sh` as usual" works. Incremental
+  `--update` still requires the native binary.
+
 ### Docs
 - Measured comparison vs graphify (by-name) and Serena/clangd (LSP) on a real
   design question — see `COMPARISON.md`.
 - Token-cost comparison vs an LLM's own `grep`-and-read loop (`README.md` §"Why
-  not just grep?"), reproducible with `scripts/measure_tokens.py`: ~20× fewer
+  not just grep?"), reproducible with `scripts/measure_tokens.py`: ~16× fewer
   tokens to answer "who calls this method?", and exact.
 
 ### Project

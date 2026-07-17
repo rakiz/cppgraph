@@ -55,7 +55,8 @@ deterministic; the scripts fail loudly with actionable messages.
    - `CMakeLists.txt` → re-configure with `-DCMAKE_EXPORT_COMPILE_COMMANDS=ON`
      (the compdb lands in the build dir; symlink/copy it to the project root);
    - `WORKSPACE`/`BUILD` (Bazel) → the `hedron_compile_commands` rule
-     (`bazel run @hedron_compile_commands//:refresh_all`);
+     (`bazel run @hedron_compile_commands//:refresh_all`), or the project's own
+     target if it ships one (e.g. MongoDB: `bazel build //:compiledb`);
    - `Makefile`/other → `bear -- <their build command>`.
 
    See [AGENTS.md](AGENTS.md) → "The compilation database" for details. Also ask

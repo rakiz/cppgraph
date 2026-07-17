@@ -95,10 +95,11 @@ SCIP_CLANG="$REPO_ROOT/scratch/bin/scip-clang"
 VENV_PY="$REPO_ROOT/.venv/bin/python"
 CPPGRAPH="$REPO_ROOT/.venv/bin/cppgraph"
 
-if [[ ! -x "$SCIP_CLANG" ]]; then
-  echo "error: $SCIP_CLANG not found/executable. Run scripts/setup.sh (or see INSTALL.md)." >&2
-  exit 1
-fi
+# A native scip-clang isn't available on every platform (no arm64-linux binary,
+# no Windows). We don't hard-fail on its absence: a full build can instead reuse
+# a .scip produced elsewhere (scripts/index-in-container.sh, or copied in). Only
+# incremental --update genuinely needs the binary (it indexes changed TUs).
+if [[ -x "$SCIP_CLANG" ]]; then HAVE_SCIP_CLANG=1; else HAVE_SCIP_CLANG=0; fi
 
 # Per-project outputs (graph.db, .scip, filtered compdb) live in the target
 # project's own .cppgraph/ — next to the code they describe, like .vscode/, and
@@ -158,6 +159,12 @@ if [[ "${1:-}" == "--update" ]]; then
   GRAPH_DB="$1"
   COMPDB="$2"
   SRC_FILTER="${3:-}"
+  if [[ "$HAVE_SCIP_CLANG" != 1 ]]; then
+    echo "error: incremental --update needs a native scip-clang, which isn't" >&2
+    echo "available on this platform. Do a full re-index instead (it can reuse a" >&2
+    echo ".scip from scripts/index-in-container.sh), or run --update on an x86_64 host." >&2
+    exit 1
+  fi
   if [[ ! -f "$GRAPH_DB" ]]; then
     echo "error: graph store not found: $GRAPH_DB (run a full build first)." >&2
     exit 1
@@ -335,9 +342,27 @@ if SRC_COMMIT="$(git -C "$PROJECT_ROOT" rev-parse HEAD 2>/dev/null)"; then
   echo "  source commit: $SRC_COMMIT"
 fi
 
-echo "[2/3] Running scip-clang ..."
-print_estimate "$OUT_COMPDB"
-run_scip_clang "$PROJECT_ROOT" "$OUT_COMPDB" "$OUT_SCIP"
+if [[ "$HAVE_SCIP_CLANG" == 1 ]]; then
+  echo "[2/3] Running scip-clang ..."
+  print_estimate "$OUT_COMPDB"
+  run_scip_clang "$PROJECT_ROOT" "$OUT_COMPDB" "$OUT_SCIP"
+elif [[ -f "$OUT_SCIP" ]]; then
+  echo "[2/3] No native scip-clang here — reusing the existing index:"
+  echo "      $OUT_SCIP"
+  echo "      (delete it to force a fresh one; regenerate via scripts/index-in-container.sh)"
+else
+  cat >&2 <<EOF
+[2/3] No native scip-clang on this platform, and no prebuilt index at:
+        $OUT_SCIP
+Two ways forward:
+  1. Generate it here, then re-run this exact command (it will pick the index up):
+       scripts/index-in-container.sh "$COMPDB" "$SRC_FILTER" "$OUT_NAME" "$PROJECT_ROOT"
+  2. Already have a .scip (e.g. built on another machine for this same checkout)?
+     Skip re-indexing and build the graph straight from it:
+       "$CPPGRAPH" build --scip <that>.scip --out "$OUT_GRAPH"
+EOF
+  exit 1
+fi
 
 echo "[3/3] Building the cppgraph graph ..."
 "$CPPGRAPH" build --scip "$OUT_SCIP" --out "$OUT_GRAPH" \

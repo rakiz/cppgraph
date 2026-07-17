@@ -67,7 +67,9 @@ one however the target supports:
 - CMake: configure with `-DCMAKE_EXPORT_COMPILE_COMMANDS=ON` → written to the
   build dir; symlink/copy it to the project root for tools that expect it there.
 - Bazel: the `hedron_compile_commands` rule (`bazel run
-  @hedron_compile_commands//:refresh_all`).
+  @hedron_compile_commands//:refresh_all`), or the project's own target if it
+  ships one (e.g. MongoDB has a bespoke `--config=compiledb` → `bazel build
+  //:compiledb`; check the repo's `.bazelrc`/`BUILD.bazel`).
 - Make / other: `bear -- <build command>` wraps the build and records it.
 - Multiple fragmented DBs: merge with `compdb`.
 
