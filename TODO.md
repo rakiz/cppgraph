@@ -3,21 +3,13 @@
 Only open items live here. Completed work is in `CHANGELOG.md`; design detail in
 `DESIGN.md`.
 
-## Align CLI query filters with the MCP tools
-
-The MCP tools carry filtering/budget options the CLI equivalents lack: `who_calls`
-/ `what_it_calls` take `limit`, `exclude_tests`, `full_symbols` (and
-`what_it_calls` also `hide_trivial`), while `cppgraph callers` / `callees` print
-every edge with none of these. Same gap on `impact` (`exclude_tests`) and the
-type notices.
-
-To close it: add the matching flags (`--limit`, `--exclude-tests`,
-`--hide-trivial`, `--full-symbols`) to the CLI query commands, reusing the pure
-functions the MCP layer already calls so behaviour stays identical across both
-surfaces.
-
 ## Packaging / open-source
 
+- **Release blocker (0.1.0): re-measure the token numbers.** `README.md` and
+  `COMPARISON.md` quote token counts that predate `DEFAULT_LIMIT = 40`
+  (`mcp_server.py:56`). Re-run the measurement on the mongo graph (workstation)
+  and update both docs before tagging, so the published figures match what the
+  tool actually emits.
 - Contributing notes, CI (lint + pytest), publish.
 - **Cut the actual releases.** The plumbing is in place — `scripts/setup.sh`
   installs by tag (`--version`/`--nightly`/`--branch`), `current_version` derives

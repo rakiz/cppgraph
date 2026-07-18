@@ -48,8 +48,26 @@ def test_callers_lists_caller_with_location(
     )
     out = capsys.readouterr().out
     assert exit_code == 0
+    # By default the CLI prints readable labels (like the MCP tools): the caller
+    # row shows the stripped label, not the raw `cxx . . $ …` SCIP string.
+    assert "  mongo/Foo#caller(a2).  (foo.cpp:10)" in out
+
+
+def test_callers_full_symbols_prints_raw_scip(
+    graph_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    exit_code = main(
+        [
+            "callers",
+            "--graph",
+            str(graph_path),
+            "--full-symbols",
+            "cxx . . $ mongo/Foo#makeResumeToken(a1).",
+        ]
+    )
+    out = capsys.readouterr().out
+    assert exit_code == 0
     assert "cxx . . $ mongo/Foo#caller(a2)." in out
-    assert "foo.cpp:10" in out  # stored 0-indexed line 9 -> displayed as 1-indexed 10
 
 
 def test_callees_lists_callee(graph_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -62,6 +80,94 @@ def test_callees_lists_callee(graph_path: Path, capsys: pytest.CaptureFixture[st
 def test_callers_unknown_symbol_errors(graph_path: Path) -> None:
     with pytest.raises(SystemExit):
         main(["callers", "--graph", str(graph_path), "nonexistent"])
+
+
+@pytest.fixture
+def filter_graph(tmp_path: Path) -> Path:
+    """`hub` is called by one real caller and one test caller; it calls a domain
+    function and a trivial helper (`uassert`). Enough to exercise every filter."""
+    graph = Graph()
+    graph.add_edge(
+        "calls",
+        "cxx . . $ mongo/Foo#caller(a1).",
+        "cxx . . $ mongo/Foo#hub(h1).",
+        file="foo.cpp",
+        line=1,
+    )
+    graph.add_edge(
+        "calls",
+        "cxx . . $ mongo/Foo#TestBody(t1).",
+        "cxx . . $ mongo/Foo#hub(h1).",
+        file="foo_test.cpp",
+        line=2,
+    )
+    graph.add_edge(
+        "calls",
+        "cxx . . $ mongo/Foo#hub(h1).",
+        "cxx . . $ mongo/Foo#domain(d1).",
+        file="foo.cpp",
+        line=3,
+    )
+    graph.add_edge(
+        "calls",
+        "cxx . . $ mongo/Foo#hub(h1).",
+        "cxx . . $ mongo/Foo#uassert(u1).",
+        file="foo.cpp",
+        line=4,
+    )
+    # Definition sites: needed so exclude-tests can resolve the far endpoint's file.
+    graph.add_node("cxx . . $ mongo/Foo#caller(a1).").file = "foo.cpp"
+    graph.add_node("cxx . . $ mongo/Foo#TestBody(t1).").file = "foo_test.cpp"
+    graph.add_node("cxx . . $ mongo/Foo#domain(d1).").file = "foo.cpp"
+    graph.add_node("cxx . . $ mongo/Foo#uassert(u1).").file = "foo.cpp"
+    path = tmp_path / "f.db"
+    write_sqlite(graph, path)
+    return path
+
+
+def test_callers_excludes_tests_by_default(
+    filter_graph: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    out = _callers(filter_graph, capsys)
+    assert "1 caller(s)" in out and "excluding tests" in out
+    assert "caller(a1)." in out
+    assert "TestBody" not in out
+
+
+def test_callers_no_exclude_tests_keeps_them(
+    filter_graph: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    out = _callers(filter_graph, capsys, "--no-exclude-tests")
+    assert "2 caller(s)" in out
+    assert "TestBody(t1)." in out
+
+
+def test_callees_hide_trivial_drops_helpers(
+    filter_graph: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    exit_code = main(
+        ["callees", "--graph", str(filter_graph), "--hide-trivial", "cxx . . $ mongo/Foo#hub(h1)."]
+    )
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "domain(d1)." in out
+    assert "uassert" not in out
+    assert "1 trivial callee(s) hidden" in out
+
+
+def test_callers_limit_caps_and_reports_remainder(
+    filter_graph: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    out = _callers(filter_graph, capsys, "--no-exclude-tests", "--limit", "1")
+    assert "2 caller(s)" in out  # true total still reported
+    assert "and 1 more" in out
+
+
+def _callers(graph: Path, capsys: pytest.CaptureFixture[str], *extra: str) -> str:
+    exit_code = main(["callers", "--graph", str(graph), *extra, "cxx . . $ mongo/Foo#hub(h1)."])
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    return out
 
 
 def test_path_reports_call_chain(graph_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -555,7 +661,7 @@ def test_callers_resolves_plain_name(graph_path: Path, capsys: pytest.CaptureFix
     exit_code = main(["callers", "--graph", str(graph_path), "makeResumeToken"])
     out = capsys.readouterr().out
     assert exit_code == 0
-    assert "cxx . . $ mongo/Foo#caller(a2)." in out
+    assert "mongo/Foo#caller(a2)." in out
 
 
 def test_callers_ambiguous_name_errors(tmp_path: Path) -> None:
@@ -600,7 +706,7 @@ def test_graph_auto_discovered_from_cwd(
     exit_code = main(["callers", "makeResumeToken"])
     out = capsys.readouterr().out
     assert exit_code == 0
-    assert "cxx . . $ mongo/Foo#caller(a2)." in out
+    assert "mongo/Foo#caller(a2)." in out
 
 
 def test_no_graph_and_none_discovered_errors(

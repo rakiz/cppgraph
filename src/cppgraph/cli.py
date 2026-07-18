@@ -9,6 +9,7 @@ from pathlib import Path
 
 from cppgraph.builder import build_graph
 from cppgraph.export import is_test_file, to_file_usage_graph, to_graphify_graph
+from cppgraph.filters import drop_test_edges, is_trivial_callee, short_label
 from cppgraph.model import Edge, Node
 from cppgraph.proto import scip_pb2
 from cppgraph.store import (
@@ -43,9 +44,12 @@ SOURCE_EXTS = (
 )
 
 
-def _print_node(node: Node) -> None:
+def _print_node(node: Node, *, full_symbols: bool = True) -> None:
     loc = f"{node.file}:{node.line + 1}" if node.file is not None and node.line is not None else "?"
-    print(f"  {node.symbol}  ({node.display_name or '?'} @ {loc})")
+    if full_symbols:
+        print(f"  {node.symbol}  ({node.display_name or '?'} @ {loc})")
+    else:
+        print(f"  {node.display_name or short_label(node.symbol)}  ({loc})")
 
 
 def read_source_snippet(
@@ -67,9 +71,42 @@ def read_source_snippet(
     return [(i, lines[i]) for i in range(start, end)]
 
 
-def _print_edge(edge: Edge, *, other: str) -> None:
+def _print_edge(edge: Edge, *, other: str, full_symbols: bool = True) -> None:
     line = edge.line + 1 if edge.line is not None else "?"
-    print(f"  {other}  ({edge.file}:{line})")
+    label = other if full_symbols else short_label(other)
+    print(f"  {label}  ({edge.file}:{line})")
+
+
+def _add_query_filters(parser: argparse.ArgumentParser, *, hide_trivial: bool = False) -> None:
+    """Attach the shared filter/budget flags so the CLI query commands match the
+    MCP tools (`who_calls`/`what_it_calls`/`impact_of`): a result cap, test-edge
+    exclusion (on by default), full-SCIP rendering, and — for `callees` — trivial
+    callee hiding. Same primitives (`cppgraph.filters`) drive both surfaces, so a
+    given flag combination gives the same answer either way."""
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="cap the number of rows shown (default: all); the true total is always printed",
+    )
+    parser.add_argument(
+        "--exclude-tests",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="drop edges/symbols defined in test files "
+        "(default: on; --no-exclude-tests keeps them)",
+    )
+    parser.add_argument(
+        "--full-symbols",
+        action="store_true",
+        help="print the raw SCIP symbol strings instead of readable labels",
+    )
+    if hide_trivial:
+        parser.add_argument(
+            "--hide-trivial",
+            action="store_true",
+            help="hide ubiquitous helpers (operators, *assert, makeStatus, …)",
+        )
 
 
 def _resolve_graph(args: argparse.Namespace, parser: argparse.ArgumentParser) -> str:
@@ -264,6 +301,7 @@ def main(argv: list[str] | None = None) -> int:
         "symbol",
         help="a symbol name (resolved via `find`) or an exact SCIP string",
     )
+    _add_query_filters(p_callers)
 
     p_callees = sub.add_parser("callees", help="list callees of a symbol")
     p_callees.add_argument(
@@ -276,6 +314,7 @@ def main(argv: list[str] | None = None) -> int:
         "symbol",
         help="a symbol name (resolved via `find`) or an exact SCIP string",
     )
+    _add_query_filters(p_callees, hide_trivial=True)
 
     p_bases = sub.add_parser("bases", help="direct base classes a type inherits from")
     p_bases.add_argument(
@@ -371,6 +410,7 @@ def main(argv: list[str] | None = None) -> int:
         help="edge kind to walk: 'calls' = call blast-radius (default); "
         "'inherits' = all transitive subclasses of a base type",
     )
+    _add_query_filters(p_impact)
 
     p_status = sub.add_parser(
         "status",
@@ -581,18 +621,39 @@ def main(argv: list[str] | None = None) -> int:
         store = GraphStore(_resolve_graph(args, parser))
         args.symbol = _resolve_symbol(store, args.symbol, parser)
         edges = store.callers_of(args.symbol)
-        print(f"[cppgraph] {len(edges)} caller(s) of {args.symbol}")
-        for edge in edges:
-            _print_edge(edge, other=edge.src)
+        if args.exclude_tests:
+            edges = drop_test_edges(store, edges, on="src")
+        tests_note = " (excluding tests)" if args.exclude_tests else ""
+        print(f"[cppgraph] {len(edges)} caller(s) of {args.symbol}{tests_note}")
+        shown = edges[: args.limit] if args.limit is not None else edges
+        for edge in shown:
+            _print_edge(edge, other=edge.src, full_symbols=args.full_symbols)
+        if len(shown) < len(edges):
+            print(f"  ... and {len(edges) - len(shown)} more (raise --limit to see them)")
         return 0
 
     if args.command == "callees":
         store = GraphStore(_resolve_graph(args, parser))
         args.symbol = _resolve_symbol(store, args.symbol, parser)
         edges = store.callees_of(args.symbol)
-        print(f"[cppgraph] {len(edges)} callee(s) of {args.symbol}")
-        for edge in edges:
-            _print_edge(edge, other=edge.dst)
+        if args.exclude_tests:
+            edges = drop_test_edges(store, edges, on="dst")
+        trivial_hidden = 0
+        if args.hide_trivial:
+            kept = [e for e in edges if not is_trivial_callee(e.dst)]
+            trivial_hidden = len(edges) - len(kept)
+            edges = kept
+        tests_note = " (excluding tests)" if args.exclude_tests else ""
+        print(f"[cppgraph] {len(edges)} callee(s) of {args.symbol}{tests_note}")
+        shown = edges[: args.limit] if args.limit is not None else edges
+        for edge in shown:
+            _print_edge(edge, other=edge.dst, full_symbols=args.full_symbols)
+        if len(shown) < len(edges):
+            print(f"  ... and {len(edges) - len(shown)} more (raise --limit to see them)")
+        if trivial_hidden:
+            print(
+                f"  ({trivial_hidden} trivial callee(s) hidden — drop --hide-trivial to see them)"
+            )
         return 0
 
     if args.command == "bases":
@@ -668,13 +729,19 @@ def main(argv: list[str] | None = None) -> int:
                 "or `impact --kind inherits` for the subclass tree."
             )
             return 0
-        affected = store.impact(args.symbol, max_depth=args.depth, kind=args.kind)
+        affected = sorted(store.impact(args.symbol, max_depth=args.depth, kind=args.kind))
+        nodes = [(sym, store.get_node(sym)) for sym in affected]
+        if args.exclude_tests:
+            nodes = [(sym, n) for sym, n in nodes if n is None or not is_test_file(n.file)]
         verb = "transitively call" if args.kind == "calls" else "transitively inherit from"
-        print(f"[cppgraph] {len(affected)} symbol(s) {verb} {args.symbol}")
-        for symbol in affected:
-            node = store.get_node(symbol)
+        tests_note = " (excluding tests)" if args.exclude_tests else ""
+        print(f"[cppgraph] {len(nodes)} symbol(s) {verb} {args.symbol}{tests_note}")
+        shown = nodes[: args.limit] if args.limit is not None else nodes
+        for _sym, node in shown:
             if node is not None:
-                _print_node(node)
+                _print_node(node, full_symbols=args.full_symbols)
+        if len(shown) < len(nodes):
+            print(f"  ... and {len(nodes) - len(shown)} more (raise --limit to see them)")
         return 0
 
     if args.command == "status":

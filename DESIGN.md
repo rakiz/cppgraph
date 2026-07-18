@@ -284,12 +284,17 @@ designing the builder so this isn't a later rewrite:
     coordinates suffice and cost far fewer tokens than pasted source.
   - *Compact identity*: the raw SCIP string is 150-250 chars of machine noise per
     hit. `scip-clang` leaves `SymbolInformation.display_name` empty (0% on the
-    MongoDB index), so `_short_label` derives a readable name *from the SCIP
-    string* (strips the scheme prefix, anonymous-namespace file path, overload
-    hash, back-ticks) — still a substring `find` can re-resolve. Fan-out tools
-    emit that label by default and the raw string only with `full_symbols=True`.
-    Test callers/uses are dropped by default (`exclude_tests`, filtered on the
-    far-end node's definition file, catching `~..._Test` teardown sites too).
+    MongoDB index), so `cppgraph.filters.short_label` derives a readable name
+    *from the SCIP string* (strips the scheme prefix, anonymous-namespace file
+    path, overload hash, back-ticks) — still a substring `find` can re-resolve.
+    Fan-out tools emit that label by default and the raw string only with
+    `full_symbols=True`. Test callers/uses are dropped by default
+    (`exclude_tests`, filtered on the far-end node's definition file, catching
+    `~..._Test` teardown sites too). These filter primitives live in
+    `cppgraph.filters` and drive **both** surfaces — the MCP tools and the CLI
+    query commands (`callers`/`callees`/`impact`, with `--limit`,
+    `--exclude-tests`/`--no-exclude-tests`, `--hide-trivial`, `--full-symbols`) —
+    so the same question gives the same answer whichever way it's asked.
     Measured effect on `who_calls` for a hub symbol: ~5.5× smaller payload
     (`scripts/measure_tokens.py`).
   - *Query quality*: `find` matches multiple words as an order-free AND (each
