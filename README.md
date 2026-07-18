@@ -20,31 +20,50 @@ If someone pointed you (an AI coding agent) here with *"install this tool:
 https://github.com/rakiz/cppgraph"*, follow these steps exactly. They are
 deterministic; the scripts fail loudly with actionable messages.
 
-> **RULE — heavy steps need explicit sign-off (do not skip).** Generating a
-> `compile_commands.json` (step 3) and building the graph (step 4) are the only
-> expensive steps; they use significant CPU. **Give a realistic estimate — do
-> not overstate.** Indexing is usually **minutes to tens of minutes** (reference
-> on ~14 cores: ~2.5 min for ~500 translation units, ~20 min for ~6000; a few
-> minutes per 1000 TUs, proportionally longer on fewer cores). Gauge it by
-> counting entries in `compile_commands.json` (≈ one per TU). `reindex.sh` also
-> prints an exact estimate for the machine right before it starts indexing.
+> **RULE — heavy steps need explicit sign-off (do not skip).** The expensive
+> steps that use significant CPU are: generating a `compile_commands.json`
+> (step 3), **building the graph / indexing (step 4)**, and — only on the build
+> path — **compiling scip-clang from source** (step 2 with `--scip-source build`,
+> PR #504, ~30–60 min). **Give a realistic estimate — do not overstate, and do
+> not mislabel which step is the long one.**
 >
-> Before running either heavy step, in **one message** you **MUST**:
+> - **Indexing (step 4)** is the routine heavy step and usually the **longest**
+>   for a real codebase: **minutes to tens of minutes** (reference on ~14 cores:
+>   ~2.5 min for ~500 translation units, ~20 min for ~6000; a few minutes per
+>   1000 TUs, proportionally longer on fewer cores). Gauge it by counting entries
+>   in `compile_commands.json` (≈ one per TU); `reindex.sh` prints an exact
+>   estimate for the machine right before it starts.
+> - **The scip-clang binary (step 2)** is **light when downloaded** (a prebuilt
+>   binary, seconds) — the default on macOS arm64 / Linux x86_64. It is heavy
+>   **only** when compiled from source (`--scip-source build`, ~30–60 min), which
+>   is opt-in (ARM-Linux, or anyone wanting #504). Don't call the binary "the
+>   heavy step" on the download path.
+>
+> Before running any heavy step, in **one message** you **MUST**:
 > 1. say what it does and a realistic time estimate (per above);
 > 2. show the **exact command, verbatim** (so they can run it themselves);
 > 3. ask the user to pick: **"I run it for you"** or **"you run it yourself"**.
 >
 > Then stop and wait — do not start until they choose, and never launch it in
 > the background. Tip: for a first try, suggest scoping to one subtree (a filter
-> like `src/foo/`) so it finishes in a couple of minutes. The light steps (1, 2,
-> 5, 6) you may run directly.
+> like `src/foo/`) so it finishes in a couple of minutes. Light steps you may run
+> directly: clone + setup **when it downloads scip-clang** (step 2), and steps 5
+> and 6.
 
-1. **Check the platform.** Local indexing needs **macOS arm64** or **Linux
-   x86_64**. On **ARM-Linux (aarch64)**, indexing runs via an x86_64 container
-   (Docker/Podman + amd64 emulation) — see [INSTALL.md](INSTALL.md) "ARM-Linux /
-   Windows: index via a container". On **Windows**, do everything inside **WSL2
-   (Ubuntu)**. On an **Intel Mac** indexing is not supported — stop and tell the
-   user (they can still use a graph built elsewhere).
+1. **Check the platform.** A prebuilt `scip-clang` downloads on **macOS arm64**
+   and **Linux x86_64** (light). On **ARM-Linux (aarch64)** there is no prebuilt
+   binary — two routes, and pick deliberately:
+   - **Compile scip-clang natively once** (`setup.sh --scip-source build`, PR
+     #504, ~30–60 min, Docker) → then index **natively**, at normal speed. This
+     is the recommended real workflow (also unlocks symbol-granularity usage).
+   - **Emulated x86_64 container** (Docker/Podman + amd64 emulation): no build,
+     but indexing runs *emulated* and is **much slower** (can be hours on a large
+     codebase) — fine only for a quick try or a small subtree. See
+     [INSTALL.md](INSTALL.md) "ARM-Linux / Windows: index via a container".
+
+   On **Windows**, do everything inside **WSL2 (Ubuntu)**. On an **Intel Mac**
+   indexing is not supported — stop and tell the user (they can still use a graph
+   built elsewhere).
 2. **Clone and set up** (needs [`uv`](https://docs.astral.sh/uv/) and `curl`).
    Clone into the per-machine tool dir — the same `~/.local/share/cppgraph/`
    where `setup.sh` installs the `scip-clang` binary — so the whole tool lives in
