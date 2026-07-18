@@ -95,12 +95,22 @@ command -v uv   >/dev/null || { echo "uv not found — install: https://docs.ast
 command -v curl >/dev/null || { echo "curl not found — please install it." >&2; exit 1; }
 
 echo "==> Python venv + dependencies (.venv)"
-if [ -d .venv ]; then
+# `uv pip install` picks its target venv in this order: --python, then an active
+# $VIRTUAL_ENV, then ./.venv. So a venv from *another* project left active in the
+# shell (e.g. the target repo's) would capture the install — cppgraph would land
+# there, not in our .venv, and .venv/bin/cppgraph would be missing. Pin every uv
+# command to our own venv by absolute path so an inherited VIRTUAL_ENV can't win.
+VENV="$PWD/.venv"
+if [ -n "${VIRTUAL_ENV:-}" ] && [ "$VIRTUAL_ENV" != "$VENV" ]; then
+  echo "  note: a different VIRTUAL_ENV is active ($VIRTUAL_ENV);"
+  echo "        ignoring it — installing into $VENV"
+fi
+if [ -d "$VENV" ]; then
   echo "  reusing existing .venv"
 else
-  uv venv
+  uv venv "$VENV"
 fi
-uv pip install -e ".[dev,mcp]"
+uv pip install --python "$VENV/bin/python" -e ".[dev,mcp]"
 
 # The scip-clang binary is a per-MACHINE artifact (one per arch, shared by the
 # dev checkout and every indexed project). It lives in the persistent user data
