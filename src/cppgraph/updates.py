@@ -185,27 +185,27 @@ def _scip_identity(d: dict[str, Any] | None) -> tuple[str, str] | None:
     return (str(d["version"]).lstrip("v"), str(d.get("variant") or "stock"))
 
 
-def _scip_source_for(variant: str) -> str:
-    """Which `setup.sh --scip-source` produces this variant: the stock release is
-    a download, anything patched must be built."""
-    return "download" if variant == "stock" else "build"
-
-
 def compute_scip_advice(
     pin: dict[str, Any] | None,
     installed: dict[str, Any] | None,
     graph_scip: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    """Pure advice about the scip-clang dependency: is the installed binary the
-    pinned identity, and was *this* graph indexed with it? No I/O — unit-tested."""
-    if not pin:
+    """Pure advice about the scip-clang dependency. No I/O — unit-tested.
+
+    Staleness is judged on **version only**. The *variant* (stock vs
+    `enclosing_range-504`) is deliberately **not** pinned: stock and #504 are two
+    valid capability levels, not a right/wrong pair, and a graph's variant is
+    independent of the locally installed binary (a #504-indexed graph can be
+    copied to a machine that only has the stock binary). So variant is reported
+    for information — never as a "stale, rebuild it" nag. What a *graph* actually
+    carries (file vs symbol granularity) is surfaced separately via
+    `has_attributed_refs` (see the `usage_view` in `status`)."""
+    if not pin or not pin.get("version"):
         return {"checked": False}
-    want = _scip_identity(pin)
-    if want is None:
-        return {"checked": False}
+    want_ver = str(pin["version"]).lstrip("v")
     advice: dict[str, Any] = {
         "checked": True,
-        "pinned": {"version": want[0], "variant": want[1]},
+        "pinned_version": want_ver,
         "rebuild": _rebuild_level(pin),
     }
     have = _scip_identity(installed)
@@ -215,23 +215,26 @@ def compute_scip_advice(
             "scip-clang provenance unknown (installed before it was recorded, or not "
             "installed) — re-run scripts/setup.sh to record it."
         )
-    elif have != want:
-        src = _scip_source_for(want[1])
+    elif have[0] != want_ver:
         advice["binary_status"] = "stale"
         advice["binary_message"] = (
-            f"scip-clang installed is {have[0]}-{have[1]} but the pin is "
-            f"{want[0]}-{want[1]} — update it: scripts/setup.sh --scip-source {src}."
+            f"scip-clang installed is {have[0]} but the pinned version is {want_ver} "
+            "— update it: re-run scripts/setup.sh."
         )
     else:
         advice["binary_status"] = "ok"
+    if have is not None:
+        advice["installed_variant"] = have[1]  # informational
 
     g = _scip_identity(graph_scip)
-    if g is not None and g != want and _rebuild_level(pin) != "none":
-        advice["reindex_recommended"] = True
-        advice["reindex_message"] = (
-            f"this graph was indexed with scip-clang {g[0]}-{g[1]}, but the pin is "
-            f"{want[0]}-{want[1]} — re-index (scripts/reindex.sh) to match."
-        )
+    if g is not None:
+        advice["graph_variant"] = g[1]  # informational
+        if g[0] != want_ver and _rebuild_level(pin) != "none":
+            advice["reindex_recommended"] = True
+            advice["reindex_message"] = (
+                f"this graph was indexed with scip-clang {g[0]}, but the pinned version "
+                f"is {want_ver} — re-index (scripts/reindex.sh) to match."
+            )
     return advice
 
 

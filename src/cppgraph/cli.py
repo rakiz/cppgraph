@@ -896,8 +896,12 @@ def main(argv: list[str] | None = None) -> int:
             {"version": m.get("index_tool_version"), "variant": m.get("index_tool_variant")}
         )
         if scip.get("checked"):
-            pin = scip["pinned"]
-            print(f"  scip-clang pin: {pin['version']}-{pin['variant']}")
+            line = f"  scip-clang:    pinned version {scip['pinned_version']}"
+            if scip.get("installed_variant"):
+                line += f", installed binary {scip['installed_variant']}"
+            if scip.get("graph_variant"):
+                line += f", this graph indexed with {scip['graph_variant']}"
+            print(line)
             if scip.get("binary_status") in ("stale", "unknown"):
                 print(f"    ! {scip['binary_message']}")
             if scip.get("reindex_recommended"):

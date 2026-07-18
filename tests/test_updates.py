@@ -154,33 +154,36 @@ def test_update_advice_fails_soft_when_unreachable(monkeypatch: pytest.MonkeyPat
 
 # ---- scip-clang dependency advice (compute_scip_advice) --------------------
 
-_PIN = {"version": "0.4.0", "variant": "stock", "rebuild": "reindex"}
+# Only VERSION is pinned; the variant (stock vs enclosing_range-504) is reported
+# for information, never treated as stale.
+_PIN = {"version": "0.4.0", "rebuild": "reindex"}
 
 
 def test_scip_advice_no_pin_is_unchecked() -> None:
     assert updates.compute_scip_advice(None, {"version": "0.4.0"}, None)["checked"] is False
+    assert updates.compute_scip_advice({"rebuild": "reindex"}, None, None)["checked"] is False
 
 
-def test_scip_advice_binary_ok_when_matching_pin() -> None:
+def test_scip_advice_binary_ok_when_version_matches() -> None:
     adv = updates.compute_scip_advice(_PIN, {"version": "0.4.0", "variant": "stock"}, None)
     assert adv["binary_status"] == "ok"
-    assert adv["pinned"] == {"version": "0.4.0", "variant": "stock"}
+    assert adv["pinned_version"] == "0.4.0"
 
 
-def test_scip_advice_binary_stale_on_variant_mismatch() -> None:
-    # pin wants a patched build; installed is stock -> stale, suggests building.
-    pin = {"version": "0.4.0", "variant": "enclosing_range-504", "rebuild": "reindex"}
-    adv = updates.compute_scip_advice(pin, {"version": "0.4.0", "variant": "stock"}, None)
-    assert adv["binary_status"] == "stale"
-    assert "--scip-source build" in adv["binary_message"]
-
-
-def test_scip_advice_binary_stale_suggests_download_for_stock_pin() -> None:
+def test_scip_advice_variant_difference_is_not_stale() -> None:
+    # A #504 binary against a version-only pin is fine, not "stale" — variant is
+    # a capability level, not a staleness axis. It's reported for information.
     adv = updates.compute_scip_advice(
-        _PIN, {"version": "0.3.0", "variant": "stock"}, None
+        _PIN, {"version": "0.4.0", "variant": "enclosing_range-504"}, None
     )
+    assert adv["binary_status"] == "ok"
+    assert adv["installed_variant"] == "enclosing_range-504"
+
+
+def test_scip_advice_binary_stale_on_version_mismatch() -> None:
+    adv = updates.compute_scip_advice(_PIN, {"version": "0.3.0", "variant": "stock"}, None)
     assert adv["binary_status"] == "stale"
-    assert "--scip-source download" in adv["binary_message"]
+    assert "0.3.0" in adv["binary_message"] and "0.4.0" in adv["binary_message"]
 
 
 def test_scip_advice_binary_unknown_without_sidecar() -> None:
@@ -188,31 +191,23 @@ def test_scip_advice_binary_unknown_without_sidecar() -> None:
     assert adv["binary_status"] == "unknown"
 
 
-def test_scip_advice_reindex_when_graph_variant_differs() -> None:
-    pin = {"version": "0.4.0", "variant": "enclosing_range-504", "rebuild": "reindex"}
-    graph = {"version": "0.4.0", "variant": "stock"}
-    installed = {"version": "0.4.0", "variant": "enclosing_range-504"}
-    adv = updates.compute_scip_advice(pin, installed, graph)
+def test_scip_advice_reindex_on_graph_version_mismatch() -> None:
+    graph = {"version": "0.3.0", "variant": "stock"}
+    adv = updates.compute_scip_advice(_PIN, {"version": "0.4.0"}, graph)
     assert adv.get("reindex_recommended") is True
     assert "re-index" in adv["reindex_message"]
 
 
-def test_scip_advice_no_reindex_when_graph_matches_pin() -> None:
-    graph = {"version": "0.4.0", "variant": "stock"}
+def test_scip_advice_no_reindex_on_variant_only_difference() -> None:
+    # Same version, different variant -> NOT a reindex trigger; just reported.
+    graph = {"version": "0.4.0", "variant": "enclosing_range-504"}
     adv = updates.compute_scip_advice(_PIN, {"version": "0.4.0", "variant": "stock"}, graph)
     assert "reindex_recommended" not in adv
+    assert adv["graph_variant"] == "enclosing_range-504"
 
 
 def test_scip_advice_no_reindex_when_rebuild_none() -> None:
-    # even a variant difference doesn't force a reindex if the pin says rebuild=none.
-    pin = {"version": "0.4.0", "variant": "stock", "rebuild": "none"}
+    pin = {"version": "0.4.0", "rebuild": "none"}
     graph = {"version": "0.3.0", "variant": "stock"}
-    adv = updates.compute_scip_advice(pin, {"version": "0.4.0", "variant": "stock"}, graph)
-    assert "reindex_recommended" not in adv
-
-
-def test_scip_advice_defaults_missing_variant_to_stock() -> None:
-    # a graph/sidecar without a variant field is treated as stock.
-    adv = updates.compute_scip_advice(_PIN, {"version": "0.4.0"}, {"version": "0.4.0"})
-    assert adv["binary_status"] == "ok"
+    adv = updates.compute_scip_advice(pin, {"version": "0.4.0"}, graph)
     assert "reindex_recommended" not in adv

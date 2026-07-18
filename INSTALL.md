@@ -94,15 +94,17 @@ a prebuilt binary exists, else `emulate` — and never starts a long build
 unattended. (A `build` on macOS is rejected: the container emits a *Linux*
 binary, unusable on the host.)
 
-**Pinned version + staleness.** The scip-clang identity is `(version, variant)`
-— `stock` vs a patched build like `enclosing_range-504` — pinned in
-`versions.json` (`scip_clang`). `setup.sh` reads the version from there and writes
-a provenance sidecar (`scip-clang.json`) next to the binary recording what it
-installed. `cppgraph status` compares that sidecar, and each graph's recorded
-indexer, against the pin: it flags **"update the binary"** (with the exact
-`--scip-source` command) and **"re-index"** when the pin has moved on. So to
-switch the whole project to (or off) PR #504, bump `variant` in `versions.json` —
-`status` then tells everyone what to re-run.
+**Pinned version + staleness.** scip-clang is pinned by **version only** in
+`versions.json` (`scip_clang`). `setup.sh` reads it and writes a provenance
+sidecar (`scip-clang.json`) next to the binary recording what it installed —
+including the **variant** (`stock` vs a patched build like `enclosing_range-504`
+from PR #504). `cppgraph status` flags **"update the binary"** / **"re-index"**
+only on a *version* change. The **variant is not pinned**: `stock` and `#504` are
+two valid capability levels, and a graph's variant is independent of the local
+binary (a #504-indexed store can be copied to a stock-only machine), so `status`
+reports the variant for information rather than nagging. Whether a given graph has
+the richer symbol-granularity attribution is shown by its `usage_view`, not by a
+variant match — get it with a #504 index + `--attributed-refs`, or `enrich-refs`.
 
 Normally you don't do this by hand — `scripts/setup.sh` downloads the right
 asset with `curl` into that data dir. To fetch it manually (only `curl` needed,
