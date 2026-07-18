@@ -38,6 +38,12 @@ when you want to measure at scale; keep such paths out of the shipped code.)
   tool. Regenerating after a `scip.proto` change runs a pinned `protoc` in a
   container (`docker/gen-bindings/`), never on the host. See
   `src/cppgraph/proto/README.md` / `INSTALL.md` for exact steps.
+  **Invariant:** keep the vendored `scip.proto` a *superset* of what any
+  supported scip-clang emits, and read every optional field as optional — an
+  absent `repeated` field is an empty list, i.e. "feature not present", never an
+  error (a stock binary and a #504 build must both index without crashing).
+  Regenerate the binding only to start reading a *new* field, never to avoid a
+  crash.
 - Tests with `pytest` under `tests/`. Prefer small fixtures (a tiny checked-in
   or synthetic `.scip`) over depending on a full external index.
 - CLI entry: `cppgraph` (see `src/cppgraph/cli.py`); MCP server `cppgraph-mcp`.

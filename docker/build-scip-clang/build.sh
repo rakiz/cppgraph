@@ -14,6 +14,34 @@ cd "$(dirname "$0")"
 OUT_DIR="${1:-${CPPGRAPH_BIN_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/cppgraph/bin}}"
 mkdir -p "$OUT_DIR"
 
+# Disk preflight. The build compiles LLVM/Clang from source, so Docker's storage
+# filesystem needs ~30-40 GB free; a small root partition is the common failure
+# (dies late with no binary). Advisory only — Docker layer reuse/pruning changes
+# the real need — so warn early rather than hard-fail. Override the threshold or
+# skip entirely with CPPGRAPH_MIN_BUILD_GB=0.
+MIN_GB="${CPPGRAPH_MIN_BUILD_GB:-35}"
+if [ "$MIN_GB" -gt 0 ] 2>/dev/null; then
+  docker_root="$(docker info --format '{{.DockerRootDir}}' 2>/dev/null || true)"
+  check_path="${docker_root:-/var/lib/docker}"
+  [ -d "$check_path" ] || check_path="/"
+  avail_gb="$(df -Pk "$check_path" 2>/dev/null | awk 'NR==2 {printf "%d", $4/1024/1024}')"
+  if [ -n "${avail_gb:-}" ] && [ "$avail_gb" -lt "$MIN_GB" ]; then
+    echo "WARNING: only ${avail_gb} GB free on Docker's storage ($check_path)." >&2
+    echo "         This build needs ~${MIN_GB} GB and may fail late with no binary." >&2
+    echo "         Fixes: free space; point Docker's data-root at a larger partition;" >&2
+    echo "         or use the emulated indexer (setup.sh --scip-source emulate)." >&2
+    if [ -t 0 ]; then
+      read -r -p "         Continue anyway? [y/N] " _ans
+      case "${_ans:-}" in
+        y | Y | yes | YES) ;;
+        *) echo "Aborted — free up disk or use --scip-source emulate." >&2; exit 1 ;;
+      esac
+    else
+      echo "         (non-interactive: continuing anyway)" >&2
+    fi
+  fi
+fi
+
 echo "==> Building scip-clang natively for host arch: $(uname -m)"
 echo "    (compiles LLVM-based code from source; expect ~30-60 min)"
 

@@ -23,10 +23,19 @@ that lacks a prebuilt binary builds its own once.
 ./build.sh [output_dir]        # default output_dir: ./out
 ```
 
-The build compiles LLVM-based code from source — CPU/RAM-heavy (Bazel; tune
-`BAZEL_JVM_HEAP` build-arg down on small hosts). `build.sh` uses
+The build compiles LLVM/Clang from source — **CPU-, RAM- *and* disk-heavy**
+(Bazel; tune `BAZEL_JVM_HEAP` build-arg down on small hosts). `build.sh` uses
 `docker build --output` to drop just the binary on the host (the build image is
 discarded).
+
+**Disk.** Budget **~30–40 GB free** on whatever filesystem backs the Docker
+builder (LLVM/Clang sources + Bazel's build tree are large). A common failure is
+a small root partition — the build dies with a disk-full error and produces no
+binary. If `/` is tight, point Docker's data-root at a roomier partition (Docker
+`data-root` / rootless `~/.local/share/docker`, or move `/var/lib/docker`), or
+fall back to the emulated x86 container (`setup.sh --scip-source emulate`), which
+needs almost no disk. This build is one-time per machine, so the space is
+reclaimed once it's done (the image is discarded).
 
 **Timing.** Measured **~32 min cold** (Docker cache purged first) on an AWS
 Graviton `m6g.2xlarge` (Neoverse-N1, 8 vCPU, 30 GiB, ARM64). Where it goes:
@@ -73,9 +82,18 @@ cleaner:
 - `build.sh` — host-side driver (self-contained: its own dir is the build
   context).
 - `enclosing_range-on-v0.4.0.patch` — the #504 change **rebased onto the
-  `v0.4.0` tag**, so it applies cleanly. The Dockerfile still fails fast as a
-  guard (`git apply --verbose`, then `grep -q enclosingRange indexer/Indexer.cc`);
-  if a future tag bump breaks it, rebase the PR again and replace this file.
+  `v0.4.0` tag**, so it applies cleanly, **plus a hardening fix over the raw PR**:
+  the PR passes the enclosing range to `FileLocalSourceRange::fromNonEmpty`
+  without checking both endpoints are in the same file, so a range that spans a
+  macro expansion / `#include` boundary trips that function's `ENFORCE`
+  (`getFileID(end) == getFileID(start)`) and **crashes the worker**. On a large
+  codebase (e.g. MongoDB) this fires on a big fraction of TUs, and the dead
+  workers hang the whole index. Our patch adds a same-file guard before the call,
+  so such a range is simply skipped (no `enclosing_range` emitted for that
+  occurrence — graceful, since the reader treats it as optional). The Dockerfile
+  fails fast as a guard (`git apply --verbose`, then `grep -q enclosingRange
+  indexer/Indexer.cc`); if a future tag bump breaks it, rebase and re-apply the
+  same-file guard.
 
 ## Pins
 

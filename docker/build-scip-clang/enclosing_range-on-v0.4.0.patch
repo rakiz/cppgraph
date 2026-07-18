@@ -177,7 +177,7 @@ index 79560fb..1bbae9a 100644
      if (optSymbolInfo.has_value()) {
        doc.symbolInfos.emplace(symbol, std::move(optSymbolInfo.value()));
      }
-@@ -1214,19 +1226,44 @@ void TuIndexer::saveExternalSymbol(SymbolNameRef symbol,
+@@ -1214,19 +1226,46 @@ void TuIndexer::saveExternalSymbol(SymbolNameRef symbol,
  
  PartialDocument &TuIndexer::saveOccurrence(SymbolNameRef symbol,
                                             clang::SourceLocation expansionLoc,
@@ -187,13 +187,15 @@ index 79560fb..1bbae9a 100644
    auto [range, fileId] = this->getTokenExpansionRange(expansionLoc);
 -  return this->saveOccurrenceImpl(symbol, range, fileId, allRoles);
 +  FileLocalSourceRange enclosingLocalRange{};
-+  // Check if range is valid, non-empty, and not inverted before calling
-+  // fromNonEmpty fromNonEmpty enforces: start.isValid() && end.isValid() &&
-+  // start <= end
++  // Only pass the enclosing range to fromNonEmpty when it is valid, non-empty,
++  // not inverted, AND single-file: fromNonEmpty ENFORCEs getFileID(end) ==
++  // getFileID(start), so a cross-file range (macro / #include) would crash it.
 +  auto begin = enclosingRange.getBegin();
 +  auto end = enclosingRange.getEnd();
 +  if (enclosingRange.isValid() && begin.isValid() && end.isValid()
-+      && begin != end && begin < end) {
++      && begin != end && begin < end
++      && this->sourceManager.getFileID(begin)
++             == this->sourceManager.getFileID(end)) {
 +    auto [localRange, enclosingFileId] =
 +        FileLocalSourceRange::fromNonEmpty(this->sourceManager, enclosingRange);
 +    if (enclosingFileId == fileId) {

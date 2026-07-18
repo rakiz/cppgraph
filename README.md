@@ -100,9 +100,14 @@ for its heavy steps.
    have one, it must be generated — and generating it may run a **full build**
    (long/heavy). Apply the RULE above: propose the right command, get the OK, or
    let them run it. How to produce one per build system (CMake / Bazel / Make):
-   [AGENTS.md](AGENTS.md) → "The compilation database". Also ask for the project's
-   **source root** and, optionally, a **subtree filter** to skip vendored code
-   (e.g. `src/`).
+   [AGENTS.md](AGENTS.md) → "The compilation database".
+   **The indexing scope is the user's call, not yours — ask, don't assume.** Get
+   the project's **source root**, and explicitly ask which **subtree filter** to
+   index (`reindex.sh`'s 2nd arg, a path substring): the whole thing, or a subtree
+   like `src/`, and whether to exclude vendored/third-party trees. State what your
+   suggested filter would include and leave out, and let them decide before you
+   run anything. (Test files inside the scope are indexed; queries drop them by
+   default, so you don't filter tests at index time.)
 5. **Build the graph** — **heavy: apply the RULE above** (one-time; minutes to
    tens of minutes, *not hours*). Present this exact command, with a realistic
    estimate, and let the user choose to run it or have you run it. Prefer a
