@@ -1,19 +1,23 @@
 """Build a Graph from a parsed SCIP Index.
 
-`scip-clang` (verified v0.4.0) does not populate `SymbolInformation.kind` or
-`Occurrence.enclosing_range` — every symbol comes back as `UnspecifiedKind`
-and every enclosing range is empty. So this builder cannot rely on either
-field. Instead:
+Stock `scip-clang` (verified v0.4.0) does not populate `SymbolInformation.kind`
+or `Occurrence.enclosing_range` — every symbol comes back as `UnspecifiedKind`
+and every enclosing range is empty. So this builder never *requires* either
+field, but uses `enclosing_range` for exact caller attribution when a binary
+does emit it (a #504-built scip-clang). Specifically:
 
 - Callability is read off the SCIP symbol string itself: the descriptor
   grammar (see `scip.proto`'s `Symbol` docs) terminates method/constructor
   descriptors with `).`, which is a property of the compiler-assigned symbol
   identity, not a syntactic guess.
-- The caller of a call site is attributed as the nearest preceding
-  callable-symbol definition in the same document (by start line), since we
-  have no enclosing-range to contain it directly. Verified against real
-  index data (see `COMPARISON.md`): e.g. it correctly separates the two
-  distinct `makeResumeToken` symbols and their caller sets.
+- The caller of a call site is the callable definition whose `enclosing_range`
+  contains it, when the binary emits enclosing ranges (#504) — exact, no
+  heuristic. When it doesn't (stock binary), attribution falls back to the
+  nearest preceding callable-symbol definition in the same document (by start
+  line). Verified against real index data (see `COMPARISON.md`): even the
+  heuristic correctly separates the two distinct `makeResumeToken` symbols and
+  their caller sets; enclosing ranges additionally fix nested-definition cases
+  (a call in an outer body sitting past an inner lambda's definition).
 - A header included by N translation units contributes the same occurrence
   (identical file/line/symbol/roles) once per TU when scip-clang merges
   their partial indexes — verified on `change_stream_event_transform.h`,
@@ -73,6 +77,22 @@ def _occurrence_start_line(occ: scip_pb2.Occurrence) -> int | None:
     return None
 
 
+def _occurrence_enclosing_start_line(occ: scip_pb2.Occurrence) -> int | None:
+    """Start line of the occurrence's *enclosing definition*, or None if the
+    binary didn't emit one. A #504-built scip-clang fills the deprecated
+    `enclosing_range` (field 7, packed like `range`); newer producers may use the
+    `typed_enclosing_range` oneof instead. A stock binary emits neither, so this
+    returns None and attribution falls back to the nearest-preceding heuristic."""
+    which = occ.WhichOneof("typed_enclosing_range")
+    if which == "single_line_enclosing_range":
+        return occ.single_line_enclosing_range.line
+    if which == "multi_line_enclosing_range":
+        return occ.multi_line_enclosing_range.start_line
+    if occ.enclosing_range:
+        return occ.enclosing_range[0]
+    return None
+
+
 def build_graph(index: scip_pb2.Index, *, include_references: bool = True) -> Graph:
     """Build the graph from a SCIP index.
 
@@ -106,6 +126,7 @@ def build_graph(index: scip_pb2.Index, *, include_references: bool = True) -> Gr
         # by find/explain/bases/subtypes), and separately collect the callable
         # definitions that act as caller-attribution boundaries for `calls`.
         callable_defs: list[tuple[int, str]] = []
+        callable_by_start_line: dict[int, str] = {}
         for occ in doc.occurrences:
             if not (occ.symbol_roles & DEFINITION):
                 continue
@@ -118,6 +139,9 @@ def build_graph(index: scip_pb2.Index, *, include_references: bool = True) -> Gr
                 node.line = line
             if is_callable_symbol(occ.symbol):
                 callable_defs.append((line, occ.symbol))
+                # First callable def at a given start line wins, mirroring the
+                # header-dedup rule above; used for exact enclosing attribution.
+                callable_by_start_line.setdefault(line, occ.symbol)
         callable_defs.sort()
         boundary_lines = [line for line, _ in callable_defs]
 
@@ -129,10 +153,20 @@ def build_graph(index: scip_pb2.Index, *, include_references: bool = True) -> Gr
             line = _occurrence_start_line(occ)
             if line is None:
                 continue
-            pos = bisect.bisect_right(boundary_lines, line) - 1
-            if pos < 0:
-                continue  # no enclosing callable definition found in this document
-            _, caller_symbol = callable_defs[pos]
+            # Exact attribution when the binary emits enclosing ranges (#504): the
+            # caller is the callable definition that *contains* the call site,
+            # identified by its start line. Falls back to the nearest-preceding
+            # callable definition when no enclosing range is present (stock binary)
+            # or when it names a non-callable container (e.g. a field initializer).
+            caller_symbol: str | None = None
+            enclosing_line = _occurrence_enclosing_start_line(occ)
+            if enclosing_line is not None:
+                caller_symbol = callable_by_start_line.get(enclosing_line)
+            if caller_symbol is None:
+                pos = bisect.bisect_right(boundary_lines, line) - 1
+                if pos < 0:
+                    continue  # no enclosing callable definition found in this document
+                _, caller_symbol = callable_defs[pos]
             graph.add_edge("calls", caller_symbol, occ.symbol, doc.relative_path, line)
 
         if include_references:

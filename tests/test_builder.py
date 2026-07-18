@@ -85,6 +85,64 @@ def test_call_attributed_to_nearest_preceding_function_definition() -> None:
     assert [e.src for e in graph.callers_of(base_virtual)] == [outer]
 
 
+def _occ_enclosing(
+    symbol: str, line: int, enclosing_start: int, enclosing_end: int
+) -> scip_pb2.Occurrence:
+    """A (non-definition) call occurrence carrying an `enclosing_range` — the
+    range of its enclosing definition — as a #504-built scip-clang emits it
+    (deprecated field 7, packed [startLine, startCol, endLine, endCol])."""
+    occ = scip_pb2.Occurrence(symbol=symbol)
+    occ.range.extend([line, 0, 10])
+    occ.enclosing_range.extend([enclosing_start, 0, enclosing_end, 0])
+    return occ
+
+
+def test_enclosing_range_attributes_caller_exactly_over_nearest_preceding() -> None:
+    """When occurrences carry `enclosing_range` (a #504-built binary), the caller
+    is the definition that *contains* the call site — not merely the nearest
+    preceding one. A nested callable (a lambda's `operator()`) defined inside an
+    outer function would fool nearest-preceding: a call after the nested def but
+    still in the outer body sits closer to the inner def by line. `enclosing_range`
+    names the true container, so the edge goes to the outer function."""
+    outer = "cxx . . $ pkg/Outer#run(o1)."
+    nested = "cxx . . $ pkg/Outer#run/lambda#operator()(l1)."
+    helper = "cxx . . $ pkg/helper(h1)."
+
+    doc = scip_pb2.Document(relative_path="outer.cpp")
+    doc.occurrences.extend(
+        [
+            _occurrence(outer, line=5, roles=DEFINITION),  # run() spans lines 5..30
+            _occurrence(nested, line=10, roles=DEFINITION),  # inner lambda at 10..12
+            _occ_enclosing(helper, line=20, enclosing_start=5, enclosing_end=30),
+        ]
+    )
+    graph = build_graph(scip_pb2.Index(documents=[doc]))
+
+    # Exact: the call at line 20 is inside run()'s range (5..30), not the lambda.
+    assert [e.src for e in graph.callers_of(helper)] == [outer]
+
+
+def test_calls_fall_back_to_nearest_preceding_without_enclosing_range() -> None:
+    """A stock binary (no #504) emits no `enclosing_range`. Attribution must
+    degrade to the nearest-preceding heuristic, unchanged — so the same graph as
+    before is produced. Here that (deliberately) attributes to the inner lambda."""
+    outer = "cxx . . $ pkg/Outer#run(o1)."
+    nested = "cxx . . $ pkg/Outer#run/lambda#operator()(l1)."
+    helper = "cxx . . $ pkg/helper(h1)."
+
+    doc = scip_pb2.Document(relative_path="outer.cpp")
+    doc.occurrences.extend(
+        [
+            _occurrence(outer, line=5, roles=DEFINITION),
+            _occurrence(nested, line=10, roles=DEFINITION),
+            _occurrence(helper, line=20),  # no enclosing_range
+        ]
+    )
+    graph = build_graph(scip_pb2.Index(documents=[doc]))
+
+    assert [e.src for e in graph.callers_of(helper)] == [nested]
+
+
 def test_duplicate_occurrences_from_header_merge_are_deduped() -> None:
     """A header included by multiple TUs can surface identical occurrences
     once per TU after scip-clang merges partial indexes (verified on real
