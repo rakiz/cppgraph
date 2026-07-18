@@ -109,3 +109,63 @@ def to_file_usage_graph(symbol: str, label: str, references: list[Reference]) ->
             }
         )
     return {"nodes": nodes, "links": links}
+
+
+def to_symbol_usage_graph(symbol: str, label: str, references: list[Reference]) -> dict:
+    """A drawable ``symbol -> enclosing symbol`` usage graph.
+
+    The symbol-granularity upgrade of `to_file_usage_graph`, available when the
+    graph was built with `--attributed-refs` from an enclosing_range-emitting
+    binary (#504): instead of "used somewhere in file F", each edge names the
+    *definition that uses it* (the function/type containing the use site),
+    weighted by the number of use sites there. Still 100% exact — every edge
+    traces to a real occurrence whose enclosing_range names its container.
+
+    References that carry no `enclosing_symbol` (a stock-built subset, or a use
+    at file scope) fall back to a ``file:<path>`` node, so the graph stays
+    complete and exact whatever the attribution coverage.
+    """
+    from .filters import short_label  # local: filters imports is_test_file from here
+
+    sym_counts: Counter[str] = Counter()
+    file_counts: Counter[str] = Counter()
+    for r in references:
+        if r.enclosing_symbol:
+            sym_counts[r.enclosing_symbol] += 1
+        elif r.file:
+            file_counts[r.file] += 1
+
+    nodes: list[dict] = [{"id": symbol, "label": label or symbol, "_origin": "cppgraph"}]
+    links: list[dict] = []
+    for encl, n in sorted(sym_counts.items()):
+        nodes.append({"id": encl, "label": short_label(encl), "_origin": "cppgraph"})
+        links.append(
+            {
+                "source": symbol,
+                "target": encl,
+                "relation": "used_by",
+                "weight": n,
+                "_origin": "cppgraph",
+            }
+        )
+    for path, n in sorted(file_counts.items()):
+        file_id = f"file:{path}"
+        nodes.append(
+            {
+                "id": file_id,
+                "label": path.rsplit("/", 1)[-1],
+                "source_file": path,
+                "kind": "file",
+                "_origin": "cppgraph",
+            }
+        )
+        links.append(
+            {
+                "source": symbol,
+                "target": file_id,
+                "relation": "references",
+                "weight": n,
+                "_origin": "cppgraph",
+            }
+        )
+    return {"nodes": nodes, "links": links}

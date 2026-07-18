@@ -248,6 +248,57 @@ def test_references_of_returns_locations(tmp_path: Path) -> None:
     assert store.meta().get("has_references") == "true"
 
 
+def test_attributed_references_round_trip(tmp_path: Path) -> None:
+    graph = Graph()
+    graph.add_node(CALLER)  # the enclosing definition is interned as a node
+    graph.add_reference(TYPE, "a.cpp", 11, enclosing_symbol=CALLER)
+    graph.add_reference(TYPE, "b.cpp", 7)  # unattributed — mixed coverage
+    store = _store(tmp_path, graph)
+    refs = store.references_of(TYPE)
+    assert [(r.file, r.enclosing_symbol) for r in refs] == [("a.cpp", CALLER), ("b.cpp", None)]
+    assert store.meta().get("has_attributed_refs") == "true"
+    assert store.meta().get("attributed_ref_count") == "1"
+
+
+def test_enrich_references_backfills_from_scip(tmp_path: Path) -> None:
+    """A store built without attribution is upgraded in place from a #504 .scip:
+    the enclosing ranges attribute the already-stored references, no rebuild."""
+    typ = "cxx . . $ pkg/Widget#"
+    user = "cxx . . $ pkg/render(r1)."
+    doc = scip_pb2.Document(relative_path="render.cpp")
+    user_def = scip_pb2.Occurrence(symbol=user, symbol_roles=scip_pb2.SymbolRole.Definition)
+    user_def.range.extend([5, 0, 10])
+    use = scip_pb2.Occurrence(symbol=typ)
+    use.range.extend([8, 0, 6])
+    use.enclosing_range.extend([5, 0, 20, 0])  # inside render()'s range
+    doc.occurrences.extend([user_def, use])
+    index = scip_pb2.Index(documents=[doc])
+
+    # Build WITHOUT attribution first (file granularity), then enrich.
+    graph = build_graph(index, attribute_references=False)
+    db = tmp_path / "g.db"
+    write_sqlite(graph, db)
+    assert GraphStore(db).meta().get("has_attributed_refs") is None
+
+    from cppgraph.store import enrich_references
+
+    attributed, total = enrich_references(db, index)
+    assert (attributed, total) == (1, 1)
+
+    store = GraphStore(db)
+    assert [r.enclosing_symbol for r in store.references_of(typ)] == [user]
+    assert store.meta().get("has_attributed_refs") == "true"
+
+
+def test_enrich_references_errors_without_reference_index(tmp_path: Path) -> None:
+    from cppgraph.store import enrich_references
+
+    store = _sample(tmp_path)  # built with no references
+    store.close()
+    with pytest.raises(ValueError, match="no reference index"):
+        enrich_references(tmp_path / "graph.db", scip_pb2.Index())
+
+
 def test_references_empty_when_not_built(tmp_path: Path) -> None:
     # a graph with no references at all -> no has_references flag, empty query
     store = _sample(tmp_path)

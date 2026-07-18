@@ -65,17 +65,29 @@ has its own), so this needs per-codebase pattern support, and a synthetic edge
 departs from the graph's otherwise exact, heuristic-free model — decide how to
 mark such edges (e.g. a distinct `kind`) before adding them.
 
-## Blocked on scip-clang `enclosing_range` (PR #504)
+## scip-clang `enclosing_range` (PR #504) — consume the field
 
-Both need exact reference→enclosing-symbol attribution — the nearest-preceding
-proxy can't give it in class bodies, so until #504 we stay locations-only
-(exact, zero heuristic). See `DESIGN.md` § Graph model.
+Done (works when a #504-built binary emits `enclosing_range`, no-op otherwise):
 
-- Attributed reference **edges** (opt-in at indexing, since they're large):
-  approach "A" (type→type) and "B" (all references) — symbol→symbol and
-  traversable, exact via containment.
-- `usage` view at **symbol** granularity (type → the functions that use it)
-  instead of file granularity, for `export --mode usage` / the `visualize` tool.
+- Exact **caller attribution** for `calls` edges via containment, replacing the
+  nearest-preceding heuristic when the field is present (`builder.py`).
+- Attributed **references** + symbol-granularity `usage` view (type → the
+  functions that use it): opt-in `cppgraph build --attributed-refs`, back-fill an
+  existing store with `cppgraph enrich-refs`, surfaced by `export --mode usage`.
+  The store records `has_attributed_refs`; CLI/MCP `status` advertise the
+  granularity and the upgrade path.
+
+Remaining:
+
+- Wire `--attributed-refs` through `scripts/reindex.sh` (currently only the raw
+  `cppgraph build` exposes it), and decide whether to enrich automatically after
+  a #504 re-index.
+- Attributed reference **edges** as first-class graph edges (traversable
+  symbol→symbol, distinct `kind`) for `impact`/`path`, beyond the usage view.
+- Measure the real store-size cost of `--attributed-refs` on the mongo graph and
+  quote it in the flag help / DESIGN (currently "extra space", unquantified).
+- Verify end-to-end against an actual #504 binary once built (tests use synthetic
+  `.scip`; no real enclosing_range data has flowed through yet).
 
 Robustness when consuming the field: read `Occurrence.enclosing_range` as
 optional. An empty value — a stock downloaded binary, or one built without #504 —

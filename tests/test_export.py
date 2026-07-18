@@ -102,6 +102,27 @@ def test_file_usage_graph_maps_references_to_file_edges() -> None:
     assert links["file:b/bar.h"]["weight"] == 1
 
 
+def test_symbol_usage_graph_maps_references_to_enclosing_symbols() -> None:
+    from cppgraph.export import to_symbol_usage_graph
+    from cppgraph.model import Reference
+
+    render = "cxx . . $ pkg/render(r1)."
+    layout = "cxx . . $ pkg/layout(l1)."
+    refs = [
+        Reference(symbol=A, file="a.cpp", line=1, enclosing_symbol=render),
+        Reference(symbol=A, file="a.cpp", line=8, enclosing_symbol=render),  # weight 2
+        Reference(symbol=A, file="b.cpp", line=3, enclosing_symbol=layout),
+        Reference(symbol=A, file="c.cpp", line=9),  # unattributed -> file fallback
+    ]
+    g = to_symbol_usage_graph(A, "ResumeTokenData", refs)
+
+    links = {lk["target"]: lk for lk in g["links"]}
+    assert links[render]["relation"] == "used_by" and links[render]["weight"] == 2
+    assert links[layout]["weight"] == 1
+    # The unattributed one still appears, at file granularity.
+    assert links["file:c.cpp"]["relation"] == "references"
+
+
 def test_file_usage_graph_empty_when_no_references() -> None:
     from cppgraph.export import to_file_usage_graph
 

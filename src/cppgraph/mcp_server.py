@@ -419,11 +419,13 @@ def references(
     """Exact use sites of `symbol` (the `--references` location index).
 
     Answers "where is this type/symbol used?" — the dependency the call graph
-    can't express (a plain struct has no callers). Positions are exact (no
-    enclosing-attribution heuristic). Test-file uses are dropped by default
-    (`exclude_tests`). Coordinates only by default; with `include_source=True`
-    *and* a `root`, sites are grouped by file and each file carries one merged
-    snippet (overlapping `± context` windows are collapsed, not re-sent per hit).
+    can't express (a plain struct has no callers). Positions are always exact.
+    When the graph was built with attributed references (`--attributed-refs`, a
+    #504 binary), each use also carries `used_by`: the definition that uses it,
+    so the answer names the *functions*, not just the locations. Test-file uses
+    are dropped by default (`exclude_tests`). Coordinates only by default; with
+    `include_source=True` *and* a `root`, sites are grouped by file and each file
+    carries one merged snippet (overlapping `± context` windows are collapsed).
     `available` is False (not an error) when the graph was built with
     `--no-references`, so the caller knows to rebuild.
     """
@@ -460,7 +462,12 @@ def references(
             for f in order
         ]
     else:
-        items = [{"file": ref.file, "line": _line1(ref.line)} for ref in shown]
+        items = []
+        for ref in shown:
+            item: dict[str, Any] = {"file": ref.file, "line": _line1(ref.line)}
+            if ref.enclosing_symbol:
+                item["used_by"] = _short_label(ref.enclosing_symbol)
+            items.append(item)
 
     return {
         "symbol": symbol,
@@ -676,13 +683,35 @@ def status_report(
             "schema_version": m.get("schema_version"),
             "cppgraph_version": m.get("cppgraph_version"),
             "has_references": m.get("has_references") == "true",
+            "has_attributed_refs": m.get("has_attributed_refs") == "true",
             "node_count": m.get("node_count"),
             "edge_count": m.get("edge_count"),
             "ref_count": m.get("ref_count"),
+            "attributed_ref_count": m.get("attributed_ref_count"),
         },
         "source_commit": commit,
         "drift": {"checked": False},
     }
+    # Make the usage-view granularity — and how to upgrade it — explicit, since
+    # it materially changes what "where is this used?" answers (functions vs files).
+    if m.get("has_references") == "true":
+        if m.get("has_attributed_refs") == "true":
+            result["usage_view"] = {
+                "granularity": "symbol",
+                "note": "references are attributed to their enclosing definition "
+                "('where is X used?' returns the functions/types that use it).",
+            }
+        else:
+            result["usage_view"] = {
+                "granularity": "file",
+                "note": "references are exact but unattributed — 'where is X used?' "
+                "answers at file granularity only.",
+                "upgrade": "For symbol granularity (the using functions, not just "
+                "files), index with a #504-built scip-clang, then rebuild with "
+                "`cppgraph build --attributed-refs` or enrich in place with "
+                "`cppgraph enrich-refs --graph <db> --scip <index.scip>`. Costs extra "
+                "store space; worth it when you want symbol-level usage.",
+            }
     if check_updates:
         result["tool"] = update_advice(m.get("cppgraph_version"), force=force)
         result["scip_clang"] = scip_update_advice(
@@ -979,8 +1008,11 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         dir and (by default) open it in the user's browser — the "show me the
         dependency graph of X" tool. Keep it small: a big neighbourhood is an
         unreadable hairball, so prefer depth 1-2. mode="deps" (default) = the
-        call/inherit subgraph; mode="usage" = a symbol->file graph of where the
-        symbol is used (the right view for a type, which has no call edges).
+        call/inherit subgraph; mode="usage" = a graph of where the symbol is used
+        (the right view for a type, which has no call edges). Usage is drawn at
+        SYMBOL granularity (symbol -> the definitions that use it) when the graph
+        was built with attributed references, else at file granularity; both are
+        exact. See `status` (`usage_view`) for which, and how to upgrade.
         direction (deps mode) = "both" (default) both callers and callees, "out"
         only what the symbol reaches, "in" only what reaches it. Set
         exclude_tests=True to drop test files and show production usage only. Set

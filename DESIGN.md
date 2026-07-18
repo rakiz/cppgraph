@@ -67,10 +67,19 @@ pipeline subsystem). Measured cost is modest — on a large index: 5.3M deduped
 locations, store 323 MB → 468 MB (+45%), build ~40 s vs ~23 s — so it's on by
 default; `--no-references` gives the leaner store when the index isn't wanted.
 
-When scip-clang emits `enclosing_range` (PR #504), *attributed* reference
-**edges** (symbol → symbol, traversable) become exact via a containment test —
-worth adding then as an opt-in, type-only ("A") or all ("B"). Until then,
-locations-only. See TODO.md.
+When scip-clang emits `enclosing_range` (a #504-built binary), each reference can
+additionally be *attributed* to the definition that contains it — exact via
+containment, no proxy. This is opt-in (`cppgraph build --attributed-refs`, or
+`cppgraph enrich-refs` to back-fill an existing store) because it costs a symbol
+id per reference; the store records `has_attributed_refs`, and `status` (CLI +
+MCP) advertises the granularity and the upgrade path. It powers the
+symbol-granularity **usage view** (`export --mode usage`): `symbol → enclosing
+definition` ("the *functions* that use this type", not just the files), falling
+back to file granularity for any reference left unattributed — always exact
+either way. The same `enclosing_range`, on the `calls` side, gives exact caller
+attribution (replacing the nearest-preceding heuristic when present). Still
+open: promoting attributed references to first-class traversable graph *edges*
+for `impact`/`path`. See TODO.md.
 
 ### Templates (measured, not assumed)
 
@@ -102,10 +111,14 @@ fallback (`src/cppgraph/builder.py`):
 1. Callability is read off the SCIP symbol string's own grammar: a
    method/constructor descriptor always ends in `).` — no reliance on
    `kind`.
-2. A call edge's caller is the nearest preceding callable-symbol
-   *definition* in the same document, by start line (no range containment
-   available, so line order is the next best signal). Verified to correctly
-   recover both real callers of `ChangeStreamEventTransformation::makeResumeToken`.
+2. A call edge's caller is the callable definition whose `enclosing_range`
+   contains the call site, when the binary emits it (a #504 build) — exact,
+   via containment. On a stock binary (no `enclosing_range`) it falls back to
+   the nearest preceding callable-symbol *definition* in the same document, by
+   start line. Verified to correctly recover both real callers of
+   `ChangeStreamEventTransformation::makeResumeToken`. Point 3 below describes
+   the fallback's known limit, which only applies when no enclosing range is
+   present.
 3. Known limitation (investigated 2026-07-15 — a *fundamental* limit of
    scip-clang v0.4.0, not a bug to refine): the nearest-preceding-definition
    proxy over-extends a definition's "territory" up to the next definition,
@@ -129,14 +142,15 @@ fallback (`src/cppgraph/builder.py`):
    *safe* direction (an extra caller, never a dropped real call).
 
    The clean fix is `enclosing_range` (attribute a reference to a definition
-   iff it is contained in that definition's body range). scip-clang does not
-   emit it (issue sourcegraph/scip-clang#323 was closed *not planned*), but
-   PR sourcegraph/scip-clang#504 implements it. When #504 merges + releases,
-   replace the nearest-preceding proxy with a range-containment test → exact
-   attribution, zero collateral. Tracked, not scheduled — nothing depends on
-   it today.
+   iff it is contained in that definition's body range). Stock scip-clang does
+   not emit it (issue sourcegraph/scip-clang#323 was closed *not planned*), but
+   PR sourcegraph/scip-clang#504 implements it. The builder consumes it: when a
+   binary emits `enclosing_range`, caller attribution and (opt-in) reference
+   attribution use range containment → exact, zero collateral; the over-capture
+   above is the stock-binary fallback only. A #504 binary is built from source
+   via `docker/build-scip-clang/`.
 
-This is where semantic identity still pays off even with this fallback: the
+This is where semantic identity still pays off even with the fallback: the
 callee is the *exact* symbol, so the two `makeResumeToken` never mix,
 independent of how the caller is attributed.
 

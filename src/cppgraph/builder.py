@@ -93,14 +93,26 @@ def _occurrence_enclosing_start_line(occ: scip_pb2.Occurrence) -> int | None:
     return None
 
 
-def build_graph(index: scip_pb2.Index, *, include_references: bool = True) -> Graph:
+def build_graph(
+    index: scip_pb2.Index,
+    *,
+    include_references: bool = True,
+    attribute_references: bool = False,
+) -> Graph:
     """Build the graph from a SCIP index.
 
     `include_references` (default on) collects an exact reference-location index
     (`Graph.references`): every non-local, non-definition occurrence as
-    `symbol -> file:line`, with no enclosing attribution (so no heuristic, 100%
-    exact). Set False to skip it and get a leaner store (measured ~+45% size on
-    a large index). See DESIGN.md § Graph model.
+    `symbol -> file:line`. Set False to skip it and get a leaner store (measured
+    ~+45% size on a large index). See DESIGN.md § Graph model.
+
+    `attribute_references` (default off) additionally records, for each
+    reference, its *enclosing definition* symbol — the "type → the function that
+    uses it" attribution powering the symbol-granularity usage view. It requires
+    a binary that emits `enclosing_range` (#504); references whose occurrence
+    carries no enclosing range (or resolves to no known definition) keep
+    `enclosing_symbol = None` and degrade to file granularity. Opt-in because it
+    is exact but larger. No effect unless `include_references` is also on.
     """
     graph = Graph()
 
@@ -127,6 +139,10 @@ def build_graph(index: scip_pb2.Index, *, include_references: bool = True) -> Gr
         # definitions that act as caller-attribution boundaries for `calls`.
         callable_defs: list[tuple[int, str]] = []
         callable_by_start_line: dict[int, str] = {}
+        # Every definition by start line (types/fields too), so a reference's
+        # enclosing_range can be resolved to whatever contains it — usually a
+        # function, but a field initializer's container is a type.
+        def_by_start_line: dict[int, str] = {}
         for occ in doc.occurrences:
             if not (occ.symbol_roles & DEFINITION):
                 continue
@@ -137,6 +153,7 @@ def build_graph(index: scip_pb2.Index, *, include_references: bool = True) -> Gr
             if node.file is None:  # first definition site wins (header dedup)
                 node.file = doc.relative_path
                 node.line = line
+            def_by_start_line.setdefault(line, occ.symbol)
             if is_callable_symbol(occ.symbol):
                 callable_defs.append((line, occ.symbol))
                 # First callable def at a given start line wins, mirroring the
@@ -170,10 +187,12 @@ def build_graph(index: scip_pb2.Index, *, include_references: bool = True) -> Gr
             graph.add_edge("calls", caller_symbol, occ.symbol, doc.relative_path, line)
 
         if include_references:
-            # Exact location index: every non-local use of a symbol, as-is. No
-            # attribution to an enclosing definition — that's the whole point of
-            # the "C" approach (no nearest-preceding heuristic, no class-body
-            # false positives). `local ...` symbols are function-scoped noise.
+            # Exact location index: every non-local use of a symbol. With
+            # `attribute_references`, each also carries the definition its
+            # enclosing_range names (exact containment, no heuristic) — powering
+            # the symbol-granularity usage view. Without it (or on a stock binary
+            # that emits no enclosing_range), the reference stays a pure location.
+            # `local ...` symbols are function-scoped noise.
             for occ in doc.occurrences:
                 if occ.symbol_roles & (DEFINITION | FORWARD_DEFINITION):
                     continue
@@ -182,6 +201,11 @@ def build_graph(index: scip_pb2.Index, *, include_references: bool = True) -> Gr
                 line = _occurrence_start_line(occ)
                 if line is None:
                     continue
-                graph.add_reference(occ.symbol, doc.relative_path, line)
+                enclosing_symbol: str | None = None
+                if attribute_references:
+                    enclosing_line = _occurrence_enclosing_start_line(occ)
+                    if enclosing_line is not None:
+                        enclosing_symbol = def_by_start_line.get(enclosing_line)
+                graph.add_reference(occ.symbol, doc.relative_path, line, enclosing_symbol)
 
     return graph

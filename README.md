@@ -148,6 +148,25 @@ writes a bounded neighbourhood in a [graphify](https://github.com/Graphify-Labs/
 code + a vendored copy of vis-network, fully offline) — or, since the container
 format is shared, in graphify itself. Details: [viz/README.md](viz/README.md).
 
+## Where is this type used?
+
+The call graph can't answer it — a plain struct has no callers. cppgraph keeps an
+exact **reference index** (on by default) so `cppgraph references <type>` (and the
+`find_references` tool) lists every use site, and `export --mode usage` draws a
+usage graph.
+
+By default that graph is at **file** granularity ("used somewhere in these
+files"). Built with a scip-clang that emits `enclosing_range` (a source build
+carrying [PR #504](docker/build-scip-clang/)), you can upgrade it to **symbol**
+granularity — "used by *these functions*" — with `cppgraph build
+--attributed-refs`, or add it to an existing graph with `cppgraph enrich-refs`.
+
+> **Worth it when you want symbol-level usage — at a cost.** Attribution stores
+> one extra symbol id per reference, so the graph grows. Enable it when "which
+> functions use this type?" matters; otherwise the default file granularity is
+> already exact and leaner. `cppgraph status` tells you which granularity a graph
+> has and how to upgrade.
+
 ## License
 
 [MIT](LICENSE). The bundled viewer vendors [vis-network](https://github.com/visjs/vis-network)

@@ -56,13 +56,16 @@ CREATE TABLE edges (
     line    INTEGER
 );
 -- Exact reference-location index (opt-in, `cppgraph build --references`): each
--- non-local use of a symbol as symbol_id -> file:line, with NO enclosing
--- attribution. See DESIGN.md § Graph model ("C" approach). Empty unless the
--- graph was built with references.
+-- non-local use of a symbol as symbol_id -> file:line. `enclosing_id` is the
+-- definition symbol that contains the use site (opt-in `--attributed-refs`,
+-- needs an enclosing_range-emitting binary), or NULL when unattributed — then
+-- the reference is a pure location (file granularity). See DESIGN.md § Graph
+-- model. Empty unless the graph was built with references.
 CREATE TABLE refs (
-    symbol_id INTEGER NOT NULL,
-    file_id   INTEGER,
-    line      INTEGER
+    symbol_id    INTEGER NOT NULL,
+    file_id      INTEGER,
+    line         INTEGER,
+    enclosing_id INTEGER
 );
 -- Provenance: what was indexed. `source_commit` is the anchor for an
 -- incremental `cppgraph update` (git-diff the stored commit against HEAD to
@@ -92,7 +95,7 @@ _ID_CHUNK = 900
 # `schema_version` predates versioning (treated as the oldest, still readable).
 # `GraphStore` refuses to open a store whose version is *newer* than this — an
 # old binary must not silently misread a format it doesn't understand.
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 class IncompatibleStoreError(RuntimeError):
@@ -310,8 +313,19 @@ def write_sqlite(graph: Graph, path: str | Path, *, meta: dict[str, str] | None 
         edge_rows = [
             (e.kind, sym_ids[e.src], sym_ids[e.dst], file_id(e.file), e.line) for e in graph.edges
         ]
-        # add_reference interns the symbol as a node, so sym_ids covers it.
-        ref_rows = [(sym_ids[r.symbol], file_id(r.file), r.line) for r in graph.references]
+        # add_reference interns the symbol as a node, so sym_ids covers it. The
+        # enclosing symbol is a definition (also interned); guard with .get in
+        # case attribution named a symbol outside the indexed set.
+        ref_rows = [
+            (
+                sym_ids[r.symbol],
+                file_id(r.file),
+                r.line,
+                sym_ids.get(r.enclosing_symbol) if r.enclosing_symbol else None,
+            )
+            for r in graph.references
+        ]
+        attributed_refs = sum(1 for r in graph.references if r.enclosing_symbol)
 
         all_meta = dict(meta or {})
         all_meta["schema_version"] = str(SCHEMA_VERSION)
@@ -320,13 +334,16 @@ def write_sqlite(graph: Graph, path: str | Path, *, meta: dict[str, str] | None 
         if graph.references:
             all_meta.setdefault("has_references", "true")
             all_meta.setdefault("ref_count", str(len(graph.references)))
+            if attributed_refs:
+                all_meta.setdefault("has_attributed_refs", "true")
+                all_meta.setdefault("attributed_ref_count", str(attributed_refs))
 
         con.executemany(
             "INSERT INTO files VALUES (?, ?)", [(fid, p) for p, fid in file_ids.items()]
         )
         con.executemany("INSERT INTO symbols VALUES (?, ?, ?, ?, ?)", sym_rows)
         con.executemany("INSERT INTO edges VALUES (?, ?, ?, ?, ?)", edge_rows)
-        con.executemany("INSERT INTO refs VALUES (?, ?, ?)", ref_rows)
+        con.executemany("INSERT INTO refs VALUES (?, ?, ?, ?)", ref_rows)
         con.executemany("INSERT INTO meta VALUES (?, ?)", all_meta.items())
         con.executescript(_INDEXES)
         con.commit()
@@ -374,10 +391,82 @@ def update_store(
         # Match the store: if it carries a reference-location index, rebuild
         # references for the changed files too, else they'd be silently dropped.
         include_references = store.meta().get("has_references") == "true"
-        partial_graph = build_graph(partial_index, include_references=include_references)
+        # Preserve the store's attribution level across incremental updates, so a
+        # `--attributed-refs` store keeps its enclosing attribution for rebuilt
+        # files instead of silently downgrading them to file granularity.
+        attribute_references = store.meta().get("has_attributed_refs") == "true"
+        partial_graph = build_graph(
+            partial_index,
+            include_references=include_references,
+            attribute_references=attribute_references,
+        )
         return store.apply_update(partial_graph, changed_files, meta=meta)
     finally:
         store.close()
+
+
+def enrich_references(path: str | Path, index: scip_pb2.Index) -> tuple[int, int]:
+    """Add symbol-granularity reference attribution to an existing store in place.
+
+    Reads enclosing ranges from `index` (a #504-built .scip for the same sources)
+    and back-fills each stored reference's enclosing definition — no full rebuild.
+    Returns `(attributed, total_refs)`. Raises `ValueError` if the store carries
+    no reference index to enrich (build it with `--references` first).
+
+    Matching is by (referenced symbol, file, line): the same key the store already
+    interns, so a reference the .scip attributes is updated exactly where it lives.
+    A reference whose occurrence has no enclosing range (or whose enclosing symbol
+    isn't in the store) is left untouched — degrading, never wrong.
+    """
+    graph = build_graph(index, include_references=True, attribute_references=True)
+    con = sqlite3.connect(Path(path))
+    try:
+        total = con.execute("SELECT COUNT(*) FROM refs").fetchone()[0]
+        has_refs = con.execute("SELECT value FROM meta WHERE key = 'has_references'").fetchone()
+        if not has_refs or total == 0:
+            raise ValueError(
+                "store has no reference index to enrich — rebuild it with "
+                "`cppgraph build --references --attributed-refs` instead"
+            )
+        # Old (v1) stores lack the column; add it so enrichment can write.
+        cols = {row[1] for row in con.execute("PRAGMA table_info(refs)")}
+        if "enclosing_id" not in cols:
+            con.execute("ALTER TABLE refs ADD COLUMN enclosing_id INTEGER")
+
+        sym_ids = dict(con.execute("SELECT symbol, id FROM symbols"))
+        file_ids = dict(con.execute("SELECT path, id FROM files"))
+        updates = []
+        for r in graph.references:
+            if not r.enclosing_symbol:
+                continue
+            sid = sym_ids.get(r.symbol)
+            eid = sym_ids.get(r.enclosing_symbol)
+            if sid is None or eid is None:
+                continue
+            updates.append((eid, sid, file_ids.get(r.file) if r.file else None, r.line))
+
+        before = con.total_changes
+        # `IS` matches NULL file_id/line the same way the rows were stored.
+        con.executemany(
+            "UPDATE refs SET enclosing_id = ? WHERE symbol_id = ? AND file_id IS ? AND line IS ?",
+            updates,
+        )
+        attributed = con.total_changes - before
+
+        for key, value in (
+            ("has_attributed_refs", "true"),
+            ("attributed_ref_count", str(attributed)),
+            ("schema_version", str(SCHEMA_VERSION)),
+        ):
+            con.execute(
+                "INSERT INTO meta(key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (key, value),
+            )
+        con.commit()
+        return attributed, total
+    finally:
+        con.close()
 
 
 class GraphStore:
@@ -620,8 +709,9 @@ class GraphStore:
     def references_of(self, symbol: str) -> list[Reference]:
         """Exact use sites of `symbol` (the `--references` location index).
 
-        Returns positions only, no attributed source symbol. Empty if the graph
-        was built without `--references` (or predates the `refs` table).
+        Each carries its `enclosing_symbol` when the graph was built with
+        `--attributed-refs` (else None). Empty if built without `--references`
+        (or the store predates the `refs` table).
         """
         sym_id = self._symbol_id(symbol)
         if sym_id is None:
@@ -629,16 +719,34 @@ class GraphStore:
         try:
             rows = self._con.execute(
                 """
-                SELECT f.path, r.line
-                FROM refs r LEFT JOIN files f ON f.id = r.file_id
+                SELECT f.path, r.line, e.symbol
+                FROM refs r
+                LEFT JOIN files f ON f.id = r.file_id
+                LEFT JOIN symbols e ON e.id = r.enclosing_id
                 WHERE r.symbol_id = ?
                 ORDER BY f.path, r.line
                 """,
                 (sym_id,),
             ).fetchall()
         except sqlite3.OperationalError:
-            return []  # store predates the refs table
-        return [Reference(symbol=symbol, file=r[0], line=r[1]) for r in rows]
+            # Store predates the `enclosing_id` column (schema v1) or the refs
+            # table entirely; retry without the enclosing join, else give up.
+            try:
+                rows = [
+                    (r[0], r[1], None)
+                    for r in self._con.execute(
+                        """
+                        SELECT f.path, r.line
+                        FROM refs r LEFT JOIN files f ON f.id = r.file_id
+                        WHERE r.symbol_id = ?
+                        ORDER BY f.path, r.line
+                        """,
+                        (sym_id,),
+                    ).fetchall()
+                ]
+            except sqlite3.OperationalError:
+                return []
+        return [Reference(symbol=symbol, file=r[0], line=r[1], enclosing_symbol=r[2]) for r in rows]
 
     # --- traversals (indexed neighbour lookups, never a full load) ---------
 
@@ -917,9 +1025,14 @@ class GraphStore:
                 ],
             )
             con.executemany(
-                "INSERT INTO refs(symbol_id, file_id, line) VALUES (?, ?, ?)",
+                "INSERT INTO refs(symbol_id, file_id, line, enclosing_id) VALUES (?, ?, ?, ?)",
                 [
-                    (sym_id[r.symbol], file_id.get(r.file) if r.file else None, r.line)
+                    (
+                        sym_id[r.symbol],
+                        file_id.get(r.file) if r.file else None,
+                        r.line,
+                        sym_id.get(r.enclosing_symbol) if r.enclosing_symbol else None,
+                    )
                     for r in partial.references
                 ],
             )

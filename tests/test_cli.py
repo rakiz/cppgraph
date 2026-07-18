@@ -199,6 +199,67 @@ def test_path_no_path_returns_nonzero(graph_path: Path) -> None:
     assert exit_code == 1
 
 
+def _write_attributed_scip(tmp_path: Path) -> Path:
+    """A .scip with a definition and a use of a type inside it, the use carrying
+    an enclosing_range (as a #504-built scip-clang emits)."""
+    index = scip_pb2.Index()
+    index.metadata.project_root = "file:///repo"
+    doc = index.documents.add(relative_path="render.cpp")
+    user = doc.occurrences.add(
+        symbol="cxx . . $ pkg/render(r1).", symbol_roles=scip_pb2.SymbolRole.Definition
+    )
+    user.range.extend([5, 0, 10])
+    use = doc.occurrences.add(symbol="cxx . . $ pkg/Widget#")
+    use.range.extend([8, 0, 6])
+    use.enclosing_range.extend([5, 0, 20, 0])
+    scip = tmp_path / "index.scip"
+    scip.write_bytes(index.SerializeToString())
+    return scip
+
+
+def test_build_attributed_refs_reports_and_status_shows_symbol_granularity(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    scip = _write_attributed_scip(tmp_path)
+    out = tmp_path / "g.db"
+    assert main(["build", "--scip", str(scip), "--out", str(out), "--attributed-refs"]) == 0
+    assert "attributed to enclosing symbols" in capsys.readouterr().out
+
+    assert main(["status", "--graph", str(out)]) == 0
+    status = capsys.readouterr().out
+    assert "usage view:    SYMBOL granularity" in status
+
+
+def test_status_recommends_attribution_when_absent(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    scip = _write_attributed_scip(tmp_path)
+    out = tmp_path / "g.db"
+    # Default build: references on, attribution off.
+    assert main(["build", "--scip", str(scip), "--out", str(out)]) == 0
+    capsys.readouterr()
+    assert main(["status", "--graph", str(out)]) == 0
+    status = capsys.readouterr().out
+    assert "file granularity" in status
+    assert "enrich-refs" in status  # the upgrade path is surfaced
+
+
+def test_enrich_refs_upgrades_existing_store(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    scip = _write_attributed_scip(tmp_path)
+    out = tmp_path / "g.db"
+    assert main(["build", "--scip", str(scip), "--out", str(out)]) == 0
+    capsys.readouterr()
+
+    assert main(["enrich-refs", "--graph", str(out), "--scip", str(scip)]) == 0
+    assert "symbol-granularity" in capsys.readouterr().out
+
+    graph = GraphStore(out)
+    refs = graph.references_of("cxx . . $ pkg/Widget#")
+    assert [r.enclosing_symbol for r in refs] == ["cxx . . $ pkg/render(r1)."]
+
+
 def test_build_records_source_commit_provenance(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

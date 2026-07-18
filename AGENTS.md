@@ -46,6 +46,20 @@ when you want to measure at scale; keep such paths out of the shipped code.)
   indexed project and `--graph` is optional — and **accept a plain name** (not
   only the exact SCIP string), resolving it via `find`; an ambiguous name lists
   candidates. Same discovery walk as the MCP server (`store.discover_graph`).
+- **Keep the CLI and MCP surfaces equivalent.** A query behaviour goes on *both*,
+  driven by the same pure functions (`cppgraph.filters`,
+  `cppgraph.cli.build_export_json`) — never fork the logic into one surface only.
+  When adding a flag or view, wire it through the shared function and expose it on
+  each side.
+- **Attributed references (`enclosing_range` / #504).** References carry an
+  optional enclosing-definition symbol, enabling the symbol-granularity usage view
+  (`export --mode usage`). It's opt-in at build (`--attributed-refs`) or added
+  after the fact (`enrich-refs`), because it costs a symbol id per reference; the
+  store records it in `has_attributed_refs`, and `build_graph(attribute_references=…)`
+  only populates it when the binary emits `enclosing_range` (stock ⇒ no-op). The
+  user-facing recommendation + size caveat live in the tool output (`status`
+  `usage_view`, `build`/`enrich-refs` help), not here — keep them there so both
+  surfaces say it.
 
 ## Working habits
 

@@ -143,6 +143,44 @@ def test_calls_fall_back_to_nearest_preceding_without_enclosing_range() -> None:
     assert [e.src for e in graph.callers_of(helper)] == [nested]
 
 
+def test_attribute_references_records_enclosing_symbol() -> None:
+    """With attribute_references and an enclosing_range-carrying occurrence, a
+    reference to a type is attributed to the definition that uses it — the
+    'type -> the function that uses it' edge the usage view draws."""
+    typ = "cxx . . $ pkg/Widget#"
+    user = "cxx . . $ pkg/render(r1)."
+
+    doc = scip_pb2.Document(relative_path="render.cpp")
+    doc.occurrences.extend(
+        [
+            _occurrence(user, line=5, roles=DEFINITION),  # render() spans 5..20
+            _occ_enclosing(typ, line=10, enclosing_start=5, enclosing_end=20),
+        ]
+    )
+    graph = build_graph(scip_pb2.Index(documents=[doc]), attribute_references=True)
+
+    refs = graph.references_of(typ)
+    assert [r.enclosing_symbol for r in refs] == [user]
+
+
+def test_references_unattributed_without_the_flag() -> None:
+    """attribute_references defaults off: references stay pure locations even when
+    the occurrence carries an enclosing_range, so the default build is unchanged."""
+    typ = "cxx . . $ pkg/Widget#"
+    user = "cxx . . $ pkg/render(r1)."
+
+    doc = scip_pb2.Document(relative_path="render.cpp")
+    doc.occurrences.extend(
+        [
+            _occurrence(user, line=5, roles=DEFINITION),
+            _occ_enclosing(typ, line=10, enclosing_start=5, enclosing_end=20),
+        ]
+    )
+    graph = build_graph(scip_pb2.Index(documents=[doc]))  # no attribute_references
+
+    assert [r.enclosing_symbol for r in graph.references_of(typ)] == [None]
+
+
 def test_duplicate_occurrences_from_header_merge_are_deduped() -> None:
     """A header included by multiple TUs can surface identical occurrences
     once per TU after scip-clang merges partial indexes (verified on real

@@ -8,7 +8,12 @@ import sys
 from pathlib import Path
 
 from cppgraph.builder import build_graph
-from cppgraph.export import is_test_file, to_file_usage_graph, to_graphify_graph
+from cppgraph.export import (
+    is_test_file,
+    to_file_usage_graph,
+    to_graphify_graph,
+    to_symbol_usage_graph,
+)
 from cppgraph.filters import drop_test_edges, is_trivial_callee, short_label
 from cppgraph.model import Edge, Node
 from cppgraph.proto import scip_pb2
@@ -18,6 +23,7 @@ from cppgraph.store import (
     changed_files_since,
     commits_behind,
     discover_graph,
+    enrich_references,
     staleness_verdict,
     update_store,
     write_sqlite,
@@ -175,11 +181,13 @@ def build_export_json(
     """The graph.json for a symbol, or None if the symbol is unknown.
 
     `mode="deps"` = the bounded call/inherit dependency subgraph (uses
-    `depth`/`direction`); `mode="usage"` = a symbol->file graph of where the
-    symbol is used, from its exact references (the right view for a type, which
-    has no call edges). `exclude_tests` drops test / test-support files (usage)
-    or symbols defined in them (deps) — production view only. Shared by the
-    `export`/`view` CLI commands and the MCP.
+    `depth`/`direction`); `mode="usage"` = a graph of where the symbol is used,
+    from its exact references (the right view for a type, which has no call
+    edges). Usage is drawn at *symbol* granularity (``symbol -> enclosing
+    definition``) when the graph carries attributed references (built with
+    `--attributed-refs`), else at *file* granularity — both exact. `exclude_tests`
+    drops test / test-support files (usage) or symbols defined in them (deps) —
+    production view only. Shared by the `export`/`view` CLI commands and the MCP.
     """
     if not store.has_symbol(symbol):
         return None
@@ -188,7 +196,10 @@ def build_export_json(
         refs = store.references_of(symbol)
         if exclude_tests:
             refs = [r for r in refs if not is_test_file(r.file)]
-        return to_file_usage_graph(symbol, node.display_name if node else "", refs)
+        label = node.display_name if node else ""
+        if any(r.enclosing_symbol for r in refs):
+            return to_symbol_usage_graph(symbol, label, refs)
+        return to_file_usage_graph(symbol, label, refs)
     nodes, edges = store.subgraph(symbol, depth=depth, direction=direction)
     if exclude_tests:
         kept = {n.symbol for n in nodes if not is_test_file(n.file)}
@@ -236,6 +247,33 @@ def main(argv: list[str] | None = None) -> int:
         "a symbol as file:line) — answers 'where is this type/symbol used?', the "
         "dependency the call graph is blind to. On by default; pass "
         "--no-references for a leaner store (measured ~+45% size on a large index).",
+    )
+    p_build.add_argument(
+        "--attributed-refs",
+        action="store_true",
+        help="UPGRADE the usage view from file to SYMBOL granularity: record, for "
+        "each reference, the exact definition that uses it, so 'where is this type "
+        "used?' answers with the *functions* that use it, not just the files. "
+        "Needs a scip-clang that emits enclosing_range (a #504 build); a stock "
+        "binary produces no attribution and this is a no-op. Costs extra store "
+        "space (one symbol id per reference) — enable it when you want symbol-level "
+        "usage and can pay the space; otherwise the default file granularity is "
+        "already exact. Enrich an existing store later with `cppgraph enrich-refs`.",
+    )
+
+    p_enrich = sub.add_parser(
+        "enrich-refs",
+        help="add symbol-granularity reference attribution to an existing store "
+        "from a #504 .scip, without a full rebuild",
+    )
+    p_enrich.add_argument(
+        "--graph", required=True, help="path to the graph store to enrich in place"
+    )
+    p_enrich.add_argument(
+        "--scip",
+        required=True,
+        help="a .scip for the SAME sources, produced by an enclosing_range-emitting "
+        "(#504) scip-clang — its enclosing ranges supply the attribution",
     )
 
     p_update = sub.add_parser(
@@ -565,7 +603,11 @@ def main(argv: list[str] | None = None) -> int:
         index = scip_pb2.Index()
         with open(args.scip, "rb") as f:
             index.ParseFromString(f.read())
-        graph = build_graph(index, include_references=args.references)
+        graph = build_graph(
+            index,
+            include_references=args.references,
+            attribute_references=args.attributed_refs,
+        )
         meta = build_provenance(
             index,
             source_commit=args.source_commit,
@@ -573,15 +615,44 @@ def main(argv: list[str] | None = None) -> int:
             scip_variant=args.scip_variant,
         )
         write_sqlite(graph, args.out, meta=meta)
+        attributed = sum(1 for r in graph.references if r.enclosing_symbol)
         refs_note = f", {len(graph.references)} refs" if graph.references else ""
+        if attributed:
+            refs_note += f" ({attributed} attributed to enclosing symbols)"
         print(
             f"[cppgraph] built graph: {len(graph.nodes)} nodes, "
             f"{len(graph.edges)} edges{refs_note} -> {args.out}"
         )
+        if args.attributed_refs and not attributed and graph.references:
+            print(
+                "[cppgraph] note: --attributed-refs was set but the .scip carries no "
+                "enclosing_range — usage stays at file granularity. Re-index with a "
+                "#504-built scip-clang to get symbol-granularity attribution."
+            )
         commit = meta.get("source_commit")
         if commit:
             dirty = " (dirty)" if meta.get("source_dirty") == "true" else ""
             print(f"[cppgraph] source commit: {commit}{dirty}")
+        return 0
+
+    if args.command == "enrich-refs":
+        index = scip_pb2.Index()
+        with open(args.scip, "rb") as f:
+            index.ParseFromString(f.read())
+        try:
+            attributed, total = enrich_references(args.graph, index)
+        except ValueError as e:
+            parser.error(str(e))
+        if attributed == 0:
+            print(
+                "[cppgraph] no references attributed — the .scip carries no "
+                "enclosing_range. Produce it with a #504-built scip-clang."
+            )
+            return 1
+        print(
+            f"[cppgraph] enriched {attributed}/{total} reference(s) with enclosing "
+            f"symbols -> {args.graph}. `usage` view is now symbol-granularity."
+        )
         return 0
 
     if args.command == "update":
@@ -684,7 +755,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[cppgraph] {len(refs)} use site(s) of {args.symbol}")
         for ref in refs[: args.limit]:
             line = ref.line + 1 if ref.line is not None else "?"
-            print(f"  {ref.file}:{line}")
+            # With attributed references, name the definition that uses it.
+            used_by = (
+                f"  (used by {short_label(ref.enclosing_symbol)})" if ref.enclosing_symbol else ""
+            )
+            print(f"  {ref.file}:{line}{used_by}")
             if args.root is not None and ref.file is not None and ref.line is not None:
                 snippet = read_source_snippet(args.root, ref.file, ref.line, context=args.context)
                 if snippet is None:
@@ -767,6 +842,30 @@ def main(argv: list[str] | None = None) -> int:
             f"  nodes/edges:   {m.get('node_count', '?')} / {m.get('edge_count', '?')}"
             + (f" (+{m['ref_count']} refs)" if m.get("ref_count") else "")
         )
+        if m.get("has_references") == "true":
+            if m.get("has_attributed_refs") == "true":
+                n_attr = m.get("attributed_ref_count", "?")
+                print(
+                    f"  usage view:    SYMBOL granularity "
+                    f"({n_attr} refs attributed to enclosing symbols)"
+                )
+            else:
+                print("  usage view:    file granularity (references not attributed)")
+                print(
+                    "                 -> upgrade to SYMBOL granularity ('where is this "
+                    "type used?' answers with the functions, not just the files):"
+                )
+                print(
+                    "                    index with a #504-built scip-clang, then either "
+                    "rebuild with --attributed-refs"
+                )
+                print(
+                    f"                    or enrich in place: cppgraph enrich-refs "
+                    f"--graph {graph_path} --scip <index.scip>"
+                )
+                print(
+                    "                 (costs extra store space — worth it for symbol-level usage)"
+                )
         print(
             f"  format:        schema v{m.get('schema_version', '0 (legacy)')}"
             f", cppgraph {m.get('cppgraph_version', '?')}"

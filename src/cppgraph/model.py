@@ -29,15 +29,18 @@ class Edge:
 class Reference:
     """A single non-definition use of a symbol at a source location.
 
-    Unlike an `Edge`, a reference has no `src`: it is an exact position where the
-    symbol is used, not an attributed symbol→symbol relationship. This is the
-    "C" approach to references (see DESIGN.md § Graph model) — 100% exact, no
-    enclosing-definition heuristic.
+    An exact position where the symbol is used. `enclosing_symbol` is the
+    definition that contains the use site (the "type → the function that uses it"
+    attribution), populated only when built with attribution from a binary that
+    emits `enclosing_range` (#504); it stays None otherwise, and the reference
+    remains an exact location either way — the enclosing attribution is additive,
+    never a heuristic. See DESIGN.md § Graph model.
     """
 
     symbol: str
     file: str
     line: int | None = None
+    enclosing_symbol: str | None = None
 
 
 @dataclass
@@ -66,19 +69,29 @@ class Graph:
         self._edge_keys.add(key)
         self.edges.append(Edge(kind=kind, src=src, dst=dst, file=file, line=line))
 
-    def add_reference(self, symbol: str, file: str, line: int | None = None) -> None:
+    def add_reference(
+        self,
+        symbol: str,
+        file: str,
+        line: int | None = None,
+        enclosing_symbol: str | None = None,
+    ) -> None:
         """Record a use of `symbol` at `file:line`, deduped by (symbol, file,
         line) — a header included by N TUs surfaces the same occurrence N times.
 
         The referenced symbol becomes a node so it is interned and findable even
         if it is defined outside the indexed set (e.g. a `std::` type used here).
+        `enclosing_symbol` (when known, from an enclosing_range-emitting binary)
+        is the definition that contains the use site.
         """
         self.add_node(symbol)
         key = (symbol, file, line)
         if key in self._ref_keys:
             return
         self._ref_keys.add(key)
-        self.references.append(Reference(symbol=symbol, file=file, line=line))
+        self.references.append(
+            Reference(symbol=symbol, file=file, line=line, enclosing_symbol=enclosing_symbol)
+        )
 
     def references_of(self, symbol: str) -> list[Reference]:
         return [r for r in self.references if r.symbol == symbol]
