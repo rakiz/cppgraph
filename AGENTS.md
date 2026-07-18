@@ -106,11 +106,12 @@ tool takes the path as an argument — never hard-code it.
   directory (its own outputs: `graph.db`, `.scip`, filtered compdb), dropped in
   with a `.gitignore` of `*` so it never dirties the repo — like `.vscode/`.
   Everything else is read (`compile_commands.json`, and sources with `--root`).
-- Per-machine tool install, set up by `scripts/setup.sh`: the `.venv` lives in
-  this checkout; the `scip-clang` binary is a per-machine artifact (one per arch,
-  shared across projects) kept in the persistent data dir
-  `${XDG_DATA_HOME:-~/.local/share}/cppgraph/bin` (override `CPPGRAPH_BIN_DIR`) —
-  a data dir, not a cache, so a self-built binary isn't wiped by cache cleaners.
+- Per-machine tool install, set up by `scripts/setup.sh`: the whole tool lives
+  under one persistent data dir, `${XDG_DATA_HOME:-~/.local/share}/cppgraph/` —
+  the git checkout + its `.venv` in `repo/`, and the `scip-clang` binary (a
+  per-machine artifact, one per arch, shared across projects) in `bin/` (override
+  `CPPGRAPH_BIN_DIR`). A data dir, not a cache, so a self-built binary and the
+  checkout the global MCP registration points at aren't wiped by cache cleaners.
   Not under `scratch/`, which is dev-only throwaway (example graphs, etc.).
 
 ## Layout

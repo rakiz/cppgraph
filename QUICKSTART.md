@@ -25,8 +25,13 @@ Z"), in a handful of commands.
 
 ## 1. Clone + set up
 
+Clone into the per-machine tool dir — the same `~/.local/share/cppgraph/` where
+`setup.sh` puts the `scip-clang` binary, so the whole tool lives in one stable,
+persistent place (not scattered wherever you happened to `cd`):
+
 ```bash
-git clone https://github.com/rakiz/cppgraph && cd cppgraph
+git clone https://github.com/rakiz/cppgraph "${XDG_DATA_HOME:-$HOME/.local/share}/cppgraph/repo"
+cd "${XDG_DATA_HOME:-$HOME/.local/share}/cppgraph/repo"
 scripts/setup.sh          # venv + deps + scip-clang (downloads the prebuilt
                           # binary; on a TTY it offers to build PR #504 instead)
 ```

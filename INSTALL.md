@@ -5,10 +5,21 @@ differ for other platforms are noted inline.
 
 ## 1. Python environment (required, every machine)
 
+Clone into the per-machine tool dir — the same `${XDG_DATA_HOME:-~/.local/share}/cppgraph/`
+where §2 puts the `scip-clang` binary (`bin/`), so the whole tool sits in one
+stable, persistent place. The global MCP registration points at this checkout's
+`.venv`, so it must not move:
+
+```bash
+git clone https://github.com/rakiz/cppgraph "${XDG_DATA_HOME:-$HOME/.local/share}/cppgraph/repo"
+cd "${XDG_DATA_HOME:-$HOME/.local/share}/cppgraph/repo"
+```
+
 Requires Python >= 3.13 (`pyproject.toml`). `uv` manages the venv — and fetches
 a 3.13 automatically if the system Python is older (e.g. Ubuntu 22.04 ships 3.10),
 so no `deadsnakes`/`pyenv` needed. Prereqs: `uv` and `curl` (`setup.sh` assumes
 both; install uv with `curl -LsSf https://astral.sh/uv/install.sh | sh`).
+`scripts/setup.sh` does the two steps below for you:
 
 ```bash
 uv venv

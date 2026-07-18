@@ -45,9 +45,14 @@ deterministic; the scripts fail loudly with actionable messages.
    Windows: index via a container". On **Windows**, do everything inside **WSL2
    (Ubuntu)**. On an **Intel Mac** indexing is not supported — stop and tell the
    user (they can still use a graph built elsewhere).
-2. **Clone and set up** (needs [`uv`](https://docs.astral.sh/uv/) and `curl`):
+2. **Clone and set up** (needs [`uv`](https://docs.astral.sh/uv/) and `curl`).
+   Clone into the per-machine tool dir — the same `~/.local/share/cppgraph/`
+   where `setup.sh` installs the `scip-clang` binary — so the whole tool lives in
+   one stable, persistent place. Use this exact path (do **not** clone into the
+   user's project, and don't leave it wherever you happen to be):
    ```bash
-   git clone https://github.com/rakiz/cppgraph && cd cppgraph
+   git clone https://github.com/rakiz/cppgraph "${XDG_DATA_HOME:-$HOME/.local/share}/cppgraph/repo"
+   cd "${XDG_DATA_HOME:-$HOME/.local/share}/cppgraph/repo"
    scripts/setup.sh              # venv + deps + scip-clang
    ```
 3. **Get a `compile_commands.json`.** Ask the user where theirs is. If they don't
