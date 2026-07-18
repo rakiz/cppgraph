@@ -12,18 +12,24 @@ set -euo pipefail
 # Two modes:
 #
 #   Full build (default):
-#     scripts/reindex.sh [--attributed-refs] COMPDB_PATH [SRC_FILTER] [OUT_NAME] [PROJECT_ROOT]
+#     scripts/reindex.sh [--attributed-refs] [--no-tests] COMPDB_PATH [SRC_FILTER] [OUT_NAME] [PROJECT_ROOT]
 #
 #   Incremental update of an existing store:
 #     scripts/reindex.sh --update GRAPH_DB COMPDB_PATH [SRC_FILTER] [PROJECT_ROOT]
 #
-# --- Full build arguments ---
-#   --attributed-refs  (optional, leading flag) upgrade the reference index to
-#                 SYMBOL granularity — records which definition uses each symbol,
-#                 so "where is this type used?" answers with the functions, not
-#                 just the files. Needs a #504 scip-clang (emits enclosing_range);
-#                 larger store. Default off (file granularity, already exact). Can
-#                 also be added afterwards without re-indexing: `cppgraph enrich-refs`.
+#   Preview what a compdb contains before indexing (TUs, subtrees, tests):
+#     cppgraph compdb-summary COMPDB_PATH [--filter SUBSTR]
+#
+# --- Full build arguments (leading flags, any order) ---
+#   --attributed-refs  upgrade the reference index to SYMBOL granularity — records
+#                 which definition uses each symbol, so "where is this type used?"
+#                 answers with the functions, not just the files. Needs a #504
+#                 scip-clang (emits enclosing_range); larger store. Default off
+#                 (file granularity, already exact). Can also be added afterwards
+#                 without re-indexing: `cppgraph enrich-refs`.
+#   --no-tests    drop test TUs (is_test_file) from the index for a lighter,
+#                 production-only graph. (Queries drop tests by default anyway;
+#                 this also keeps them out of the store.)
 #   COMPDB_PATH   path to a compile_commands.json (required)
 #   SRC_FILTER    substring filter applied to each compdb entry's "file"
 #                 field; omit or pass "" to index everything in the compdb
@@ -142,11 +148,18 @@ print_estimate() {
 import json, sys
 compdb, jobs = sys.argv[1], max(int(sys.argv[2]), 1)
 tus = len(json.load(open(compdb)))
-secs = tus * 3.0 / jobs + 10          # ~3 CPU-s/TU across `jobs` cores + overhead
-est = "under a minute" if secs < 60 else f"about {round(secs/60)} minute(s)"
+# Indexing runs the C++ front-end once per TU, so wall time is CPU-bound. The
+# per-TU cost swings widely with core speed: ~3 CPU-s on a fast x86 core, ~18
+# CPU-s on an older ARM core (measured: 6482 TUs in ~4 h at -j8 on an AWS
+# Graviton2 m6g). Give a range rather than one optimistic number.
+lo = tus * 3.0 / jobs + 10
+hi = tus * 18.0 / jobs + 10
+def fmt(s):
+    return "under a minute" if s < 60 else (f"~{round(s/60)} min" if s < 5400 else f"~{s/3600:.1f} h")
 print(f"  {tus} translation units, indexing with -j{jobs}")
-print(f"  estimated time: {est} (rough, first run)")
-if secs > 300:
+print(f"  estimated time: {fmt(lo)} to {fmt(hi)} (rough; CPU-bound —")
+print(f"                  older/ARM cores like Graviton2 land at the high end)")
+if hi > 600:
     print("  tip: pass a subtree filter (e.g. 'src/foo/') to index less and go faster")
 PY
 }
@@ -305,18 +318,26 @@ fi
 # ---------------------------------------------------------------------------
 # Full build mode
 # ---------------------------------------------------------------------------
-# Optional leading flag: --attributed-refs upgrades the reference index to SYMBOL
-# granularity (the functions that use a type, not just the files). Needs a
-# scip-clang that emits enclosing_range (a #504 build); larger store. Off by
-# default — the plain reference index is already exact, just file-granularity.
+# Optional leading flags (any order):
+#   --attributed-refs  upgrade the reference index to SYMBOL granularity (the
+#                      functions that use a type, not just the files). Needs a
+#                      #504 scip-clang (enclosing_range); larger store. Off by
+#                      default — the plain reference index is already exact.
+#   --no-tests         drop test translation units (is_test_file) from the index,
+#                      for a lighter, production-only graph. (Queries drop tests
+#                      by default anyway; this also keeps them out of the store.)
 ATTRIBUTED_REFS=0
-if [[ "${1:-}" == "--attributed-refs" ]]; then
-  ATTRIBUTED_REFS=1
-  shift
-fi
+NO_TESTS=0
+while [[ "${1:-}" == --* ]]; do
+  case "$1" in
+    --attributed-refs) ATTRIBUTED_REFS=1; shift ;;
+    --no-tests)        NO_TESTS=1; shift ;;
+    *) echo "error: unknown flag '$1' (expected --attributed-refs / --no-tests)" >&2; exit 2 ;;
+  esac
+done
 
 if [[ $# -lt 1 ]]; then
-  echo "usage: $0 [--attributed-refs] COMPDB_PATH [SRC_FILTER] [OUT_NAME] [PROJECT_ROOT]" >&2
+  echo "usage: $0 [--attributed-refs] [--no-tests] COMPDB_PATH [SRC_FILTER] [OUT_NAME] [PROJECT_ROOT]" >&2
   echo "       $0 --update GRAPH_DB COMPDB_PATH [SRC_FILTER] [PROJECT_ROOT]" >&2
   exit 2
 fi
@@ -338,22 +359,35 @@ OUT_COMPDB="$OUT_DIR/${OUT_NAME}.compdb.json"
 OUT_SCIP="$OUT_DIR/${OUT_NAME}.scip"
 OUT_GRAPH="$OUT_DIR/${OUT_NAME}.graph.db"
 
-echo "[1/3] Filtering compile_commands.json (substring: '${SRC_FILTER:-<none, indexing everything>}') ..."
-python3 - "$COMPDB" "$SRC_FILTER" "$OUT_COMPDB" <<'PYEOF'
+_tests_note=""; [[ "$NO_TESTS" == 1 ]] && _tests_note=", excluding tests"
+echo "[1/3] Filtering compile_commands.json (substring: '${SRC_FILTER:-<none, indexing everything>}'${_tests_note}) ..."
+# Uses the venv python so it can reuse cppgraph's is_test_file for --no-tests.
+"$VENV_PY" - "$COMPDB" "$SRC_FILTER" "$OUT_COMPDB" "$NO_TESTS" <<'PYEOF'
 import json
 import sys
 
-compdb_path, src_filter, out_path = sys.argv[1:4]
+from cppgraph.export import is_test_file
+
+compdb_path, src_filter, out_path, no_tests = sys.argv[1:5]
 with open(compdb_path) as f:
     data = json.load(f)
-filtered = [e for e in data if src_filter in e["file"]] if src_filter else data
+filtered = [e for e in data if src_filter in e["file"]] if src_filter else list(data)
+dropped = 0
+if no_tests == "1":
+    kept = [e for e in filtered if not is_test_file(e.get("file", ""))]
+    dropped = len(filtered) - len(kept)
+    filtered = kept
 with open(out_path, "w") as f:
     json.dump(filtered, f)
-print(f"  {len(filtered)} of {len(data)} compdb entries matched")
-if src_filter and not filtered:
+msg = f"  {len(filtered)} of {len(data)} compdb entries matched"
+if no_tests == "1":
+    msg += f" ({dropped} test TU(s) excluded)"
+print(msg)
+if not filtered:
     sys.exit(
-        f"  error: 0 entries matched filter {src_filter!r}. It is a plain "
-        f"substring of each entry's \"file\" field (e.g. 'src/', no leading "
+        f"  error: 0 entries left after filtering (substring {src_filter!r}"
+        f"{', --no-tests' if no_tests == '1' else ''}). The filter is a plain "
+        f'substring of each entry\'s "file" field (e.g. \'src/\', no leading '
         f"slash). Check a sample path in {compdb_path} and adjust."
     )
 PYEOF

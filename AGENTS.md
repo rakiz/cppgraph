@@ -104,6 +104,11 @@ one however the target supports:
 Regenerate when it's stale (it reflects the build graph at generation time). The
 tool takes the path as an argument — never hard-code it.
 
+Before indexing, inspect it with `cppgraph compdb-summary <compile_commands.json>`
+(total TUs, subtrees, test count; `--filter <substr>` previews a scope). The
+indexing scope — subtree filter, `reindex.sh --no-tests` — is the user's choice;
+present the breakdown and let them pick, don't decide for them.
+
 ## Guardrails
 
 - **Do not commit without the maintainer saying so explicitly.**

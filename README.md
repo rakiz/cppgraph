@@ -32,11 +32,11 @@ the heavy steps — those need the user's sign-off.
 > overstate, and do not mislabel which step is the long one.**
 >
 > - **Indexing** is the routine heavy step and usually the **longest** for a real
->   codebase: **minutes to tens of minutes** (reference on ~14 cores: ~2.5 min for
->   ~500 translation units, ~20 min for ~6000; a few minutes per 1000 TUs,
->   proportionally longer on fewer cores). Gauge it by counting entries in
->   `compile_commands.json` (≈ one per TU); `reindex.sh` prints an exact estimate
->   for the machine right before it starts.
+>   codebase — **minutes to hours**, CPU-bound. Reference points: ~20 min for
+>   ~6 000 TUs on a fast 14-core x86; but **~4 h for 6 482 TUs on an 8-core AWS
+>   Graviton2** (older ARM cores are several times slower *per core*, not just
+>   fewer). So estimate by TU count **and** CPU, not TU count alone; `reindex.sh`
+>   prints a per-machine range right before it starts.
 > - **The scip-clang binary** is **light when downloaded** (a prebuilt binary,
 >   seconds) — the default on macOS arm64 / Linux x86_64. It is heavy **only**
 >   when compiled from source (ARM-Linux, or anyone wanting #504). Don't call the
@@ -101,13 +101,21 @@ for its heavy steps.
    (long/heavy). Apply the RULE above: propose the right command, get the OK, or
    let them run it. How to produce one per build system (CMake / Bazel / Make):
    [AGENTS.md](AGENTS.md) → "The compilation database".
-   **The indexing scope is the user's call, not yours — ask, don't assume.** Get
-   the project's **source root**, and explicitly ask which **subtree filter** to
-   index (`reindex.sh`'s 2nd arg, a path substring): the whole thing, or a subtree
-   like `src/`, and whether to exclude vendored/third-party trees. State what your
-   suggested filter would include and leave out, and let them decide before you
-   run anything. (Test files inside the scope are indexed; queries drop them by
-   default, so you don't filter tests at index time.)
+   **Then summarize what's indexable and let the user choose the scope — don't
+   pick for them.** Run:
+   ```bash
+   cppgraph compdb-summary <compile_commands.json>
+   ```
+   and show the user the breakdown it prints (total TUs, the subtrees they live
+   in, how many are tests). Then ask them to decide, before you run anything:
+   - the **source root**;
+   - the **subtree filter** (`reindex.sh`'s 2nd arg, a path substring) — the whole
+     thing, or a subtree like `src/`, excluding vendored/third-party trees;
+   - whether to **exclude tests** (`reindex.sh --no-tests`) for a lighter,
+     production-only graph.
+
+   State what your suggested filter would keep and leave out (use
+   `compdb-summary --filter <substr>` to preview the count), and get their OK.
 5. **Build the graph** — **heavy: apply the RULE above** (one-time; minutes to
    tens of minutes, *not hours*). Present this exact command, with a realistic
    estimate, and let the user choose to run it or have you run it. Prefer a
@@ -143,16 +151,43 @@ project's `compile_commands.json`.
 ## Pipeline
 
 ```
-compile_commands.json  →  scip-clang  →  index.scip  →  cppgraph build  →  graph store
-                          (semantic       (protobuf,      (parse + edges)    (query / MCP / viz)
-                           indexer)         USR-keyed)
+scip-clang        compile_commands.json  →  <name>.compdb.json  →  <name>.scip  →  <name>.graph.db
+(indexer binary)  (target's build)          (filtered subset)      (SCIP protobuf)  (SQLite: query/MCP/viz)
 ```
 
-- **Builder** (`scip-clang`, external compiled binary): does the expensive,
-  perf-critical C++ parsing. Crash-isolated per translation unit.
-- **cppgraph** (this repo, Python): glue + graph. Parses SCIP, builds the graph,
-  serves queries, exposes an MCP server, and can export a graph.json for
-  visualization.
+Five stages get you from nothing to a queryable graph. Only the last three are
+cppgraph's; the timings are rough and **dominated by your machine** (the indexer
+runs the C++ front-end once per translation unit, so it scales with cores/CPU).
+
+| # | Stage | Produces | Rough time |
+|---|-------|----------|------------|
+| 1 | **Get `scip-clang`** — copy the prebuilt binary, or compile from source | the per-machine indexer binary | **~1 min** (copy) … **~30–45 min** (compile) |
+| 2 | **Get `compile_commands.json`** — from the target's build system, if not already present | `compile_commands.json` | **~3 min** (warm) … **~15 min** (cold) — the *target's* build, not cppgraph |
+| 3 | **Filter what to index** — scope to a subtree, optionally drop tests | `<name>.compdb.json` | **seconds** |
+| 4 | **Index** — `scip-clang` runs the C++ front-end per TU → SCIP | `<name>.scip` | **the big one: ~20 min → several hours** |
+| 5 | **Build the store** — parse SCIP, intern symbols + edges into SQLite | `<name>.graph.db` | **~1 min** |
+
+Then you're ready to query (see the gains below).
+
+Notes:
+- **Stage 1 is once per machine**; copy is only available on macOS arm64 /
+  Linux x86_64 (a stock binary, no PR #504). Everywhere else — and to get PR #504
+  (`enclosing_range`) — you compile (`docker/build-scip-clang/`).
+- **Stage 4 is the variable one.** Measured extremes: ~20 min on a fast 14-core
+  x86 for ~6 000 TUs; **~4 h for 6 482 TUs on an 8-core AWS Graviton2**
+  (`m6g.2xlarge` — older Neoverse-N1 cores are slow at this). `reindex.sh` prints
+  a per-machine estimate right before it starts. Fewer/older cores → proportionally
+  longer; scope to a subtree (stage 3) to cut it down.
+- **`enclosing_range` (#504) is a choice at indexing**, with consequences: it
+  enables *exact* caller attribution and the symbol-granularity usage view
+  (`--attributed-refs`), but needs the compiled #504 binary and makes the `.scip`
+  and store larger. Without it you still get an exact graph, just with
+  file-granularity usage. You can add it later without re-indexing (`enrich-refs`).
+
+**Two components:** the **builder** (`scip-clang`, external compiled binary) does
+the expensive, perf-critical C++ parsing, crash-isolated per TU; **cppgraph**
+(this repo, Python) is the glue + graph — parses SCIP, builds the store, serves
+queries, exposes the MCP server, and exports a graph.json for visualization.
 
 ## Does it actually beat by-name tools?
 

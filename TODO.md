@@ -46,19 +46,14 @@ Open:
 The field is consumed (exact caller attribution + the opt-in symbol-granularity
 usage view). Open:
 
-- **Rebuild + re-test the hardened #504 binary on MongoDB.** The raw PR #504
-  crashed workers on a large fraction of mongo TUs: it fed `fromNonEmpty` an
-  enclosing range spanning a macro/`#include` boundary, tripping
-  `ENFORCE(getFileID(end)==getFileID(start))` (Indexer.cc), and the dead workers
-  hung the whole index. `enclosing_range-on-v0.4.0.patch` now guards with a
-  same-file check before the call. Needs a fresh `docker/build-scip-clang` build,
-  then a native mongo index to confirm the crashes/hangs are gone and
-  `enclosing_range` still flows — exact caller attribution and `--attributed-refs`
-  / `enrich-refs` producing symbol-granularity usage on real data (tests so far
-  use synthetic `.scip` only).
 - **Report the crash upstream** (sourcegraph/scip-clang PR #504): the missing
-  same-file guard is a bug in the PR itself, worth flagging there (and it's why
-  the arm64-linux issue keeps #504 separate from the stock-binary ask).
+  same-file guard is a bug in the PR itself. Draft ready in
+  `docker/build-scip-clang/PR504-COMMENT.draft.md`; post it on the PR.
+- **Validate `enclosing_range` on real data _with_ `--attributed-refs`.** The
+  hardened #504 build is confirmed on all of `src/mongo` (6 482 TUs, 0 crashes),
+  but that run was file-granularity. Do one `--attributed-refs` (or `enrich-refs`)
+  run on a real graph to confirm exact caller attribution and the symbol-granularity
+  usage view on non-synthetic data (feeds the cost measurement below).
 - **Auto-enrich after a #504 re-index?** `reindex.sh --attributed-refs` is an
   explicit opt-in today; decide whether a #504 re-index should enrich by default.
 - **Attributed reference edges** as first-class graph edges (traversable

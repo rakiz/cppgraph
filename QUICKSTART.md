@@ -54,13 +54,23 @@ next you point it at a project.
 
 ## 2. Index a project (once per project)
 
-Point it at your project's `compile_commands.json`; the second argument filters
-to your source subtree (skip third-party/vendored code):
+First, see what's indexable and pick a scope — don't index blind:
+
+```bash
+cppgraph compdb-summary /path/to/project/compile_commands.json
+# total TUs, which subtrees they live in, how many are tests;
+# add --filter src/ to preview how many a filter would keep.
+```
+
+Then index. The 2nd argument is a **path-substring filter** (scope to your source
+subtree, skip third-party/vendored code); add `--no-tests` to leave test TUs out
+for a lighter, production-only graph:
 
 ```bash
 scripts/reindex.sh /path/to/project/compile_commands.json src/ myproject
-# → writes /path/to/project/.cppgraph/myproject.graph.db (gitignored, next to
-#   your code; a big codebase takes ~minutes, one time).
+scripts/reindex.sh --no-tests /path/to/project/compile_commands.json src/mongo mongo
+# → writes /path/to/project/.cppgraph/<name>.graph.db (gitignored, next to your
+#   code; a big codebase takes ~minutes, one time).
 ```
 
 **Usage-view granularity (only if your scip-clang is a #504 build).** By default

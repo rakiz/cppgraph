@@ -276,6 +276,18 @@ def main(argv: list[str] | None = None) -> int:
         "(#504) scip-clang — its enclosing ranges supply the attribution",
     )
 
+    p_compdb = sub.add_parser(
+        "compdb-summary",
+        help="summarize a compile_commands.json before indexing: how many TUs, "
+        "where they live, how many are tests — so the index scope is an informed choice",
+    )
+    p_compdb.add_argument("compdb", help="path to a compile_commands.json")
+    p_compdb.add_argument(
+        "--filter",
+        default=None,
+        help="preview how many TUs a path-substring filter (reindex.sh's 2nd arg) would keep",
+    )
+
     p_update = sub.add_parser(
         "update",
         help="incrementally apply a partial re-index (only changed TUs) to an existing store",
@@ -633,6 +645,16 @@ def main(argv: list[str] | None = None) -> int:
         if commit:
             dirty = " (dirty)" if meta.get("source_dirty") == "true" else ""
             print(f"[cppgraph] source commit: {commit}{dirty}")
+        return 0
+
+    if args.command == "compdb-summary":
+        from cppgraph.compdb import format_summary, load_compdb, summarize_compdb
+
+        try:
+            entries = load_compdb(args.compdb)
+        except (OSError, ValueError) as e:
+            parser.error(str(e))
+        print(format_summary(summarize_compdb(entries, filter=args.filter)))
         return 0
 
     if args.command == "enrich-refs":
