@@ -77,19 +77,47 @@ def _occurrence_start_line(occ: scip_pb2.Occurrence) -> int | None:
     return None
 
 
-def _occurrence_enclosing_start_line(occ: scip_pb2.Occurrence) -> int | None:
-    """Start line of the occurrence's *enclosing definition*, or None if the
-    binary didn't emit one. A #504-built scip-clang fills the deprecated
-    `enclosing_range` (field 7, packed like `range`); newer producers may use the
-    `typed_enclosing_range` oneof instead. A stock binary emits neither, so this
-    returns None and attribution falls back to the nearest-preceding heuristic."""
+def _occurrence_enclosing_range(occ: scip_pb2.Occurrence) -> tuple[int, int] | None:
+    """The `(start_line, end_line)` of the occurrence's `enclosing_range`, or None.
+
+    Per the SCIP spec (`scip.proto`), `enclosing_range` on a **definition** is the
+    full extent of that definition (a function/class body); it is *not* emitted on
+    references pointing at their enclosing function. So we read it off definition
+    occurrences and use the resulting intervals to attribute references/calls by
+    containment (see `build_graph`). A #504-built scip-clang fills the deprecated
+    `enclosing_range` (field 7, packed `[startLine, startCol, endLine, endCol]`, or
+    3 elements when single-line); newer producers may use the
+    `typed_enclosing_range` oneof. A stock binary emits neither -> None."""
     which = occ.WhichOneof("typed_enclosing_range")
     if which == "single_line_enclosing_range":
-        return occ.single_line_enclosing_range.line
+        return (occ.single_line_enclosing_range.line, occ.single_line_enclosing_range.line)
     if which == "multi_line_enclosing_range":
-        return occ.multi_line_enclosing_range.start_line
-    if occ.enclosing_range:
-        return occ.enclosing_range[0]
+        r = occ.multi_line_enclosing_range
+        return (r.start_line, r.end_line)
+    er = occ.enclosing_range
+    if er:
+        return (er[0], er[2] if len(er) >= 4 else er[0])
+    return None
+
+
+def _innermost_enclosing(
+    intervals: list[tuple[int, int, str]], starts: list[int], line: int
+) -> str | None:
+    """The innermost callable definition whose `enclosing_range` interval contains
+    `line`, or None.
+
+    `intervals` is `(start_line, end_line, symbol)` for callable definitions,
+    sorted by `start`; `starts` is their start lines (for a bisect). SCIP ranges
+    nest cleanly, so scanning from the greatest start <= line downwards, the first
+    interval that still contains `line` (`end >= line`) is the innermost match —
+    e.g. a call sitting past a nested lambda's body attributes to the outer
+    function, not the lambda."""
+    pos = bisect.bisect_right(starts, line) - 1
+    while pos >= 0:
+        start, end, symbol = intervals[pos]
+        if end >= line:
+            return symbol
+        pos -= 1
     return None
 
 
@@ -108,11 +136,15 @@ def build_graph(
 
     `attribute_references` (default off) additionally records, for each
     reference, its *enclosing definition* symbol — the "type → the function that
-    uses it" attribution powering the symbol-granularity usage view. It requires
-    a binary that emits `enclosing_range` (#504); references whose occurrence
-    carries no enclosing range (or resolves to no known definition) keep
-    `enclosing_symbol = None` and degrade to file granularity. Opt-in because it
-    is exact but larger. No effect unless `include_references` is also on.
+    uses it" attribution powering the symbol-granularity usage view. It resolves
+    by *containment*: `enclosing_range` is emitted on **definitions** (their own
+    body extent, per the SCIP spec), so each use site is attributed to the
+    innermost definition whose interval contains it — not by reading
+    `enclosing_range` off the reference, which never carries it. Needs a binary
+    that emits `enclosing_range` (#504); with a stock binary there are no
+    intervals, so references keep `enclosing_symbol = None` and degrade to file
+    granularity. Opt-in because it is exact but larger. No effect unless
+    `include_references` is also on.
     """
     graph = Graph()
 
@@ -133,16 +165,17 @@ def build_graph(
                         edge_kind = "implements"
                     graph.add_edge(edge_kind, sym_info.symbol, rel.symbol, doc.relative_path)
 
-        # One pass over definition occurrences: record every symbol's
-        # definition site (so types/fields, not just callables, can be located
-        # by find/explain/bases/subtypes), and separately collect the callable
-        # definitions that act as caller-attribution boundaries for `calls`.
+        # One pass over definition occurrences: record every symbol's definition
+        # site (so types/fields, not just callables, are locatable), collect the
+        # callable definitions used as the nearest-preceding fallback, and collect
+        # the `enclosing_range` intervals — each definition's own body extent —
+        # that drive *exact* attribution by containment. Two interval sets: calls
+        # attribute to the enclosing *callable*; the usage view also allows a
+        # *type* container (a field's type is "used by" its class), but never a
+        # namespace (too coarse to be a useful "user").
         callable_defs: list[tuple[int, str]] = []
-        callable_by_start_line: dict[int, str] = {}
-        # Every definition by start line (types/fields too), so a reference's
-        # enclosing_range can be resolved to whatever contains it — usually a
-        # function, but a field initializer's container is a type.
-        def_by_start_line: dict[int, str] = {}
+        callable_intervals: list[tuple[int, int, str]] = []
+        usage_intervals: list[tuple[int, int, str]] = []
         for occ in doc.occurrences:
             if not (occ.symbol_roles & DEFINITION):
                 continue
@@ -153,14 +186,22 @@ def build_graph(
             if node.file is None:  # first definition site wins (header dedup)
                 node.file = doc.relative_path
                 node.line = line
-            def_by_start_line.setdefault(line, occ.symbol)
             if is_callable_symbol(occ.symbol):
                 callable_defs.append((line, occ.symbol))
-                # First callable def at a given start line wins, mirroring the
-                # header-dedup rule above; used for exact enclosing attribution.
-                callable_by_start_line.setdefault(line, occ.symbol)
+            enclosing = _occurrence_enclosing_range(occ)
+            if enclosing is not None:
+                interval = (enclosing[0], enclosing[1], occ.symbol)
+                if is_callable_symbol(occ.symbol):
+                    callable_intervals.append(interval)
+                    usage_intervals.append(interval)
+                elif is_type_symbol(occ.symbol):
+                    usage_intervals.append(interval)
         callable_defs.sort()
         boundary_lines = [line for line, _ in callable_defs]
+        callable_intervals.sort()
+        callable_starts = [iv[0] for iv in callable_intervals]
+        usage_intervals.sort()
+        usage_starts = [iv[0] for iv in usage_intervals]
 
         for occ in doc.occurrences:
             if occ.symbol_roles & (DEFINITION | FORWARD_DEFINITION):
@@ -170,15 +211,13 @@ def build_graph(
             line = _occurrence_start_line(occ)
             if line is None:
                 continue
-            # Exact attribution when the binary emits enclosing ranges (#504): the
-            # caller is the callable definition that *contains* the call site,
-            # identified by its start line. Falls back to the nearest-preceding
-            # callable definition when no enclosing range is present (stock binary)
-            # or when it names a non-callable container (e.g. a field initializer).
-            caller_symbol: str | None = None
-            enclosing_line = _occurrence_enclosing_start_line(occ)
-            if enclosing_line is not None:
-                caller_symbol = callable_by_start_line.get(enclosing_line)
+            # Exact when the binary emits enclosing_range (#504): the caller is the
+            # innermost callable definition whose body *contains* the call site.
+            # enclosing_range lives on *definitions* (their own extent), never on
+            # the call occurrence — so we test containment against those intervals,
+            # not by reading it off the call. Falls back to the nearest-preceding
+            # callable definition when no intervals exist (stock binary).
+            caller_symbol = _innermost_enclosing(callable_intervals, callable_starts, line)
             if caller_symbol is None:
                 pos = bisect.bisect_right(boundary_lines, line) - 1
                 if pos < 0:
@@ -188,11 +227,12 @@ def build_graph(
 
         if include_references:
             # Exact location index: every non-local use of a symbol. With
-            # `attribute_references`, each also carries the definition its
-            # enclosing_range names (exact containment, no heuristic) — powering
-            # the symbol-granularity usage view. Without it (or on a stock binary
-            # that emits no enclosing_range), the reference stays a pure location.
-            # `local ...` symbols are function-scoped noise.
+            # `attribute_references`, each also gets its enclosing definition — the
+            # innermost callable-or-type whose `enclosing_range` contains the use
+            # site — so "where is this type used?" answers with the using function
+            # (or class), not just the file. Needs a binary that emits
+            # enclosing_range (#504); a stock binary has no intervals, so the
+            # reference stays a pure location. `local ...` symbols are noise.
             for occ in doc.occurrences:
                 if occ.symbol_roles & (DEFINITION | FORWARD_DEFINITION):
                     continue
@@ -203,9 +243,7 @@ def build_graph(
                     continue
                 enclosing_symbol: str | None = None
                 if attribute_references:
-                    enclosing_line = _occurrence_enclosing_start_line(occ)
-                    if enclosing_line is not None:
-                        enclosing_symbol = def_by_start_line.get(enclosing_line)
+                    enclosing_symbol = _innermost_enclosing(usage_intervals, usage_starts, line)
                 graph.add_reference(occ.symbol, doc.relative_path, line, enclosing_symbol)
 
     return graph

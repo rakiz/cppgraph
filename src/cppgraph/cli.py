@@ -667,8 +667,10 @@ def main(argv: list[str] | None = None) -> int:
             parser.error(str(e))
         if attributed == 0:
             print(
-                "[cppgraph] no references attributed — the .scip carries no "
-                "enclosing_range. Produce it with a #504-built scip-clang."
+                "[cppgraph] no references attributed — no definition in the .scip "
+                "carries an enclosing_range whose body contains a use site. Ensure "
+                "the .scip was produced by a #504-built scip-clang (a stock binary "
+                "emits none)."
             )
             return 1
         print(

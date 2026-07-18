@@ -200,8 +200,9 @@ def test_path_no_path_returns_nonzero(graph_path: Path) -> None:
 
 
 def _write_attributed_scip(tmp_path: Path) -> Path:
-    """A .scip with a definition and a use of a type inside it, the use carrying
-    an enclosing_range (as a #504-built scip-clang emits)."""
+    """A .scip where a definition carries an enclosing_range (its body extent, as
+    a #504-built scip-clang emits) and a use of a type sits inside that body — so
+    the use is attributed to the definition by containment."""
     index = scip_pb2.Index()
     index.metadata.project_root = "file:///repo"
     doc = index.documents.add(relative_path="render.cpp")
@@ -209,9 +210,9 @@ def _write_attributed_scip(tmp_path: Path) -> Path:
         symbol="cxx . . $ pkg/render(r1).", symbol_roles=scip_pb2.SymbolRole.Definition
     )
     user.range.extend([5, 0, 10])
+    user.enclosing_range.extend([5, 0, 20, 0])  # render() body spans 5..20
     use = doc.occurrences.add(symbol="cxx . . $ pkg/Widget#")
-    use.range.extend([8, 0, 6])
-    use.enclosing_range.extend([5, 0, 20, 0])
+    use.range.extend([8, 0, 6])  # a use of Widget inside render()
     scip = tmp_path / "index.scip"
     scip.write_bytes(index.SerializeToString())
     return scip

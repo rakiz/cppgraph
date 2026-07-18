@@ -85,25 +85,23 @@ def test_call_attributed_to_nearest_preceding_function_definition() -> None:
     assert [e.src for e in graph.callers_of(base_virtual)] == [outer]
 
 
-def _occ_enclosing(
-    symbol: str, line: int, enclosing_start: int, enclosing_end: int
-) -> scip_pb2.Occurrence:
-    """A (non-definition) call occurrence carrying an `enclosing_range` — the
-    range of its enclosing definition — as a #504-built scip-clang emits it
-    (deprecated field 7, packed [startLine, startCol, endLine, endCol])."""
-    occ = scip_pb2.Occurrence(symbol=symbol)
+def _def_with_body(symbol: str, line: int, end_line: int) -> scip_pb2.Occurrence:
+    """A DEFINITION occurrence carrying its own `enclosing_range` — its body extent
+    `[line..end_line]` — the way a #504-built scip-clang emits it (per the SCIP
+    spec, enclosing_range is on *definitions*, not on references). Packed
+    `[startLine, startCol, endLine, endCol]`."""
+    occ = scip_pb2.Occurrence(symbol=symbol, symbol_roles=DEFINITION)
     occ.range.extend([line, 0, 10])
-    occ.enclosing_range.extend([enclosing_start, 0, enclosing_end, 0])
+    occ.enclosing_range.extend([line, 0, end_line, 0])
     return occ
 
 
-def test_enclosing_range_attributes_caller_exactly_over_nearest_preceding() -> None:
-    """When occurrences carry `enclosing_range` (a #504-built binary), the caller
-    is the definition that *contains* the call site — not merely the nearest
-    preceding one. A nested callable (a lambda's `operator()`) defined inside an
-    outer function would fool nearest-preceding: a call after the nested def but
-    still in the outer body sits closer to the inner def by line. `enclosing_range`
-    names the true container, so the edge goes to the outer function."""
+def test_enclosing_range_attributes_caller_by_containment() -> None:
+    """The caller is the innermost callable definition whose body *contains* the
+    call site — resolved from the definitions' enclosing ranges, since the call
+    occurrence itself never carries one. A nested lambda would fool
+    nearest-preceding: a call after the lambda's def but still in the outer body
+    sits closer to it by line. Containment names the true container."""
     outer = "cxx . . $ pkg/Outer#run(o1)."
     nested = "cxx . . $ pkg/Outer#run/lambda#operator()(l1)."
     helper = "cxx . . $ pkg/helper(h1)."
@@ -111,21 +109,22 @@ def test_enclosing_range_attributes_caller_exactly_over_nearest_preceding() -> N
     doc = scip_pb2.Document(relative_path="outer.cpp")
     doc.occurrences.extend(
         [
-            _occurrence(outer, line=5, roles=DEFINITION),  # run() spans lines 5..30
-            _occurrence(nested, line=10, roles=DEFINITION),  # inner lambda at 10..12
-            _occ_enclosing(helper, line=20, enclosing_start=5, enclosing_end=30),
+            _def_with_body(outer, line=5, end_line=30),  # run() body spans 5..30
+            _def_with_body(nested, line=10, end_line=12),  # inner lambda 10..12
+            _occurrence(helper, line=20),  # call in run()'s body, past the lambda
+            _occurrence(helper, line=11),  # call inside the lambda
         ]
     )
     graph = build_graph(scip_pb2.Index(documents=[doc]))
 
-    # Exact: the call at line 20 is inside run()'s range (5..30), not the lambda.
-    assert [e.src for e in graph.callers_of(helper)] == [outer]
+    callers = sorted(e.src for e in graph.callers_of(helper))
+    assert callers == sorted([outer, nested])  # 20 -> run (contains it), 11 -> lambda
 
 
 def test_calls_fall_back_to_nearest_preceding_without_enclosing_range() -> None:
-    """A stock binary (no #504) emits no `enclosing_range`. Attribution must
-    degrade to the nearest-preceding heuristic, unchanged — so the same graph as
-    before is produced. Here that (deliberately) attributes to the inner lambda."""
+    """A stock binary (no #504) emits no `enclosing_range`, so there are no
+    intervals: attribution degrades to the nearest-preceding heuristic, unchanged.
+    Here that (deliberately) misattributes the call to the inner lambda."""
     outer = "cxx . . $ pkg/Outer#run(o1)."
     nested = "cxx . . $ pkg/Outer#run/lambda#operator()(l1)."
     helper = "cxx . . $ pkg/helper(h1)."
@@ -133,9 +132,9 @@ def test_calls_fall_back_to_nearest_preceding_without_enclosing_range() -> None:
     doc = scip_pb2.Document(relative_path="outer.cpp")
     doc.occurrences.extend(
         [
-            _occurrence(outer, line=5, roles=DEFINITION),
+            _occurrence(outer, line=5, roles=DEFINITION),  # no enclosing_range
             _occurrence(nested, line=10, roles=DEFINITION),
-            _occurrence(helper, line=20),  # no enclosing_range
+            _occurrence(helper, line=20),
         ]
     )
     graph = build_graph(scip_pb2.Index(documents=[doc]))
@@ -143,40 +142,74 @@ def test_calls_fall_back_to_nearest_preceding_without_enclosing_range() -> None:
     assert [e.src for e in graph.callers_of(helper)] == [nested]
 
 
-def test_attribute_references_records_enclosing_symbol() -> None:
-    """With attribute_references and an enclosing_range-carrying occurrence, a
-    reference to a type is attributed to the definition that uses it — the
-    'type -> the function that uses it' edge the usage view draws."""
+def test_attribute_references_by_containment() -> None:
+    """A reference is attributed to the definition whose body contains it — read
+    from the definitions' enclosing ranges, not off the reference (which carries
+    none). This is the 'type -> the function that uses it' usage-view edge."""
     typ = "cxx . . $ pkg/Widget#"
     user = "cxx . . $ pkg/render(r1)."
 
     doc = scip_pb2.Document(relative_path="render.cpp")
     doc.occurrences.extend(
         [
-            _occurrence(user, line=5, roles=DEFINITION),  # render() spans 5..20
-            _occ_enclosing(typ, line=10, enclosing_start=5, enclosing_end=20),
+            _def_with_body(user, line=5, end_line=20),  # render() body 5..20
+            _occurrence(typ, line=10),  # a use of Widget inside render()
         ]
     )
     graph = build_graph(scip_pb2.Index(documents=[doc]), attribute_references=True)
 
-    refs = graph.references_of(typ)
-    assert [r.enclosing_symbol for r in refs] == [user]
+    assert [r.enclosing_symbol for r in graph.references_of(typ)] == [user]
+
+
+def test_reference_attributes_to_innermost_callable_or_type() -> None:
+    """Nesting: a use inside a method attributes to the method (innermost
+    callable); a use at class-body scope (a field's type) attributes to the class
+    (a type is a valid usage container, a namespace would be too coarse)."""
+    cls = "cxx . . $ pkg/C#"
+    method = "cxx . . $ pkg/C#m(m1)."
+    widget = "cxx . . $ pkg/Widget#"
+
+    doc = scip_pb2.Document(relative_path="c.cpp")
+    doc.occurrences.extend(
+        [
+            _def_with_body(cls, line=1, end_line=50),  # class C body 1..50
+            _def_with_body(method, line=10, end_line=20),  # method body 10..20
+            _occurrence(widget, line=15),  # used inside the method
+            _occurrence(widget, line=3),  # used at class scope (a field's type)
+        ]
+    )
+    graph = build_graph(scip_pb2.Index(documents=[doc]), attribute_references=True)
+
+    enclosing = sorted(r.enclosing_symbol for r in graph.references_of(widget))
+    assert enclosing == sorted([method, cls])  # 15 -> method (innermost), 3 -> class
 
 
 def test_references_unattributed_without_the_flag() -> None:
-    """attribute_references defaults off: references stay pure locations even when
-    the occurrence carries an enclosing_range, so the default build is unchanged."""
+    """attribute_references defaults off: references stay pure locations."""
+    typ = "cxx . . $ pkg/Widget#"
+    user = "cxx . . $ pkg/render(r1)."
+
+    doc = scip_pb2.Document(relative_path="render.cpp")
+    doc.occurrences.extend([_def_with_body(user, 5, 20), _occurrence(typ, line=10)])
+    graph = build_graph(scip_pb2.Index(documents=[doc]))  # no attribute_references
+
+    assert [r.enclosing_symbol for r in graph.references_of(typ)] == [None]
+
+
+def test_references_unattributed_on_stock_binary() -> None:
+    """With the flag but a stock binary (no enclosing_range on the defs), there
+    are no intervals, so references degrade to pure locations — never guessed."""
     typ = "cxx . . $ pkg/Widget#"
     user = "cxx . . $ pkg/render(r1)."
 
     doc = scip_pb2.Document(relative_path="render.cpp")
     doc.occurrences.extend(
         [
-            _occurrence(user, line=5, roles=DEFINITION),
-            _occ_enclosing(typ, line=10, enclosing_start=5, enclosing_end=20),
+            _occurrence(user, line=5, roles=DEFINITION),  # no enclosing_range
+            _occurrence(typ, line=10),
         ]
     )
-    graph = build_graph(scip_pb2.Index(documents=[doc]))  # no attribute_references
+    graph = build_graph(scip_pb2.Index(documents=[doc]), attribute_references=True)
 
     assert [r.enclosing_symbol for r in graph.references_of(typ)] == [None]
 

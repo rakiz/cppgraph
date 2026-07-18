@@ -49,11 +49,16 @@ usage view). Open:
 - **Report the crash upstream** (sourcegraph/scip-clang PR #504): the missing
   same-file guard is a bug in the PR itself. Draft ready in
   `docker/build-scip-clang/PR504-COMMENT.draft.md`; post it on the PR.
-- **Validate `enclosing_range` on real data _with_ `--attributed-refs`.** The
-  hardened #504 build is confirmed on all of `src/mongo` (6 482 TUs, 0 crashes),
-  but that run was file-granularity. Do one `--attributed-refs` (or `enrich-refs`)
-  run on a real graph to confirm exact caller attribution and the symbol-granularity
-  usage view on non-synthetic data (feeds the cost measurement below).
+- **Re-validate attribution on real data.** The first `enrich-refs` run on the
+  mongo `.scip` attributed **0** references — it exposed a consumption bug: the
+  builder read `enclosing_range` off the *reference* occurrence, but per the SCIP
+  spec it is emitted on **definitions** (their body extent), not references (0 of
+  13.7M reference occurrences carry one). Fixed to attribute by **containment**
+  (each use → the innermost definition whose enclosing_range interval contains its
+  line). The data is already in the `.scip` (929k enclosing ranges, 99.3% of
+  `src/mongo` files), so **no re-index needed** — re-run `enrich-refs` on the
+  stored `.scip` to confirm the "attributed X of Y references" coverage and the
+  symbol-granularity usage view on real data (feeds the cost measurement below).
 - **Auto-enrich after a #504 re-index?** `reindex.sh --attributed-refs` is an
   explicit opt-in today; decide whether a #504 re-index should enrich by default.
 - **Attributed reference edges** as first-class graph edges (traversable

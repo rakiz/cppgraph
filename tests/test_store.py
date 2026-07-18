@@ -266,11 +266,13 @@ def test_enrich_references_backfills_from_scip(tmp_path: Path) -> None:
     typ = "cxx . . $ pkg/Widget#"
     user = "cxx . . $ pkg/render(r1)."
     doc = scip_pb2.Document(relative_path="render.cpp")
+    # enclosing_range lives on the DEFINITION (render's body 5..20); the use of
+    # Widget at line 8 is attributed to it by containment.
     user_def = scip_pb2.Occurrence(symbol=user, symbol_roles=scip_pb2.SymbolRole.Definition)
     user_def.range.extend([5, 0, 10])
+    user_def.enclosing_range.extend([5, 0, 20, 0])
     use = scip_pb2.Occurrence(symbol=typ)
     use.range.extend([8, 0, 6])
-    use.enclosing_range.extend([5, 0, 20, 0])  # inside render()'s range
     doc.occurrences.extend([user_def, use])
     index = scip_pb2.Index(documents=[doc])
 
