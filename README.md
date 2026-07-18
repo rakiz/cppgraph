@@ -20,24 +20,27 @@ If someone pointed you (an AI coding agent) here with *"install this tool:
 https://github.com/rakiz/cppgraph"*, follow these steps exactly. They are
 deterministic; the scripts fail loudly with actionable messages.
 
+There are two phases. **Phase A (machine setup)** is one-time and light — run it
+end to end without stopping. **Phase B (index a project)** is per-project and has
+the heavy steps — those need the user's sign-off.
+
 > **RULE — heavy steps need explicit sign-off (do not skip).** The expensive
-> steps that use significant CPU are: generating a `compile_commands.json`
-> (step 3), **building the graph / indexing (step 4)**, and — only on the build
-> path — **compiling scip-clang from source** (step 2 with `--scip-source build`,
-> PR #504, ~30–60 min). **Give a realistic estimate — do not overstate, and do
-> not mislabel which step is the long one.**
+> steps that use significant CPU are: generating a `compile_commands.json`,
+> **building the graph / indexing**, and — only on the ARM-Linux build path —
+> **compiling scip-clang from source** (`--scip-source build`, PR #504,
+> ~30 min on 8 cores, longer on fewer). **Give a realistic estimate — do not
+> overstate, and do not mislabel which step is the long one.**
 >
-> - **Indexing (step 4)** is the routine heavy step and usually the **longest**
->   for a real codebase: **minutes to tens of minutes** (reference on ~14 cores:
->   ~2.5 min for ~500 translation units, ~20 min for ~6000; a few minutes per
->   1000 TUs, proportionally longer on fewer cores). Gauge it by counting entries
->   in `compile_commands.json` (≈ one per TU); `reindex.sh` prints an exact
->   estimate for the machine right before it starts.
-> - **The scip-clang binary (step 2)** is **light when downloaded** (a prebuilt
->   binary, seconds) — the default on macOS arm64 / Linux x86_64. It is heavy
->   **only** when compiled from source (`--scip-source build`, ~30–60 min), which
->   is opt-in (ARM-Linux, or anyone wanting #504). Don't call the binary "the
->   heavy step" on the download path.
+> - **Indexing** is the routine heavy step and usually the **longest** for a real
+>   codebase: **minutes to tens of minutes** (reference on ~14 cores: ~2.5 min for
+>   ~500 translation units, ~20 min for ~6000; a few minutes per 1000 TUs,
+>   proportionally longer on fewer cores). Gauge it by counting entries in
+>   `compile_commands.json` (≈ one per TU); `reindex.sh` prints an exact estimate
+>   for the machine right before it starts.
+> - **The scip-clang binary** is **light when downloaded** (a prebuilt binary,
+>   seconds) — the default on macOS arm64 / Linux x86_64. It is heavy **only**
+>   when compiled from source (ARM-Linux, or anyone wanting #504). Don't call the
+>   binary "the heavy step" on the download path.
 >
 > Before running any heavy step, in **one message** you **MUST**:
 > 1. say what it does and a realistic time estimate (per above);
@@ -46,16 +49,19 @@ deterministic; the scripts fail loudly with actionable messages.
 >
 > Then stop and wait — do not start until they choose, and never launch it in
 > the background. Tip: for a first try, suggest scoping to one subtree (a filter
-> like `src/foo/`) so it finishes in a couple of minutes. Light steps you may run
-> directly: clone + setup **when it downloads scip-clang** (step 2), and steps 5
-> and 6.
+> like `src/foo/`) so it finishes in a couple of minutes. **All of Phase A is
+> light** (the one exception is compiling scip-clang on ARM-Linux, flagged
+> below) — run it directly, don't pause between its steps.
+
+### Phase A — set up the machine (once; light, run end to end)
 
 1. **Check the platform.** A prebuilt `scip-clang` downloads on **macOS arm64**
    and **Linux x86_64** (light). On **ARM-Linux (aarch64)** there is no prebuilt
-   binary — two routes, and pick deliberately:
+   binary — two routes, pick deliberately (this is the *one* Phase-A step that can
+   be heavy, so apply the RULE for the build route):
    - **Compile scip-clang natively once** (`setup.sh --scip-source build`, PR
-     #504, ~30–60 min, Docker) → then index **natively**, at normal speed. This
-     is the recommended real workflow (also unlocks symbol-granularity usage).
+     #504, ~30 min on 8 cores, Docker) → then index **natively**, at normal speed.
+     Recommended real workflow (also unlocks symbol-granularity usage).
    - **Emulated x86_64 container** (Docker/Podman + amd64 emulation): no build,
      but indexing runs *emulated* and is **much slower** (can be hours on a large
      codebase) — fine only for a quick try or a small subtree. See
@@ -74,26 +80,49 @@ deterministic; the scripts fail loudly with actionable messages.
    cd "${XDG_DATA_HOME:-$HOME/.local/share}/cppgraph/repo"
    scripts/setup.sh              # venv + deps + scip-clang
    ```
-3. **Get a `compile_commands.json`.** Ask the user where theirs is. If they don't
+3. **Register the MCP server** — once per machine, part of setup (idempotent; no
+   project args, it auto-discovers each project's `.cppgraph/` at launch, so run
+   it now, before any project is indexed):
+   ```bash
+   scripts/register-mcp.sh
+   ```
+
+**Then don't stop — carry on to Phase B.** After Phase A the tool is *installed*
+but can't answer anything yet: it has no graph. Do not leave the user here. In
+one message: (a) confirm setup is done, (b) **remind them what cppgraph is for
+and why they installed it** (they may have waited through a long build and lost
+the thread), and (c) propose Phase B for a specific project — then apply the RULE
+for its heavy steps.
+
+### Phase B — index a project (per-project; heavy, needs sign-off)
+
+4. **Get a `compile_commands.json`.** Ask the user where theirs is. If they don't
    have one, it must be generated — and generating it may run a **full build**
    (long/heavy). Apply the RULE above: propose the right command, get the OK, or
    let them run it. How to produce one per build system (CMake / Bazel / Make):
    [AGENTS.md](AGENTS.md) → "The compilation database". Also ask for the project's
    **source root** and, optionally, a **subtree filter** to skip vendored code
    (e.g. `src/`).
-4. **Build the graph** — **heavy: apply the RULE above** (one-time; minutes to
+5. **Build the graph** — **heavy: apply the RULE above** (one-time; minutes to
    tens of minutes, *not hours*). Present this exact command, with a realistic
    estimate, and let the user choose to run it or have you run it. Prefer a
    `<filter>` (e.g. `src/foo/`) on a first run so it finishes fast. It writes
-   into the target's gitignored `.cppgraph/` and prints the register command:
+   into the target's gitignored `.cppgraph/`:
    ```bash
    scripts/reindex.sh <compile_commands.json> <filter> myproject
    ```
-5. **Register the MCP server** — once per machine (idempotent; no project args,
-   it auto-discovers each project's `.cppgraph/` from the working directory):
-   ```bash
-   scripts/register-mcp.sh
-   ```
+   **If (and only if) the installed scip-clang is a #504 build** (check `cppgraph
+   status` → `usage_view`, or the binary's provenance sidecar), also ask the user
+   which usage granularity they want, and pass the flag accordingly:
+   - **light (default)** — file granularity ("used somewhere in these files"),
+     smaller store;
+   - **extended** — `scripts/reindex.sh --attributed-refs …`, symbol granularity
+     ("used by *these functions*"), larger store.
+
+   Not sure, or they want to decide later? Run the default light build — it keeps
+   the `.scip`, so you can upgrade **without re-indexing**:
+   `cppgraph enrich-refs --graph <…>.graph.db --scip <…>.scip`. With a stock
+   binary the flag is a no-op, so don't offer the choice there.
 6. **Tell the user to open a new Claude Code session _from their project
    directory_** (that's how the server finds this project's graph), then ask
    *"what calls X?"*, *"impact of changing Y?"*, *"show the dependency graph of Z"*.

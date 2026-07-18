@@ -32,10 +32,12 @@ emulated x86 indexer for ARM-Linux. `setup.sh --scip-source build` drives it
 (default output → the machine data dir `reindex.sh` reads). Not yet exercised
 end-to-end. Remaining:
 
-- **Build it on an ARM-Linux host** (CPU/RAM-heavy, ~30-60 min) and confirm the
-  produced binary indexes a real project natively. The #504 patch is already
-  rebased onto `v0.4.0` (`enclosing_range-on-v0.4.0.patch`), so `git apply`
-  should be clean — the Dockerfile guards it anyway.
+- **Build on an ARM-Linux host: done & measured.** Native aarch64 `scip-clang`
+  0.4.0 + #504 built on an AWS Graviton `m6g.2xlarge` (8 vCPU), **~32 min cold**
+  (~99 % Bazel compiling LLVM/Clang; CPU-bound, scales with cores). Provenance
+  sidecar records `enclosing_range-504` / `build`. Timings in
+  `docker/build-scip-clang/README.md`. **Remaining: confirm the binary indexes a
+  real project natively** (native, not emulated) end-to-end.
 - **Decide the distribution stance.** Building #504 ourselves means owning the
   build for every arch that needs it — a native binary per host, built once
   locally. Fine as build-and-use-locally; revisit if it grows into a hosted
@@ -79,15 +81,19 @@ Done (works when a #504-built binary emits `enclosing_range`, no-op otherwise):
 
 Remaining:
 
-- Wire `--attributed-refs` through `scripts/reindex.sh` (currently only the raw
-  `cppgraph build` exposes it), and decide whether to enrich automatically after
-  a #504 re-index.
+- `scripts/reindex.sh` now takes a leading `--attributed-refs` (warns + no-ops on
+  a non-#504 binary, tips `enrich-refs` on the kept `.scip` otherwise). Still
+  open: decide whether to enrich automatically after a #504 re-index, or keep it
+  an explicit choice (current behaviour).
 - Attributed reference **edges** as first-class graph edges (traversable
   symbol→symbol, distinct `kind`) for `impact`/`path`, beyond the usage view.
 - Measure the real store-size cost of `--attributed-refs` on the mongo graph and
   quote it in the flag help / DESIGN (currently "extra space", unquantified).
-- Verify end-to-end against an actual #504 binary once built (tests use synthetic
-  `.scip`; no real enclosing_range data has flowed through yet).
+- Verify end-to-end against the #504 binary (now built on the ARM workstation):
+  index a real project natively, then confirm `enclosing_range` actually flows
+  through — exact caller attribution on `calls`, and `--attributed-refs` /
+  `enrich-refs` producing the symbol-granularity usage view on real data (tests
+  so far use synthetic `.scip` only).
 
 Robustness when consuming the field: read `Occurrence.enclosing_range` as
 optional. An empty value — a stock downloaded binary, or one built without #504 —

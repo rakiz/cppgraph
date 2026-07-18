@@ -23,7 +23,11 @@ Z"), in a handful of commands.
     graph someone else built — ask the maintainer for a prebuilt `graph.db` and
     jump to step 3.
 
-## 1. Clone + set up
+Two phases: **set up the machine once** (§1, light) then **index each project**
+(§2, the heavy one-time-per-project step). §1 is done once and reused for every
+project on the machine.
+
+## 1. Set up the machine (once)
 
 Clone into the per-machine tool dir — the same `~/.local/share/cppgraph/` where
 `setup.sh` puts the `scip-clang` binary, so the whole tool lives in one stable,
@@ -34,6 +38,7 @@ git clone https://github.com/rakiz/cppgraph "${XDG_DATA_HOME:-$HOME/.local/share
 cd "${XDG_DATA_HOME:-$HOME/.local/share}/cppgraph/repo"
 scripts/setup.sh          # venv + deps + scip-clang (downloads the prebuilt
                           # binary; on a TTY it offers to build PR #504 instead)
+scripts/register-mcp.sh   # register the MCP server, once per machine
 ```
 
 `setup.sh` picks the scip-clang source for your platform (download the prebuilt
@@ -42,7 +47,12 @@ terminal it prompts; otherwise it auto-picks (download where a binary exists,
 else emulate) and never triggers a long build unattended. Force it with
 `--scip-source download|build|emulate` (or `CPPGRAPH_SCIP_SOURCE`).
 
-## 2. Build a graph of your project
+`register-mcp.sh` is part of this one-time setup: it registers the server
+globally and auto-discovers each project's `.cppgraph/` at launch, so you run it
+now — before indexing anything — and never again. That's the whole machine setup;
+next you point it at a project.
+
+## 2. Index a project (once per project)
 
 Point it at your project's `compile_commands.json`; the second argument filters
 to your source subtree (skip third-party/vendored code):
@@ -50,21 +60,27 @@ to your source subtree (skip third-party/vendored code):
 ```bash
 scripts/reindex.sh /path/to/project/compile_commands.json src/ myproject
 # → writes /path/to/project/.cppgraph/myproject.graph.db (gitignored, next to
-#   your code; a big codebase takes ~minutes, one time) and prints the exact
-#   register command for the next step.
+#   your code; a big codebase takes ~minutes, one time).
 ```
+
+**Usage-view granularity (only if your scip-clang is a #504 build).** By default
+the reference index is *file* granularity ("used somewhere in these files"). Add
+`--attributed-refs` for *symbol* granularity ("used by *these functions*") — more
+useful, larger store:
+
+```bash
+scripts/reindex.sh --attributed-refs /path/to/project/compile_commands.json src/ myproject
+```
+
+No rush to decide: the default keeps the `.scip`, so you can upgrade later
+without re-indexing — `cppgraph enrich-refs --graph <…>.graph.db --scip <…>.scip`.
+With a stock (non-#504) binary the flag does nothing.
 
 ## 3. Use it from Claude Code (the main way)
 
-Register the server once per machine (it auto-discovers each project's
-`.cppgraph/`, so you only do this the first time):
-
-```bash
-scripts/register-mcp.sh
-```
-
-Then open a **new** Claude Code session **from your project directory** (that's
-how it finds this project's graph) and just ask, in plain language:
+The MCP server is already registered (§1), so just open a **new** Claude Code
+session **from your project directory** (that's how it finds this project's
+graph) and ask, in plain language:
 
 - *"What calls `SomeClass::someMethod`? Watch out for same-named overloads."*
 - *"What's the blast radius if I change this function?"*

@@ -12,12 +12,18 @@ set -euo pipefail
 # Two modes:
 #
 #   Full build (default):
-#     scripts/reindex.sh COMPDB_PATH [SRC_FILTER] [OUT_NAME] [PROJECT_ROOT]
+#     scripts/reindex.sh [--attributed-refs] COMPDB_PATH [SRC_FILTER] [OUT_NAME] [PROJECT_ROOT]
 #
 #   Incremental update of an existing store:
 #     scripts/reindex.sh --update GRAPH_DB COMPDB_PATH [SRC_FILTER] [PROJECT_ROOT]
 #
 # --- Full build arguments ---
+#   --attributed-refs  (optional, leading flag) upgrade the reference index to
+#                 SYMBOL granularity — records which definition uses each symbol,
+#                 so "where is this type used?" answers with the functions, not
+#                 just the files. Needs a #504 scip-clang (emits enclosing_range);
+#                 larger store. Default off (file granularity, already exact). Can
+#                 also be added afterwards without re-indexing: `cppgraph enrich-refs`.
 #   COMPDB_PATH   path to a compile_commands.json (required)
 #   SRC_FILTER    substring filter applied to each compdb entry's "file"
 #                 field; omit or pass "" to index everything in the compdb
@@ -299,8 +305,18 @@ fi
 # ---------------------------------------------------------------------------
 # Full build mode
 # ---------------------------------------------------------------------------
+# Optional leading flag: --attributed-refs upgrades the reference index to SYMBOL
+# granularity (the functions that use a type, not just the files). Needs a
+# scip-clang that emits enclosing_range (a #504 build); larger store. Off by
+# default — the plain reference index is already exact, just file-granularity.
+ATTRIBUTED_REFS=0
+if [[ "${1:-}" == "--attributed-refs" ]]; then
+  ATTRIBUTED_REFS=1
+  shift
+fi
+
 if [[ $# -lt 1 ]]; then
-  echo "usage: $0 COMPDB_PATH [SRC_FILTER] [OUT_NAME] [PROJECT_ROOT]" >&2
+  echo "usage: $0 [--attributed-refs] COMPDB_PATH [SRC_FILTER] [OUT_NAME] [PROJECT_ROOT]" >&2
   echo "       $0 --update GRAPH_DB COMPDB_PATH [SRC_FILTER] [PROJECT_ROOT]" >&2
   exit 2
 fi
@@ -378,15 +394,40 @@ EOF
   exit 1
 fi
 
+# Reference-attribution mode. --attributed-refs upgrades the usage view to symbol
+# granularity, but only a #504 binary emits the enclosing_range it needs — warn
+# instead of silently producing a file-granularity graph the user thinks is rich.
+BUILD_ATTR=()
+if [[ "$ATTRIBUTED_REFS" == 1 ]]; then
+  if [[ "$SCIP_VARIANT" == "enclosing_range-504" ]]; then
+    BUILD_ATTR+=(--attributed-refs)
+    echo "  reference attribution: SYMBOL granularity (--attributed-refs; larger store)"
+  else
+    echo "  warning: --attributed-refs requested, but this scip-clang"
+    echo "           (variant: ${SCIP_VARIANT:-unknown}) does not emit enclosing_range."
+    echo "           Producing the file-granularity graph instead. Use a #504 build"
+    echo "           for symbol granularity."
+  fi
+fi
+
 echo "[3/3] Building the cppgraph graph ..."
 "$CPPGRAPH" build --scip "$OUT_SCIP" --out "$OUT_GRAPH" \
+  ${BUILD_ATTR[@]+"${BUILD_ATTR[@]}"} \
   ${BUILD_PROVENANCE[@]+"${BUILD_PROVENANCE[@]}"}
 
 echo "Done. Graph: $OUT_GRAPH"
+# The .scip is kept next to the graph, so a file-granularity graph built with a
+# #504 binary can be upgraded to symbol granularity later without re-indexing.
+if [[ "$ATTRIBUTED_REFS" != 1 && "$SCIP_VARIANT" == "enclosing_range-504" ]]; then
+  echo
+  echo "Tip: this graph is file-granularity. To upgrade to SYMBOL granularity"
+  echo "     ('which functions use this type?') without re-indexing, run:"
+  echo "       $CPPGRAPH enrich-refs --graph $OUT_GRAPH --scip $OUT_SCIP"
+fi
 echo
 echo "Use it in Claude Code:"
-echo "  1. once per machine:  scripts/register-mcp.sh"
-echo "     (registers cppgraph globally; it auto-discovers each project's .cppgraph/)"
+echo "  1. register once per machine (part of setup; skip if already done):"
+echo "       scripts/register-mcp.sh"
 echo "  2. open Claude Code from this project, in a NEW session:"
 echo "       $PROJECT_ROOT"
 echo "     then ask your questions — it uses this project's graph automatically."

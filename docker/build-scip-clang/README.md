@@ -28,10 +28,31 @@ The build compiles LLVM-based code from source — CPU/RAM-heavy (Bazel; tune
 `docker build --output` to drop just the binary on the host (the build image is
 discarded).
 
-**Timing.** ~30 min on an AWS Graviton `m6g.2xlarge` (Neoverse-N1, 8 vCPU,
-30 GiB) with a **warm** Docker cache. Budget more on a **cold** first run: the
-LLVM 21.1.8 toolchain (~150 MB) and Bazel download happen on top of the
-compile. For a true cold number, time a `--no-cache` build.
+**Timing.** Measured **~32 min cold** (Docker cache purged first) on an AWS
+Graviton `m6g.2xlarge` (Neoverse-N1, 8 vCPU, 30 GiB, ARM64). Where it goes:
+
+| Step                                   | Time        |
+| -------------------------------------- | ----------- |
+| pull `ubuntu:22.04`                    | ~1 s        |
+| `apt` system deps                      | ~16 s       |
+| bazelisk download                      | <1 s        |
+| `git clone` scip-clang v0.4.0          | <1 s        |
+| apply PR #504 patch                    | <1 s        |
+| **Bazel compile (LLVM+Clang) + LTO link** | **~31 min** |
+
+So **~99 % is the Bazel compile** — scip-clang embeds Clang as a library, so it
+builds a large chunk of LLVM/Clang from source; the annex steps are noise. The
+final `-flto=thin` link is the slow serial tail.
+
+It is **CPU-bound and parallel**: on this run Bazel's critical path was ~148 s
+but wall time ~1879 s — the gap is the 8 cores saturating. **More cores → much
+faster** (a 32-core host finishes in a handful of minutes); fewer → proportionally
+longer. Budget by core count, not a fixed number.
+
+> Not to be confused with the **~11 h** figure elsewhere in the docs — that is
+> *emulated* (QEMU) indexing of a large codebase, a different operation entirely.
+> This native build (~30 min, one-time) is precisely what lets an ARM host skip
+> that emulated path.
 
 By default the binary lands in the per-machine data dir
 (`${XDG_DATA_HOME:-~/.local/share}/cppgraph/bin`) — exactly where `reindex.sh`
