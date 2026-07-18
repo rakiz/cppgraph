@@ -42,7 +42,7 @@ from cppgraph.store import (
     discover_graph,
     staleness_verdict,
 )
-from cppgraph.updates import update_advice
+from cppgraph.updates import scip_update_advice, update_advice
 
 if TYPE_CHECKING:
     from cppgraph.model import Edge, Node
@@ -772,6 +772,10 @@ def status_report(
     }
     if check_updates:
         result["tool"] = update_advice(m.get("cppgraph_version"), force=force)
+        result["scip_clang"] = scip_update_advice(
+            {"version": m.get("index_tool_version"), "variant": m.get("index_tool_variant")},
+            force=force,
+        )
     if root is None or not commit:
         if root is not None and not commit:
             result["drift"] = {"checked": False, "reason": "no source commit recorded in the graph"}

@@ -1,5 +1,11 @@
 {
   "$comment": "Release registry consumed by `cppgraph status` (update/rebuild advice) and by scripts/install.sh (default checkout target). `latest` is the newest STABLE version tag (null until the first release is cut → installers fall back to the main branch). Each `releases` entry: `version` (matches the git tag, with or without a leading 'v'), `rebuild` (which layer of the index stack adopting it invalidates: \"none\" = query-code only, the existing store stays valid; \"store\" = rebuild the SQLite store from the existing .scip, no recompile; \"reindex\" = re-run scip-clang then rebuild the store), optional one-line `notes`, and an optional `url` to that release's changelog (keep detail in the CHANGELOG/GitHub release, not here). Sort releases oldest->newest. Example entry: {\"version\": \"0.1.0\", \"rebuild\": \"reindex\", \"notes\": \"reference index format changed\", \"url\": \"https://github.com/rakiz/cppgraph/releases/tag/v0.1.0\"}.",
+  "$comment_scip_clang": "`scip_clang` pins the indexer dependency: `version` (upstream scip-clang release tag, drives the download URL and the source clone in docker/build-scip-clang), `variant` (\"stock\" = the unpatched release binary; \"enclosing_range-504\" = built from source with PR #504 — the two emit different .scip, so the identity is (version, variant)), and `rebuild` (impact of adopting a DIFFERENT pin, same vocabulary as releases: \"reindex\" in practice since a new indexer changes the .scip). setup.sh reads `version`, records the installed identity in a sidecar next to the binary, and `cppgraph status` compares installed + each graph against this pin to advise updating the binary and/or re-indexing.",
+  "scip_clang": {
+    "version": "0.4.0",
+    "variant": "stock",
+    "rebuild": "reindex"
+  },
   "latest": null,
   "releases": []
 }

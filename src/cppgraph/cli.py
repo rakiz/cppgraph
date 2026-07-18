@@ -21,6 +21,7 @@ from cppgraph.store import (
     update_store,
     write_sqlite,
 )
+from cppgraph.updates import scip_update_advice, update_advice
 
 # Extensions the graph is built from — drift in a non-C++ file (docs, build
 # config, settings) never changes the code graph, so `status` ignores it to keep
@@ -183,6 +184,14 @@ def main(argv: list[str] | None = None) -> int:
         "(pair with --source-commit; auto-detected otherwise)",
     )
     p_build.add_argument(
+        "--scip-variant",
+        default=None,
+        help="the scip-clang variant that produced this index (e.g. 'stock' or "
+        "'enclosing_range-504'); recorded as provenance so `cppgraph status` can "
+        "flag the graph as stale when the pinned indexer changes. reindex.sh "
+        "passes it from the binary's provenance sidecar.",
+    )
+    p_build.add_argument(
         "--references",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -221,6 +230,12 @@ def main(argv: list[str] | None = None) -> int:
         "--source-dirty",
         action="store_true",
         help="mark the updated sources as having uncommitted changes",
+    )
+    p_update.add_argument(
+        "--scip-variant",
+        default=None,
+        help="the scip-clang variant that produced the partial index (see "
+        "`build --scip-variant`); refreshes the graph's recorded indexer identity",
     )
 
     p_find = sub.add_parser(
@@ -515,6 +530,7 @@ def main(argv: list[str] | None = None) -> int:
             index,
             source_commit=args.source_commit,
             source_dirty=True if args.source_dirty else None,
+            scip_variant=args.scip_variant,
         )
         write_sqlite(graph, args.out, meta=meta)
         refs_note = f", {len(graph.references)} refs" if graph.references else ""
@@ -536,6 +552,7 @@ def main(argv: list[str] | None = None) -> int:
             index,
             source_commit=args.source_commit,
             source_dirty=True if args.source_dirty else None,
+            scip_variant=args.scip_variant,
         )
         stats = update_store(args.graph, index, deleted_files=args.deleted, meta=meta)
         print(
@@ -687,6 +704,21 @@ def main(argv: list[str] | None = None) -> int:
             f"  format:        schema v{m.get('schema_version', '0 (legacy)')}"
             f", cppgraph {m.get('cppgraph_version', '?')}"
         )
+        scip = scip_update_advice(
+            {"version": m.get("index_tool_version"), "variant": m.get("index_tool_variant")}
+        )
+        if scip.get("checked"):
+            pin = scip["pinned"]
+            print(f"  scip-clang pin: {pin['version']}-{pin['variant']}")
+            if scip.get("binary_status") in ("stale", "unknown"):
+                print(f"    ! {scip['binary_message']}")
+            if scip.get("reindex_recommended"):
+                print(f"    ! {scip['reindex_message']}")
+        tool = update_advice(m.get("cppgraph_version"))
+        if tool.get("update_available"):
+            print(f"    ! {tool['update_message']}")
+        if tool.get("rebuild_recommended"):
+            print(f"    ! {tool['rebuild_message']}")
 
         if args.root is None:
             if commit:

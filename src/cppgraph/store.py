@@ -220,6 +220,7 @@ def build_provenance(
     *,
     source_commit: str | None = None,
     source_dirty: bool | None = None,
+    scip_variant: str | None = None,
 ) -> dict[str, str]:
     """Provenance to record in the store's `meta` table: *what* was indexed.
 
@@ -242,6 +243,12 @@ def build_provenance(
         meta["index_tool"] = md.tool_info.name
     if md.tool_info.version:
         meta["index_tool_version"] = md.tool_info.version
+    # The SCIP metadata carries the tool's *version* but not which patch variant
+    # it was — "stock" vs a patched build (e.g. enclosing_range-504) emit
+    # different indexes, so the caller stamps it (from the binary's provenance
+    # sidecar). Lets `cppgraph status` tell when a graph is stale for the pin.
+    if scip_variant:
+        meta["index_tool_variant"] = scip_variant
 
     commit = source_commit
     dirty = source_dirty

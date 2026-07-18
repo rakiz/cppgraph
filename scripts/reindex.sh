@@ -85,13 +85,15 @@ set -euo pipefail
 # don't assume a compdb's "file" field is uniformly absolute or relative for
 # a new project either.
 #
-# Prerequisites: the scip-clang binary and the `.venv` — both set up by
-# scripts/setup.sh (per-machine, in the cppgraph checkout, not committed).
+# Prerequisites: the scip-clang binary (per-machine data dir) and the `.venv` (in
+# the checkout) — both set up by scripts/setup.sh, per-machine, not committed.
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-# Per-machine tool install (the scip-clang binary and the venv) lives in the
-# cppgraph checkout; per-project outputs live in the target (see out_dir_for).
-SCIP_CLANG="$REPO_ROOT/scratch/bin/scip-clang"
+# The venv lives in the cppgraph checkout; the scip-clang binary is a per-machine
+# artifact shared across projects, kept in the persistent data dir XDG_DATA_HOME
+# (set up by setup.sh; override with CPPGRAPH_BIN_DIR). Per-project outputs go to
+# the target project's own .cppgraph/ (see out_dir_for).
+SCIP_CLANG="${CPPGRAPH_BIN_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/cppgraph/bin}/scip-clang"
 VENV_PY="$REPO_ROOT/.venv/bin/python"
 CPPGRAPH="$REPO_ROOT/.venv/bin/cppgraph"
 
@@ -100,6 +102,16 @@ CPPGRAPH="$REPO_ROOT/.venv/bin/cppgraph"
 # a .scip produced elsewhere (scripts/index-in-container.sh, or copied in). Only
 # incremental --update genuinely needs the binary (it indexes changed TUs).
 if [[ -x "$SCIP_CLANG" ]]; then HAVE_SCIP_CLANG=1; else HAVE_SCIP_CLANG=0; fi
+
+# The binary's variant (stock vs enclosing_range-504), from its provenance
+# sidecar — stamped into the store so `cppgraph status` can tell when a graph is
+# stale for the pinned indexer. Only trusted when we run this native binary; when
+# reusing a .scip built elsewhere we don't know its variant, so leave it unset.
+SCIP_VARIANT=""
+_prov="$(dirname "$SCIP_CLANG")/scip-clang.json"
+if [[ "$HAVE_SCIP_CLANG" == 1 && -f "$_prov" ]]; then
+  SCIP_VARIANT="$("$VENV_PY" -c 'import json,sys;print(json.load(open(sys.argv[1])).get("variant",""))' "$_prov" 2>/dev/null || true)"
+fi
 
 # Per-project outputs (graph.db, .scip, filtered compdb) live in the target
 # project's own .cppgraph/ — next to the code they describe, like .vscode/, and
@@ -274,6 +286,7 @@ PYEOF
       UPDATE_ARGS+=(--source-dirty)
     fi
   fi
+  [[ -n "$SCIP_VARIANT" ]] && UPDATE_ARGS+=(--scip-variant "$SCIP_VARIANT")
   "$CPPGRAPH" "${UPDATE_ARGS[@]}"
 
   echo "Done."
@@ -341,6 +354,7 @@ if SRC_COMMIT="$(git -C "$PROJECT_ROOT" rev-parse HEAD 2>/dev/null)"; then
   fi
   echo "  source commit: $SRC_COMMIT"
 fi
+[[ -n "$SCIP_VARIANT" ]] && BUILD_PROVENANCE+=(--scip-variant "$SCIP_VARIANT")
 
 if [[ "$HAVE_SCIP_CLANG" == 1 ]]; then
   echo "[2/3] Running scip-clang ..."

@@ -34,9 +34,9 @@ when you want to measure at scale; keep such paths out of the shipped code.)
   MUST use that venv.
 - SCIP protobuf: `src/cppgraph/proto/scip.proto` is vendored, alongside the
   **generated and committed** bindings `src/cppgraph/proto/scip_pb2.py` / `.pyi`
-  (protoc self-marks them `DO NOT EDIT!`) — this avoids requiring every
-  contributor to install `protoc` just to run the tool. `protoc` is only needed
-  to *regenerate* the bindings after `scip.proto` changes. See
+  (protoc self-marks them `DO NOT EDIT!`) — so nobody needs `protoc` to run the
+  tool. Regenerating after a `scip.proto` change runs a pinned `protoc` in a
+  container (`docker/gen-bindings/`), never on the host. See
   `src/cppgraph/proto/README.md` / `INSTALL.md` for exact steps.
 - Tests with `pytest` under `tests/`. Prefer small fixtures (a tiny checked-in
   or synthetic `.scip`) over depending on a full external index.
@@ -75,8 +75,9 @@ one however the target supports:
   build dir; symlink/copy it to the project root for tools that expect it there.
 - Bazel: the `hedron_compile_commands` rule (`bazel run
   @hedron_compile_commands//:refresh_all`), or the project's own target if it
-  ships one (e.g. MongoDB has a bespoke `--config=compiledb` → `bazel build
-  //:compiledb`; check the repo's `.bazelrc`/`BUILD.bazel`).
+  ships one (e.g. MongoDB has a bespoke `compiledb` aspect defined in `.bazelrc`
+  → `bazel build --config=compiledb //src/...`; the authoritative invocation is
+  in `buildscripts/clang_tidy_vscode.py`).
 - Make / other: `bear -- <build command>` wraps the build and records it.
 - Multiple fragmented DBs: merge with `compdb`.
 
@@ -91,9 +92,12 @@ tool takes the path as an argument — never hard-code it.
   directory (its own outputs: `graph.db`, `.scip`, filtered compdb), dropped in
   with a `.gitignore` of `*` so it never dirties the repo — like `.vscode/`.
   Everything else is read (`compile_commands.json`, and sources with `--root`).
-- The per-machine tool install (the `scip-clang` binary, the `.venv`) lives in
-  this cppgraph checkout under `scratch/` — gitignored, set up by
-  `scripts/setup.sh`.
+- Per-machine tool install, set up by `scripts/setup.sh`: the `.venv` lives in
+  this checkout; the `scip-clang` binary is a per-machine artifact (one per arch,
+  shared across projects) kept in the persistent data dir
+  `${XDG_DATA_HOME:-~/.local/share}/cppgraph/bin` (override `CPPGRAPH_BIN_DIR`) —
+  a data dir, not a cache, so a self-built binary isn't wiped by cache cleaners.
+  Not under `scratch/`, which is dev-only throwaway (example graphs, etc.).
 
 ## Layout
 
@@ -102,7 +106,8 @@ src/cppgraph/     package (cli, builder, scip parser, store, queries, mcp, expor
 viz/              bundled offline graph viewer (HTML + vendored vis-network)
 scripts/          setup.sh, reindex.sh, register-mcp.sh
 tests/            pytest
-scratch/          per-machine tool install (scip-clang binary) + throwaway (gitignored)
+scratch/          dev-only throwaway: example graphs, ad-hoc outputs (gitignored)
+                  (the scip-clang binary lives in ~/.local/share/cppgraph/bin, not here)
 DESIGN.md         architecture + edge model
 CHANGELOG.md      what's been done
 TODO.md           open tasks

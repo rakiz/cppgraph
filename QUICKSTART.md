@@ -12,10 +12,12 @@ Z"), in a handful of commands.
 - **Supported platforms for indexing** (limited by the `scip-clang` binary):
   - macOS Apple Silicon (arm64) ✅
   - Linux x86_64 ✅
-  - **ARM-Linux (aarch64, e.g. Ubuntu arm64)** → indexing runs via an x86_64
-    container (needs Docker/Podman + amd64 emulation); the graph then builds
-    natively. See [INSTALL.md](INSTALL.md) → "ARM-Linux / Windows: index via a
-    container".
+  - **ARM-Linux (aarch64, e.g. Ubuntu arm64)** → no prebuilt binary. Two options:
+    **build scip-clang natively** (`setup.sh --scip-source build`, ~30-60 min,
+    Docker — recommended, and gets PR #504), or run the x86_64 binary via a
+    container (emulated, slow — for a subsystem only). See
+    [INSTALL.md](INSTALL.md) → "ARM-Linux / Windows: index via a container" and
+    `docker/build-scip-clang/`.
   - **Windows** → run everything inside **WSL2 (Ubuntu)**; it behaves as Linux x86_64.
   - **Intel Mac** → not supported (no `scip-clang` binary). You can still *use* a
     graph someone else built — ask the maintainer for a prebuilt `graph.db` and
@@ -25,8 +27,15 @@ Z"), in a handful of commands.
 
 ```bash
 git clone https://github.com/rakiz/cppgraph && cd cppgraph
-scripts/setup.sh          # venv + deps + downloads scip-clang
+scripts/setup.sh          # venv + deps + scip-clang (downloads the prebuilt
+                          # binary; on a TTY it offers to build PR #504 instead)
 ```
+
+`setup.sh` picks the scip-clang source for your platform (download the prebuilt
+binary, build it locally with PR #504, or route to an emulated container). On a
+terminal it prompts; otherwise it auto-picks (download where a binary exists,
+else emulate) and never triggers a long build unattended. Force it with
+`--scip-source download|build|emulate` (or `CPPGRAPH_SCIP_SOURCE`).
 
 ## 2. Build a graph of your project
 

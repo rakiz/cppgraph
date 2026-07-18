@@ -144,6 +144,97 @@ def _max_level(releases: list[dict[str, Any]]) -> str:
     return level
 
 
+# ---- scip-clang dependency pin ---------------------------------------------
+# The indexer is a versioned dependency with an identity of (version, variant):
+# "stock" is the unpatched upstream release binary; a non-stock variant (e.g.
+# "enclosing_range-504") is built from source with a patch. The two emit
+# different `.scip`, so both the installed binary and each graph are compared
+# against the pin in versions.json (`scip_clang`). See DESIGN.md § Source of truth.
+
+
+def scip_clang_pin(data: dict[str, Any]) -> dict[str, Any] | None:
+    """The pinned indexer identity from versions.json `scip_clang`, or None."""
+    pin = data.get("scip_clang")
+    return pin if isinstance(pin, dict) and pin.get("version") else None
+
+
+def _scip_bin_dir() -> Path:
+    """Where the scip-clang binary + its provenance sidecar live — the same
+    resolution the shell scripts use (CPPGRAPH_BIN_DIR, else XDG_DATA_HOME)."""
+    override = os.environ.get("CPPGRAPH_BIN_DIR")
+    if override:
+        return Path(override)
+    base = os.environ.get("XDG_DATA_HOME") or (Path.home() / ".local" / "share")
+    return Path(base) / "cppgraph" / "bin"
+
+
+def installed_scip_clang() -> dict[str, Any] | None:
+    """The `scip-clang.json` provenance sidecar next to the installed binary, or
+    None (never installed, or installed before provenance was recorded)."""
+    try:
+        return json.loads((_scip_bin_dir() / "scip-clang.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def _scip_identity(d: dict[str, Any] | None) -> tuple[str, str] | None:
+    """`(version, variant)` from a pin/sidecar/graph-meta dict, variant defaulting
+    to `"stock"`; None when there's no version to compare."""
+    if not d or not d.get("version"):
+        return None
+    return (str(d["version"]).lstrip("v"), str(d.get("variant") or "stock"))
+
+
+def _scip_source_for(variant: str) -> str:
+    """Which `setup.sh --scip-source` produces this variant: the stock release is
+    a download, anything patched must be built."""
+    return "download" if variant == "stock" else "build"
+
+
+def compute_scip_advice(
+    pin: dict[str, Any] | None,
+    installed: dict[str, Any] | None,
+    graph_scip: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Pure advice about the scip-clang dependency: is the installed binary the
+    pinned identity, and was *this* graph indexed with it? No I/O — unit-tested."""
+    if not pin:
+        return {"checked": False}
+    want = _scip_identity(pin)
+    if want is None:
+        return {"checked": False}
+    advice: dict[str, Any] = {
+        "checked": True,
+        "pinned": {"version": want[0], "variant": want[1]},
+        "rebuild": _rebuild_level(pin),
+    }
+    have = _scip_identity(installed)
+    if have is None:
+        advice["binary_status"] = "unknown"
+        advice["binary_message"] = (
+            "scip-clang provenance unknown (installed before it was recorded, or not "
+            "installed) — re-run scripts/setup.sh to record it."
+        )
+    elif have != want:
+        src = _scip_source_for(want[1])
+        advice["binary_status"] = "stale"
+        advice["binary_message"] = (
+            f"scip-clang installed is {have[0]}-{have[1]} but the pin is "
+            f"{want[0]}-{want[1]} — update it: scripts/setup.sh --scip-source {src}."
+        )
+    else:
+        advice["binary_status"] = "ok"
+
+    g = _scip_identity(graph_scip)
+    if g is not None and g != want and _rebuild_level(pin) != "none":
+        advice["reindex_recommended"] = True
+        advice["reindex_message"] = (
+            f"this graph was indexed with scip-clang {g[0]}-{g[1]}, but the pin is "
+            f"{want[0]}-{want[1]} — re-index (scripts/reindex.sh) to match."
+        )
+    return advice
+
+
 def compute_advice(
     data: dict[str, Any], current: str | None, graph_built_with: str | None
 ) -> dict[str, Any]:
@@ -274,3 +365,15 @@ def update_advice(graph_built_with: str | None, *, force: bool = False) -> dict[
     if data is None:
         return {"checked": False, "reason": "version registry unreachable (offline?)"}
     return compute_advice(data, current_version(), graph_built_with)
+
+
+def scip_update_advice(graph_scip: dict[str, Any] | None, *, force: bool = False) -> dict[str, Any]:
+    """Top-level entry for `status`: scip-clang dependency advice — installed
+    binary and this graph vs the pinned identity. Fetches `versions.json` (cached,
+    same source as the tool check); `checked=False` when disabled or unreachable."""
+    if os.environ.get(_ENV_DISABLE):
+        return {"checked": False, "reason": f"disabled via {_ENV_DISABLE}"}
+    data = fetch_versions(force=force)
+    if data is None:
+        return {"checked": False, "reason": "version registry unreachable (offline?)"}
+    return compute_scip_advice(scip_clang_pin(data), installed_scip_clang(), graph_scip)

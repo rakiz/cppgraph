@@ -56,22 +56,53 @@ uv pip install -e ".[dev,mcp]"
 
 ## 2. `scip-clang` (required, every machine — NOT committed to this repo)
 
-`scip-clang` is a large external binary (~68 MB). It is never vendored in
-git; each machine downloads its own copy into `scratch/bin/` (gitignored).
+`scip-clang` is a large external binary (~68 MB). It is never vendored in git.
+It's a **per-machine** artifact — one per CPU arch, shared by this checkout and
+every project you index — so each machine keeps a single copy in the persistent
+user data dir, `${XDG_DATA_HOME:-~/.local/share}/cppgraph/bin/scip-clang`
+(override with `CPPGRAPH_BIN_DIR`). It goes in the data dir, **not a cache**: a
+self-built binary (ARM-Linux, PR #504) costs 30-60 min to rebuild and can't be
+re-downloaded, so it must survive cache cleaners. Not under `scratch/` or any
+project's `.cppgraph/`.
 
 Verified version: **v0.4.0** from
 https://github.com/sourcegraph/scip-clang (mirrors to `scip-code` releases
 too — the GitHub API resolves either).
 
+**Where it comes from — `setup.sh` picks a source:**
+
+| `--scip-source` | what it does | when |
+|---|---|---|
+| `download` | fetch the prebuilt release binary (no PR #504) | macOS arm64, Linux x86_64 |
+| `build` | compile it locally with `enclosing_range`/PR #504 (`docker/build-scip-clang/`, ~30-60 min, Docker, **Linux host only** — produces a Linux binary) | ARM-Linux, or anyone wanting #504 |
+| `emulate` | install no host binary; index through an x86 container | ARM-Linux without building, Intel Mac, Windows |
+
+Also settable via `CPPGRAPH_SCIP_SOURCE` (the flag wins). If you pass neither,
+`setup.sh` **prompts on a terminal**; otherwise it auto-picks — `download` where
+a prebuilt binary exists, else `emulate` — and never starts a long build
+unattended. (A `build` on macOS is rejected: the container emits a *Linux*
+binary, unusable on the host.)
+
+**Pinned version + staleness.** The scip-clang identity is `(version, variant)`
+— `stock` vs a patched build like `enclosing_range-504` — pinned in
+`versions.json` (`scip_clang`). `setup.sh` reads the version from there and writes
+a provenance sidecar (`scip-clang.json`) next to the binary recording what it
+installed. `cppgraph status` compares that sidecar, and each graph's recorded
+indexer, against the pin: it flags **"update the binary"** (with the exact
+`--scip-source` command) and **"re-index"** when the pin has moved on. So to
+switch the whole project to (or off) PR #504, bump `variant` in `versions.json` —
+`status` then tells everyone what to re-run.
+
 Normally you don't do this by hand — `scripts/setup.sh` downloads the right
-asset with `curl`. To fetch it manually (only `curl` needed, no `gh`), pick the
-asset for your platform and save it as `scratch/bin/scip-clang`:
+asset with `curl` into that data dir. To fetch it manually (only `curl` needed,
+no `gh`), pick the asset for your platform and save it there:
 
 ```bash
-mkdir -p scratch/bin
-curl -fL --retry 3 -o scratch/bin/scip-clang \
+BIN_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/cppgraph/bin"
+mkdir -p "$BIN_DIR"
+curl -fL --retry 3 -o "$BIN_DIR/scip-clang" \
   https://github.com/sourcegraph/scip-clang/releases/download/v0.4.0/scip-clang-arm64-darwin
-chmod +x scratch/bin/scip-clang
+chmod +x "$BIN_DIR/scip-clang"
 ```
 
 Asset name depends on platform — pick the matching one from the release:
@@ -92,7 +123,7 @@ self-contained release binary.
 Verify:
 
 ```bash
-scratch/bin/scip-clang --version
+"${XDG_DATA_HOME:-$HOME/.local/share}/cppgraph/bin/scip-clang" --version
 # scip-clang 0.4.0
 # Based on Clang/LLVM 2078da43e25a4623cab2d0d60decddf709aaea28
 ```
@@ -105,7 +136,16 @@ needs x86: cppgraph builds the graph and serves queries in pure Python, natively
 on any platform. `scripts/setup.sh` reflects this — it installs the tool (venv)
 on *every* platform and simply skips the native indexer where none exists,
 pointing you here. So on an ARM-Linux workstation (or Intel Mac / Windows), run
-scip-clang in an x86_64 container, then build the graph natively:
+scip-clang in an x86_64 container, then build the graph natively.
+
+> **Large codebase on ARM-Linux? Build a native binary instead.** Emulated
+> scip-clang doesn't parallelize (effectively single-threaded under QEMU) and on
+> a big project (e.g. MongoDB on a Graviton `m6g.2xlarge`) the run can estimate
+> **~11 h** and then die with worker timeouts before writing any `.scip`. The
+> container path below is fine for a subsystem or a small/medium project; for a
+> real ARM-Linux indexing workflow, compile a native scip-clang once with
+> [`docker/build-scip-clang/`](docker/build-scip-clang) and index with
+> `reindex.sh` (no container). See that directory's README.
 
 ```bash
 # 1. produce the .scip in an x86_64 container (emulated on ARM via qemu). Uses
@@ -155,51 +195,42 @@ Three gotchas:
   bind-mounts the project at its *same* absolute path in the container so they
   resolve. Keep the source tree where it was built.
 - **Toolchain headers.** If your project builds with a custom/vendored compiler,
-  add it to `docker/Dockerfile` — a `'X.h' file not found` during indexing means
-  the container lacks that toolchain, not a scip-clang bug.
+  add it to `docker/index/Dockerfile` — a `'X.h' file not found` during indexing
+  means the container lacks that toolchain, not a scip-clang bug.
 
 Alternatively, index on any x86_64 machine/CI and copy the resulting
 `<name>.graph.db` into `<project>/.cppgraph/` on the ARM host — the MCP server
 auto-discovers it and everything downstream is platform-independent.
 
-## 3. `protoc` (optional — only if regenerating SCIP protobuf bindings)
+## 3. Regenerating the SCIP protobuf bindings (optional, dev-only)
 
 `src/cppgraph/proto/scip_pb2.py` and `scip_pb2.pyi` are **generated and committed**
 to this repo specifically so that step 1 above is enough for normal
-development — you do not need to install `protoc` just to build or run
-cppgraph.
+development — you never install `protoc` on the host; the one time you
+regenerate, a pinned `protoc` runs in a container.
 
-Only install `protoc` if `src/cppgraph/proto/scip.proto` changes (e.g. to
-pick up a newer SCIP schema from upstream) and the bindings need
-regenerating.
-
-Verified version: **libprotoc 35.1**, installed via Homebrew (also installs
-the `abseil` dependency):
-
-```bash
-brew install protobuf
-protoc --version   # libprotoc 35.1
-```
+Only regenerate if `src/cppgraph/proto/scip.proto` changes (e.g. to pick up a
+newer SCIP schema from upstream).
 
 ### Regenerating the bindings
 
-1. Refresh the vendored schema (only if you intend to pick up upstream
-   changes — otherwise skip and just re-run protoc on the existing file):
+No host `protoc` needed: [`docker/gen-bindings/`](docker/gen-bindings) runs the
+pinned compiler (protoc **35.1**, matching the committed header) in a container
+and writes both files back in place — the only supported way, so the compiler
+version stays fixed and regeneration is reproducible.
+
+1. (optional) refresh the vendored schema — `sourcegraph/scip` 301-redirects to
+   `scip-code/scip` (same project, moved to a dedicated org):
 
    ```bash
    curl -fsSL -o src/cppgraph/proto/scip.proto \
      https://raw.githubusercontent.com/scip-code/scip/main/scip.proto
    ```
 
-   (`sourcegraph/scip` 301-redirects to `scip-code/scip` — same project,
-   transferred to a dedicated org.)
-
-2. Regenerate:
+2. Regenerate (needs docker or podman):
 
    ```bash
-   protoc --proto_path=src/cppgraph/proto \
-     --python_out=src/cppgraph/proto --pyi_out=src/cppgraph/proto \
-     src/cppgraph/proto/scip.proto
+   docker/gen-bindings/gen.sh
    ```
 
 3. Verify and commit:
@@ -209,16 +240,16 @@ protoc --version   # libprotoc 35.1
    git diff --stat src/cppgraph/proto/scip_pb2.py src/cppgraph/proto/scip_pb2.pyi
    ```
 
-   Both generated files start with `# ... DO NOT EDIT!` / are marked
-   generated — never hand-edit them; only regenerate via `protoc`.
+   Both generated files self-mark `DO NOT EDIT!` — never hand-edit them, only
+   regenerate.
 
 ## Summary: what's required vs. optional
 
 | Tool                     | When needed                          | Committed to repo? |
 |---------------------------|---------------------------------------|---------------------|
 | Python 3.13+ / `uv`       | Always                                | N/A (tool)          |
-| `scip-clang` binary       | Always (to produce a `.scip` index)   | No — `scratch/` (gitignored), fetched per machine |
-| `protoc`                  | Only to regenerate `scip_pb2.py`/`.pyi` | No — one-off dev tool |
+| `scip-clang` binary       | Always (to produce a `.scip` index)   | No — per-machine data dir (`~/.local/share/cppgraph/bin`), fetched per machine |
+| `protoc`                  | Only to regenerate `scip_pb2.py`/`.pyi` | No — runs in a container (`docker/gen-bindings/`), never on the host |
 | `scip_pb2.py` / `.pyi`    | Always (imported by cppgraph)         | **Yes**, generated + committed (in `proto/`) |
 | `scip.proto`              | Source of truth for the above          | Yes, vendored at `src/cppgraph/proto/scip.proto` |
 
@@ -256,8 +287,8 @@ committed (see AGENTS.md "Large artifacts"). The `graph.db` is the interned SQLi
 store queried by `cppgraph find/callers/callees/path/impact` (see DESIGN.md § Store).
 
 Reference timings and store sizes on a large C++ codebase (~6000 TUs): see
-`DESIGN.md` § Store. (On ARM via the emulated container, indexing is
-substantially slower than those native figures.)
+`DESIGN.md` § Store. (On ARM via the emulated container, indexing is far slower
+and may not complete at all on a large codebase — see the callout in § 2.)
 
 **Gotcha** (already handled by the script, documented here so it isn't
 rediscovered on the next project): a build system's generated

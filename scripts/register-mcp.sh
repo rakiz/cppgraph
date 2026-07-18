@@ -15,8 +15,7 @@ command -v claude >/dev/null || { echo "Claude Code CLI 'claude' not found." >&2
 bin="$repo_root/.venv/bin/cppgraph-mcp"
 [[ -x "$bin" ]] || { echo "cppgraph-mcp not found — run scripts/setup.sh first." >&2; exit 1; }
 
-# Replace any prior registration (e.g. an older graph-pinned one) so re-running
-# is idempotent and migrates cleanly to discovery mode.
+# Remove any existing registration before adding, so re-running is idempotent.
 claude mcp remove cppgraph --scope user >/dev/null 2>&1 || true
 claude mcp add cppgraph --scope user -- "$bin"
 

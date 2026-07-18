@@ -25,6 +25,15 @@ relationships (implementation/override, type definition). It is batch, parallel,
 and crash-isolated per translation unit — important because clangd (tried first)
 crashes on some third_party TUs.
 
+scip-clang is a **pinned dependency** with an identity of `(version, variant)`:
+`stock` is the unpatched upstream release binary; a non-stock variant (e.g.
+`enclosing_range-504`, built from source with PR #504) emits a *different* index.
+The pin lives in `versions.json` (`scip_clang`); the installed binary carries a
+provenance sidecar and each store records the variant it was built with
+(`index_tool_variant`), so `cppgraph status` can flag both a stale binary and a
+graph that needs re-indexing when the pin changes. See `updates.py` and
+`docker/build-scip-clang/`.
+
 ## Graph model
 
 Nodes = symbols, identified by SCIP symbol string (stable across TUs).

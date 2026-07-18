@@ -71,7 +71,7 @@ if [ ! -f "$COMPDB" ]; then
   echo "  Generate one for your build first:" >&2
   echo "    CMake:       cmake -DCMAKE_EXPORT_COMPILE_COMMANDS=ON ...  (in the build dir)" >&2
   echo "    Bazel:       bazel run @hedron_compile_commands//:refresh_all" >&2
-  echo "                 (or the project's own target, e.g. MongoDB: bazel build //:compiledb)" >&2
+  echo "                 (or the project's own target, e.g. MongoDB: bazel build --config=compiledb //src/...)" >&2
   echo "    Make/other:  bear -- <your build command>" >&2
   exit 1
 fi
@@ -86,7 +86,7 @@ mkdir -p "$OUT_DIR"
 echo "==> Building the x86_64 indexer image ($IMAGE) — cached after first run" >&2
 "$ENGINE" build --platform=linux/amd64 \
   --build-arg "SCIP_CLANG_VERSION=${SCIP_CLANG_VERSION:-v0.4.0}" \
-  -t "$IMAGE" "$REPO_ROOT/docker" >&2
+  -t "$IMAGE" "$REPO_ROOT/docker/index" >&2
 
 # Optional source-subtree filter, done host-side with native python (keeps the
 # container to just scip-clang). Mirrors reindex.sh's filter.
@@ -132,7 +132,8 @@ Build the graph natively (native step, no container):
 EOF
 elif [ -x "$CPPGRAPH" ]; then
   echo "==> Resuming natively: building the graph from the index ..." >&2
-  "$CPPGRAPH" build --scip "$OUT_SCIP" --out "$OUT_GRAPH"
+  # The container runs the stock x86 release binary, so stamp that variant.
+  "$CPPGRAPH" build --scip "$OUT_SCIP" --out "$OUT_GRAPH" --scip-variant stock
   echo >&2
   echo "==> Graph built: $OUT_GRAPH" >&2
   echo "    Register the MCP as usual (see QUICKSTART.md)." >&2
