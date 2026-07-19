@@ -29,23 +29,31 @@ project on the machine.
 
 ## 1. Set up the machine (once)
 
-Clone into the per-machine tool dir — the same `~/.local/share/cppgraph/` where
-`setup.sh` puts the `scip-clang` binary, so the whole tool lives in one stable,
-persistent place (not scattered wherever you happened to `cd`):
+**One command** — clone into the per-machine tool dir, venv + deps, scip-clang,
+MCP registration, each gated by a confirmation:
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/rakiz/cppgraph/main/scripts/bootstrap.sh)
+```
+
+Use `bash <(curl …)`, not `curl … | bash` (keeps your terminal for the prompts).
+It confirms before installing and asks how to get scip-clang (download ~1 min /
+build PR #504 ~30–60 min / emulate), with a "don't install" option throughout.
+
+Prefer to do it by hand (or drive each step)?
 
 ```bash
 git clone https://github.com/rakiz/cppgraph "${XDG_DATA_HOME:-$HOME/.local/share}/cppgraph/repo"
 cd "${XDG_DATA_HOME:-$HOME/.local/share}/cppgraph/repo"
-scripts/setup.sh          # venv + deps + scip-clang (downloads the prebuilt
-                          # binary; on a TTY it offers to build PR #504 instead)
+scripts/setup.sh          # venv + deps, then asks the scip-clang source
 scripts/register-mcp.sh   # register the MCP server, once per machine
 ```
 
-`setup.sh` picks the scip-clang source for your platform (download the prebuilt
-binary, build it locally with PR #504, or route to an emulated container). On a
-terminal it prompts; otherwise it auto-picks (download where a binary exists,
-else emulate) and never triggers a long build unattended. Force it with
-`--scip-source download|build|emulate` (or `CPPGRAPH_SCIP_SOURCE`).
+`setup.sh` asks how to obtain scip-clang (download the prebuilt binary, build it
+locally with PR #504, or route to an emulated container). On a terminal it prompts
+per option (with a don't-install choice); non-interactively it stops and asks you
+to pass `--scip-source download|build|emulate|auto` (or `CPPGRAPH_SCIP_SOURCE`)
+rather than deciding for you.
 
 `register-mcp.sh` is part of this one-time setup: it registers the server
 globally and auto-discovers each project's `.cppgraph/` at launch, so you run it

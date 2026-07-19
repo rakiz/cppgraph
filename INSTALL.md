@@ -5,6 +5,12 @@ differ for other platforms are noted inline.
 
 ## 1. Python environment (required, every machine)
 
+**Shortcut:** `bash <(curl -fsSL https://raw.githubusercontent.com/rakiz/cppgraph/main/scripts/bootstrap.sh)`
+does everything in this section and §2–§3 (clone, venv + deps, scip-clang, MCP
+registration), gated by confirmations. Use the `bash <(curl …)` form (not
+`curl … | bash`) so the prompts work; `--repo <path>` installs from a local clone.
+The manual steps below are the same thing, broken out.
+
 Clone into the per-machine tool dir — the same `${XDG_DATA_HOME:-~/.local/share}/cppgraph/`
 where §2 puts the `scip-clang` binary (`bin/`), so the whole tool sits in one
 stable, persistent place. The global MCP registration points at this checkout's

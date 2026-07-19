@@ -85,32 +85,20 @@ when you want to measure at scale; keep such paths out of the shipped code.)
 - **Small, reversible steps.** Don't gold-plate (e.g. don't rewrite in Rust)
   without a measurement demanding it.
 
-## The compilation database (compile_commands.json)
+## Indexing a project — ALWAYS start with `cppgraph init`
 
-cppgraph needs a `compile_commands.json` for the target project — it's the input
-to `scip-clang`. It is the target's artifact, never stored in this repo. Produce
-one however the target supports:
+**Your first and only entry point to index is `cppgraph init --plan-json`. Run it
+before anything else — do not inspect the build system, and do NOT offer to
+generate a `compile_commands.json`: `init` auto-locates an existing one (at the
+project root, `build/`, or up the tree).** Only if `init` reports that it found
+none do you generate one (see the fallback below).
 
-- CMake: configure with `-DCMAKE_EXPORT_COMPILE_COMMANDS=ON` → written to the
-  build dir; symlink/copy it to the project root for tools that expect it there.
-- Bazel: the `hedron_compile_commands` rule (`bazel run
-  @hedron_compile_commands//:refresh_all`), or the project's own target if it
-  ships one (e.g. MongoDB has a bespoke `compiledb` aspect defined in `.bazelrc`
-  → `bazel build --config=compiledb //src/...`; the authoritative invocation is
-  in `buildscripts/clang_tidy_vscode.py`).
-- Make / other: `bear -- <build command>` wraps the build and records it.
-- Multiple fragmented DBs: merge with `compdb`.
+**Then drive it as a strict question contract — the user chooses every dimension,
+not you:**
 
-Regenerate when it's stale (it reflects the build graph at generation time). The
-tool takes the path as an argument — never hard-code it.
-
-The onboarding is `cppgraph init`. **As an agent you MUST drive it as a strict
-question contract — the whole point is that the user chooses every dimension, not
-you:**
-
-1. Run `cppgraph init --plan-json`. It returns the breakdown plus a `questions[]`
-   array (`filter`, `no_tests`, `attributed_refs`), each with its `info`,
-   `default`, and — for `filter` — concrete `options` from the breakdown.
+1. Run `cppgraph init --plan-json`. It returns the compdb breakdown plus a
+   `questions[]` array (`filter`, `no_tests`, `attributed_refs`), each with its
+   `info`, `default`, and — for `filter` — concrete `options` from the breakdown.
 2. Ask the user **every** question in `questions[]`, one at a time, via your
    question UI, surfacing all the options. For `filter`, offer the listed options
    (whole tree + each subtree) plus a free substring. For `no_tests`, present the
@@ -121,15 +109,35 @@ you:**
    `cppgraph init <compdb> -y --filter <sub> [--no-tests] [--attributed-refs]
    --print` (`--run` to execute).
 
-**Forbidden** (this is exactly what the wizard exists to prevent): deciding any
-answer yourself; recommending one and asking only to confirm; collapsing the
-questions into a single yes/no; skipping a question; or driving `reindex.sh`
-directly. Never run the bare interactive `cppgraph init` yourself — it blocks on
-stdin. You *may*, instead of asking the questions, offer the user the fully
-interactive wizard they run themselves: tell them to type `! cppgraph init` (the
-`!` prefix runs it in their session so they can answer the prompts). `compdb-summary <compdb>` gives the same breakdown standalone. The chosen
+**Forbidden** (this is exactly what the wizard exists to prevent): doing any of it
+without asking; deciding an answer yourself; recommending one and asking only to
+confirm; collapsing the questions into a single yes/no; skipping a question;
+offering to generate a compdb before `init` says there's none; or driving
+`reindex.sh` directly. Never run the bare interactive `cppgraph init` yourself —
+it blocks on stdin. You *may*, instead of asking the questions, offer the user the
+fully interactive wizard they run themselves: tell them to type `! cppgraph init`
+(the `!` prefix runs it in their session so they answer the prompts). The chosen
 scope is recorded in the graph (`cppgraph status` shows it) and reused by
 `reindex.sh --update`.
+
+### Fallback: no compile_commands.json (only when `init` reports none)
+
+cppgraph needs a `compile_commands.json` (the input to `scip-clang`) — the
+target's artifact, never stored in this repo. Produce one however the target
+supports, then re-run `cppgraph init`:
+
+- CMake: configure with `-DCMAKE_EXPORT_COMPILE_COMMANDS=ON` → written to the
+  build dir; symlink/copy it to the project root.
+- Bazel: the `hedron_compile_commands` rule (`bazel run
+  @hedron_compile_commands//:refresh_all`), or the project's own target if it
+  ships one (e.g. MongoDB has a bespoke `compiledb` aspect in `.bazelrc` →
+  `bazel build --config=compiledb //src/...`; authoritative invocation in
+  `buildscripts/clang_tidy_vscode.py`).
+- Make / other: `bear -- <build command>` wraps the build and records it.
+- Multiple fragmented DBs: merge with `compdb`.
+
+Generating one may run a full build (heavy) — get the user's OK first. Regenerate
+when it's stale (it reflects the build graph at generation time).
 
 ## Guardrails
 
@@ -139,8 +147,14 @@ scope is recorded in the graph (`cppgraph status` shows it) and reused by
   directory (its own outputs: `graph.db`, `.scip`, filtered compdb), dropped in
   with a `.gitignore` of `*` so it never dirties the repo — like `.vscode/`.
   Everything else is read (`compile_commands.json`, and sources with `--root`).
-- Per-machine tool install, set up by `scripts/setup.sh`: the whole tool lives
-  under one persistent data dir, `${XDG_DATA_HOME:-~/.local/share}/cppgraph/` —
+- Per-machine tool install: `scripts/bootstrap.sh` is the one-command installer
+  (clone + `setup.sh` + `register-mcp.sh`, each confirmed). Driving it as an agent,
+  after asking the user whether to install and which scip-clang source: run it
+  non-interactively — `bootstrap.sh --yes --scip-source <download|build|emulate>`
+  (or `--repo <path>` to install from a local clone). Without `--yes`/`--scip-source`
+  it stops (ACTION NEEDED) rather than deciding — surface the choice, don't bypass
+  it. The whole tool lives under one persistent data dir,
+  `${XDG_DATA_HOME:-~/.local/share}/cppgraph/` —
   the git checkout + its `.venv` in `repo/`, and the `scip-clang` binary (a
   per-machine artifact, one per arch, shared across projects) in `bin/` (override
   `CPPGRAPH_BIN_DIR`). A data dir, not a cache, so a self-built binary and the

@@ -11,12 +11,16 @@
 #   scripts/setup.sh --branch foo    check out an arbitrary branch
 #
 # scip-clang source (the indexer binary):
-#   --scip-source download   fetch the prebuilt release binary (no PR #504)
+#   --scip-source download   fetch the prebuilt release binary (no PR #504) — ~1 min
 #   --scip-source build      compile it locally with enclosing_range / PR #504
 #                            (Linux host only; ~30-60 min; needs Docker)
 #   --scip-source emulate    install no host binary; index via an x86 container
-#   Also via env CPPGRAPH_SCIP_SOURCE (the flag wins). Unset: prompt on a TTY,
-#   else auto — download where a prebuilt binary exists, otherwise emulate.
+#                            (nothing installed now; indexing is slower later)
+#   --scip-source auto       accept the recommended default (download where a
+#                            prebuilt exists, else emulate) — for CI/non-interactive
+#   Also via env CPPGRAPH_SCIP_SOURCE (the flag wins). Unset + a TTY: prompt.
+#   Unset + non-interactive (no TTY): STOP and ask for an explicit --scip-source
+#   (nothing is auto-installed), unless emulate is the only option on this host.
 #
 # Platforms: a prebuilt binary exists for macOS arm64 and Linux x86_64 (use WSL2
 # on Windows). ARM Linux has none yet — build locally (PR #504, native) or
@@ -84,11 +88,11 @@ case "$os/$arch" in
   *)                                       host_can_build=0 ;;
 esac
 
-# scip-clang source: flag > env > (TTY prompt | auto). download|build|emulate.
+# scip-clang source: flag > env > (TTY prompt | ask). download|build|emulate|auto.
 SCIP_SOURCE="${scip_source_flag:-${CPPGRAPH_SCIP_SOURCE:-}}"
 case "$SCIP_SOURCE" in
-  ""|download|build|emulate) ;;
-  *) echo "error: --scip-source must be download|build|emulate (got '$SCIP_SOURCE')" >&2; exit 2 ;;
+  ""|download|build|emulate|auto) ;;
+  *) echo "error: --scip-source must be download|build|emulate|auto (got '$SCIP_SOURCE')" >&2; exit 2 ;;
 esac
 
 command -v uv   >/dev/null || { echo "uv not found — install: https://docs.astral.sh/uv/" >&2; exit 1; }
@@ -169,12 +173,12 @@ download_scip() {
 # Printed whenever the choice was made non-interactively, so a human (or an LLM
 # driving the install) can see the alternatives and re-run with an explicit one.
 print_source_options() {
-  echo "    scip-clang sources on this host (re-run to switch):" >&2
+  echo "    scip-clang sources on this host (pick one; each shows the rough cost):" >&2
   [ -n "$native_asset" ] && \
-    echo "      scripts/setup.sh --scip-source download   # prebuilt binary (no PR #504)" >&2
+    echo "      scripts/setup.sh --scip-source download   # prebuilt binary, no PR #504 — ~1 min" >&2
   [ "$host_can_build" = 1 ] && \
-    echo "      scripts/setup.sh --scip-source build      # compile PR #504 natively (~30-60 min, Docker)" >&2
-  echo "      scripts/setup.sh --scip-source emulate    # no host binary; index via an x86 container" >&2
+    echo "      scripts/setup.sh --scip-source build      # compile PR #504 natively — ~30-60 min, needs Docker" >&2
+  echo "      scripts/setup.sh --scip-source emulate    # no host binary; index via x86 container — nothing now, slower indexing later" >&2
 }
 
 build_scip() {
@@ -197,32 +201,63 @@ if [ -x "$SCIP_CLANG" ]; then
   echo "==> scip-clang already present ($SCIP_CLANG)"
   HAVE_HOST_BINARY=1
 else
+  # `auto`: accept the recommended default without a prompt (CI/non-interactive).
+  if [ "$SCIP_SOURCE" = auto ]; then
+    if [ -n "$native_asset" ]; then SCIP_SOURCE=download; else SCIP_SOURCE=emulate; fi
+    echo "==> scip-clang source: $SCIP_SOURCE (--scip-source auto)." >&2
+  fi
   # Resolve the source only if the user didn't force one (flag/env).
   if [ -z "$SCIP_SOURCE" ]; then
     if [ -t 0 ] && [ -t 1 ]; then
-      if [ -n "$native_asset" ]; then
-        echo "scip-clang: [1] download the prebuilt binary (fast, no PR #504)" >&2
-        if [ "$host_can_build" = 1 ]; then
-          echo "            [2] build locally with enclosing_range / PR #504 (~30-60 min)" >&2
-          printf "Choose [1]: " >&2; read -r reply || reply=""
-          case "$reply" in 2) SCIP_SOURCE=build ;; *) SCIP_SOURCE=download ;; esac
-        else
-          SCIP_SOURCE=download   # mac: prebuilt only (a local build would be a Linux binary)
-        fi
+      # Every case offers an explicit "don't install (stop)" — the user always
+      # confirms, even when only one source applies.
+      if [ -n "$native_asset" ] && [ "$host_can_build" = 1 ]; then
+        echo "scip-clang: [1] download prebuilt binary (no PR #504) — ~1 min" >&2
+        echo "            [2] build locally with PR #504 — ~30-60 min, Docker" >&2
+        echo "            [n] don't install (stop)" >&2
+        printf "Choose [1]: " >&2; read -r reply || reply=""
+        case "$reply" in
+          2) SCIP_SOURCE=build ;;
+          n | N | no) echo "Aborted — scip-clang not installed." >&2; exit 3 ;;
+          *) SCIP_SOURCE=download ;;
+        esac
+      elif [ -n "$native_asset" ]; then
+        # macOS arm64: the prebuilt binary is the only native option (no #504 build).
+        echo "scip-clang: the prebuilt binary is available to download — ~1 min (no native PR #504 on $os/$arch)." >&2
+        echo "            [1] download   [2] emulate (no binary; slower indexing)   [n] don't install (stop)" >&2
+        printf "Choose [1]: " >&2; read -r reply || reply=""
+        case "$reply" in
+          2) SCIP_SOURCE=emulate ;;
+          n | N | no) echo "Aborted — scip-clang not installed." >&2; exit 3 ;;
+          *) SCIP_SOURCE=download ;;
+        esac
       elif [ "$host_can_build" = 1 ]; then
         echo "No prebuilt scip-clang for $os/$arch." >&2
-        echo "scip-clang: [1] build locally with PR #504 (native, recommended; ~30-60 min)" >&2
-        echo "            [2] use the x86 binary under emulation (works, but slow — discouraged)" >&2
+        echo "scip-clang: [1] build locally with PR #504 — ~30-60 min, Docker (recommended)" >&2
+        echo "            [2] emulate via x86 container (works, but slow)   [n] don't install (stop)" >&2
         printf "Choose [1]: " >&2; read -r reply || reply=""
-        case "$reply" in 2) SCIP_SOURCE=emulate ;; *) SCIP_SOURCE=build ;; esac
+        case "$reply" in
+          2) SCIP_SOURCE=emulate ;;
+          n | N | no) echo "Aborted — scip-clang not installed." >&2; exit 3 ;;
+          *) SCIP_SOURCE=build ;;
+        esac
       else
-        SCIP_SOURCE=emulate     # Intel Mac / Windows: no binary, no native build
+        # Intel Mac / Windows: no binary, no native build — emulation only.
+        echo "No prebuilt binary and no native build on $os/$arch; indexing would use an x86 container (emulate)." >&2
+        printf "Set up for emulated indexing? [Y/n]: " >&2; read -r reply || reply=""
+        case "$reply" in n | N | no) echo "Aborted — nothing installed." >&2; exit 3 ;; *) SCIP_SOURCE=emulate ;; esac
       fi
     else
-      # Non-interactive default: keep today's behaviour, never auto-build.
-      if [ -n "$native_asset" ]; then SCIP_SOURCE=download; else SCIP_SOURCE=emulate; fi
-      echo "==> scip-clang source: $SCIP_SOURCE (auto; non-interactive — no TTY)." >&2
+      # Non-interactive: NEVER auto-install, even when only one source applies —
+      # the user still confirms. Stop and have the caller re-run with an explicit
+      # --scip-source. This is what stops an agent from silently downloading (or
+      # silently falling back to emulation) without asking.
+      echo "" >&2
+      echo "ACTION NEEDED — confirm how to obtain scip-clang (nothing installed yet):" >&2
       print_source_options
+      echo "      scripts/setup.sh --scip-source auto       # accept the recommended default (CI)" >&2
+      echo "    Re-run setup.sh with your choice; everything else here is already done." >&2
+      exit 3
     fi
   fi
 

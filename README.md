@@ -55,6 +55,22 @@ the heavy steps — those need the user's sign-off.
 
 ### Phase A — set up the machine (once; light, run end to end)
 
+**One command does all of Phase A** — clone, venv + deps, scip-clang, MCP
+registration, each gated by a confirmation:
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/rakiz/cppgraph/main/scripts/bootstrap.sh)
+```
+
+Use `bash <(curl …)`, not `curl … | bash` (process substitution keeps the
+terminal for the prompts). It asks before installing and before choosing the
+scip-clang source (with each option's cost), and stops if you decline. Testing
+from a local clone as if it were remote: `bash <(cat scripts/bootstrap.sh) --repo
+"$PWD"` (or `CPPGRAPH_REPO="$PWD" bash scripts/bootstrap.sh`). An agent runs it
+non-interactively after asking you: `… bootstrap.sh --yes --scip-source <choice>`.
+
+The steps it runs, if you'd rather do them by hand:
+
 1. **Check the platform.** A prebuilt `scip-clang` downloads on **macOS arm64**
    and **Linux x86_64** (light). On **ARM-Linux (aarch64)** there is no prebuilt
    binary — two routes, pick deliberately (this is the *one* Phase-A step that can
@@ -78,8 +94,28 @@ the heavy steps — those need the user's sign-off.
    ```bash
    git clone https://github.com/rakiz/cppgraph "${XDG_DATA_HOME:-$HOME/.local/share}/cppgraph/repo"
    cd "${XDG_DATA_HOME:-$HOME/.local/share}/cppgraph/repo"
-   scripts/setup.sh              # venv + deps + scip-clang
+   scripts/setup.sh              # venv + deps, then STOPS to ask the scip-clang source
    ```
+   `setup.sh` sets up the venv/deps, then **stops with "ACTION NEEDED"** instead of
+   auto-installing the indexer binary — **the scip-clang source is the user's
+   choice, don't pick it for them.** Present the options it lists, each with its
+   rough cost, and ask:
+   - **download** — prebuilt binary, no PR #504 — **~1 min** (macOS arm64 /
+     Linux x86_64);
+   - **build** — compile PR #504 natively — **~30–60 min**, needs Docker (Linux
+     only; unlocks symbol-granularity usage);
+   - **emulate** — no host binary; indexing later runs in an x86 container, **much
+     slower**.
+
+   On macOS arm64 only *download* or *emulate* apply (no native build) — say the
+   prebuilt binary is available and confirm before fetching. **Always include
+   "don't install (stop)" as an option** — the user may decline; if they do, leave
+   the tool half-set-up (venv only) and stop, don't force a source. Otherwise
+   either **run it for them** — `scripts/setup.sh --scip-source
+   <download|build|emulate>` — or, if they'd rather (e.g. a long build), tell them
+   to type exactly `scripts/setup.sh --scip-source <choice>` and to **tell you when
+   it finishes** so you continue the install. (`--scip-source auto` takes the
+   recommended default for CI.)
 3. **Register the MCP server** — once per machine, part of setup (idempotent; no
    project args, it auto-discovers each project's `.cppgraph/` at launch, so run
    it now, before any project is indexed):
@@ -96,69 +132,28 @@ for its heavy steps.
 
 ### Phase B — index a project (per-project; heavy, needs sign-off)
 
-4. **Get a `compile_commands.json`.** Ask the user where theirs is. If they don't
-   have one, it must be generated — and generating it may run a **full build**
-   (long/heavy). Apply the RULE above: propose the right command, get the OK, or
-   let them run it. How to produce one per build system (CMake / Bazel / Make):
-   [AGENTS.md](AGENTS.md) → "The compilation database".
-   **Then let the user choose the scope — every dimension, don't pick for them.**
-   Use `cppgraph init` as a strict question contract:
-   `cppgraph init --plan-json` returns the breakdown + a `questions[]` array
-   (`filter`, `no_tests`, `attributed_refs`, the last only when the binary is #504).
-   **Ask the user every one of them** via your own UI — offer the `filter` options
-   the plan lists (whole tree + each subtree) plus a free substring, present the
-   tests count/% and trade-off, and never answer, recommend-and-confirm, collapse,
-   or skip any. Then run their choices:
-   `cppgraph init <compdb> -y --filter <sub> [--no-tests] [--attributed-refs] --print`
-   (`--run` to execute). Do **not** drive `reindex.sh` directly or run the bare
-   interactive `cppgraph init` (it blocks on stdin). The manual breakdown command,
-   if you want it standalone:
+4. **Index the project — always start with `cppgraph init`.** Run
+   `cppgraph init --plan-json` **first**, from the project directory: it
+   auto-locates an existing `compile_commands.json` (root / `build/` / up the
+   tree) and returns the breakdown + a `questions[]` array. **Do not inspect the
+   build system or offer to generate a compdb** unless `init` reports none (only
+   then generate one — see [AGENTS.md](AGENTS.md) → "Fallback" — after the user's
+   OK, since it may run a full build). Then drive it as a **strict question
+   contract — the user chooses every dimension, you decide nothing:** ask the user
+   *every* question in `questions[]` via your own UI — `filter` (offer the listed
+   options: whole tree + each subtree, plus a free substring), `no_tests` (present
+   the count/% and the trade-off: skipping loses "which tests exercise X"),
+   `attributed_refs` (only when `scip_clang.supports_attribution`). Never answer,
+   recommend-and-confirm, collapse into one yes/no, or skip a question. Then run
+   their answers:
    ```bash
-   cppgraph compdb-summary <compile_commands.json>
+   cppgraph init <compdb> -y --filter <sub> [--no-tests] [--attributed-refs] --run
    ```
-   and show the user the breakdown it prints (total TUs, the subtrees they live
-   in, how many are tests). Then ask them to decide, before you run anything:
-   - the **source root**;
-   - the **subtree filter** (`reindex.sh`'s 2nd arg, a path substring) — the whole
-     thing, or a subtree like `src/`, excluding vendored/third-party trees;
-   - whether to **exclude tests** (`reindex.sh --no-tests`) for a lighter,
-     production-only graph. **Offer this, with the trade-off — don't default it:**
-     tests are often a large share of TUs (the summary prints the count and %),
-     so skipping them cuts roughly that fraction of the index time; but the graph
-     then **can't answer "which tests exercise symbol X"** (test call sites are
-     gone). Keep tests if "is this still tested / who tests it?" matters.
-
-   State what your suggested filter would keep and leave out (use
-   `compdb-summary --filter <substr>` to preview the count), and get their OK.
-   The chosen scope (filter + tests) is recorded in the graph — `cppgraph status`
-   shows it, and an incremental `reindex.sh --update` reuses it automatically.
-5. **Build the graph** — **heavy: apply the RULE above** (one-time; minutes to
-   tens of minutes, *not hours*). Present this exact command, with a realistic
-   estimate, and let the user choose to run it or have you run it. Prefer a
-   `<filter>` (e.g. `src/foo/`) on a first run so it finishes fast. It writes
-   into the target's gitignored `.cppgraph/`:
-   ```bash
-   scripts/reindex.sh <compile_commands.json> <filter> myproject
-   ```
-   **If (and only if) the installed scip-clang is a #504 build** (check `cppgraph
-   status` → `usage_view`, or the binary's provenance sidecar), also ask the user
-   which usage granularity they want, and pass the flag accordingly:
-   - **light (default)** — file granularity ("used somewhere in these files"),
-     smaller store;
-   - **extended** — `scripts/reindex.sh --attributed-refs …`, symbol granularity
-     ("used by *these functions*"), larger store.
-
-   Not sure, or they want to decide later? Run the default light build — it keeps
-   the `.scip`, so you can upgrade **without re-indexing**:
-   `cppgraph enrich-refs --graph <…>.graph.db --scip <…>.scip`. With a stock
-   binary the flag is a no-op, so don't offer the choice there.
-
-   > **Warn before enabling attribution.** Both `--attributed-refs` and
-   > `enrich-refs` re-parse the whole `.scip` and rebuild the graph in memory —
-   > this costs roughly **a store build**, not the ~1 min SQLite write (mongo:
-   > ~3.5 min and ~9 GB RAM). Tell the user the expected cost before kicking it
-   > off, rather than starting a long job silently.
-6. **Tell the user to open a new Claude Code session _from their project
+   (`--print` to only show the command). Do **not** drive `reindex.sh` directly.
+   You may instead let the user run the interactive wizard themselves: they type
+   `! cppgraph init`. The chosen scope is recorded in the graph (`cppgraph status`
+   shows it) and reused by `reindex.sh --update`.
+5. **Tell the user to open a new Claude Code session _from their project
    directory_** (that's how the server finds this project's graph), then ask
    *"what calls X?"*, *"impact of changing Y?"*, *"show the dependency graph of Z"*.
 
