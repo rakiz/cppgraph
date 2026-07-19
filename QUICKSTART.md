@@ -73,6 +73,13 @@ scripts/reindex.sh --no-tests /path/to/project/compile_commands.json src/mongo m
 #   code; a big codebase takes ~minutes, one time).
 ```
 
+`--no-tests` is a trade-off, not a free win: tests are often a big share of TUs
+(the summary shows the %), so skipping them speeds indexing — but the graph then
+can't answer "which tests exercise symbol X". Keep them if that matters. The
+scope you pick (filter + tests) is recorded in the graph: `cppgraph status` shows
+it, and `reindex.sh --update <graph.db> <compdb>` reuses it — no need to re-pass
+the filter (a divergent one errors; changing scope means a full rebuild).
+
 **Usage-view granularity (only if your scip-clang is a #504 build).** By default
 the reference index is *file* granularity ("used somewhere in these files"). Add
 `--attributed-refs` for *symbol* granularity ("used by *these functions*") — more

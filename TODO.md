@@ -6,6 +6,25 @@ isn't versioned yet, so it's a snapshot, not a log). Design detail is in
 
 ## Packaging / open-source
 
+- **Guided `cppgraph init` wizard (deterministic onboarding).** Today onboarding
+  is "an LLM reads the README and drives `reindex.sh`" — non-deterministic: each
+  agent improvises which questions to ask and can pick the wrong filter or forget
+  `--no-tests`. A small interactive command would be predictable and work without
+  an LLM: find `compile_commands.json`, print the `compdb-summary` breakdown
+  (TUs / subtrees / test %), then ask three questions — subtree filter, skip tests
+  (state the trade-off: loses "which tests exercise X"), symbol-granularity
+  (`--attributed-refs`, only if the binary is #504) — and run the pipeline.
+  - **Thin front-end, not a second pipeline:** reuse `compdb.summarize_compdb`,
+    `export.is_test_file`, and call `scripts/reindex.sh` behind it (Python
+    `cppgraph init` preferred, to reuse the code directly rather than re-parsing
+    in shell). The scope it collects is exactly what the graph now records in
+    `meta` (`index_filter`/`index_tests`).
+  - **Resumable / checkpoint via artifact detection:** the pipeline already writes
+    named artifacts per stage (`<name>.compdb.json` → `<name>.scip` →
+    `<name>.graph.db`, then enrich), so the wizard can infer where it stopped from
+    which files exist (e.g. `.scip` present, `.graph.db` missing → resume at build)
+    — no separate state file. Offer the inferred next step by default plus the
+    option to step back and redo the last stage (re-filter, re-index).
 - **Release blocker (0.1.0): re-measure the token numbers.** `README.md` and
   `COMPARISON.md` quote token counts that predate `DEFAULT_LIMIT = 40`
   (`mcp_server.py:56`). Re-run the measurement on the mongo graph (workstation)

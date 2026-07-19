@@ -112,10 +112,16 @@ for its heavy steps.
    - the **subtree filter** (`reindex.sh`'s 2nd arg, a path substring) — the whole
      thing, or a subtree like `src/`, excluding vendored/third-party trees;
    - whether to **exclude tests** (`reindex.sh --no-tests`) for a lighter,
-     production-only graph.
+     production-only graph. **Offer this, with the trade-off — don't default it:**
+     tests are often a large share of TUs (the summary prints the count and %),
+     so skipping them cuts roughly that fraction of the index time; but the graph
+     then **can't answer "which tests exercise symbol X"** (test call sites are
+     gone). Keep tests if "is this still tested / who tests it?" matters.
 
    State what your suggested filter would keep and leave out (use
    `compdb-summary --filter <substr>` to preview the count), and get their OK.
+   The chosen scope (filter + tests) is recorded in the graph — `cppgraph status`
+   shows it, and an incremental `reindex.sh --update` reuses it automatically.
 5. **Build the graph** — **heavy: apply the RULE above** (one-time; minutes to
    tens of minutes, *not hours*). Present this exact command, with a realistic
    estimate, and let the user choose to run it or have you run it. Prefer a
