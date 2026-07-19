@@ -139,9 +139,9 @@ for its heavy steps.
 
    > **Warn before enabling attribution.** Both `--attributed-refs` and
    > `enrich-refs` re-parse the whole `.scip` and rebuild the graph in memory —
-   > this costs roughly **a store build**, not the ~1 min SQLite write (minutes,
-   > and several GB RAM on a large index). Tell the user the expected cost before
-   > kicking it off, rather than starting a long job silently.
+   > this costs roughly **a store build**, not the ~1 min SQLite write (mongo:
+   > ~3.5 min and ~9 GB RAM). Tell the user the expected cost before kicking it
+   > off, rather than starting a long job silently.
 6. **Tell the user to open a new Claude Code session _from their project
    directory_** (that's how the server finds this project's graph), then ask
    *"what calls X?"*, *"impact of changing Y?"*, *"show the dependency graph of Z"*.
@@ -190,7 +190,7 @@ Notes:
   and store larger. Without it you still get an exact graph, just with
   file-granularity usage. You can add it later without re-indexing (`enrich-refs`)
   — but note `enrich-refs` re-parses the `.scip` and rebuilds the graph, so it
-  costs about a **store build** (minutes + GB of RAM), not stage 5's ~1 min.
+  costs about a **store build** (mongo: ~3.5 min, ~9 GB RAM), not stage 5's ~1 min.
 
 **Two components:** the **builder** (`scip-clang`, external compiled binary) does
 the expensive, perf-critical C++ parsing, crash-isolated per TU; **cppgraph**

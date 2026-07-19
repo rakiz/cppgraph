@@ -49,40 +49,47 @@ usage view). Open:
 - **Report the crash upstream** (sourcegraph/scip-clang PR #504): the missing
   same-file guard is a bug in the PR itself. Draft ready in
   `docker/build-scip-clang/PR504-COMMENT.draft.md`; post it on the PR.
-- **Re-validate attribution on real data.** Two consumption bugs were fixed;
-  neither has yet been confirmed on the mongo `.scip`:
-  - *Wrong source of `enclosing_range`.* The first `enrich-refs` run attributed
-    **0** references — the builder read `enclosing_range` off the *reference*
-    occurrence, but per the SCIP spec it is emitted on **definitions** (their body
-    extent), not references (0 of 13.7M reference occurrences carry one). Fixed to
-    attribute by **containment** (each use → the innermost definition whose
-    interval contains its line).
-  - *Perf: O(refs × defs).* The containment lookup then scanned every preceding
-    interval per use site → a use at file scope (namespace/global, of which there
-    are many) walked the whole file's definitions before giving up. Measured
-    blocking on mongo: `enrich-refs` ran **8.5 h at 99.9% CPU without finishing**.
-    Fixed to a single per-document line **sweep** with a stack of open intervals
-    (`_attribute_containment`), O((refs+defs)·log). Regression test:
-    `test_reference_outside_every_body_is_unattributed`.
-  - *Perf: enrich write re-scanned per UPDATE.* A second, independent bottleneck:
-    `enrich_references` UPDATEs `refs` filtering on `(symbol_id, file_id, line)`,
-    but the only index was `ix_refs(symbol_id)` — each UPDATE scanned every row of
-    that symbol (thousands on hub symbols like `ResumeToken`), x millions of
-    updates → 36 min and climbing. Fixed by building a temporary composite index
-    `ix_refs_enrich(symbol_id, file_id, line)` before the `executemany` (dropped
-    after — write-only), making each UPDATE an O(log n) seek.
-  The data is already in the `.scip` (929k enclosing ranges, 99.3% of `src/mongo`
-  files), so **no re-index needed** — re-run `enrich-refs` on the stored `.scip`
-  to confirm it now finishes quickly, the real "attributed X of Y references"
-  coverage, and the symbol-granularity usage view (feeds the cost measurement
-  below).
 - **Auto-enrich after a #504 re-index?** `reindex.sh --attributed-refs` is an
   explicit opt-in today; decide whether a #504 re-index should enrich by default.
 - **Attributed reference edges** as first-class graph edges (traversable
   symbol→symbol, distinct `kind`) for `impact`/`path`, beyond the usage view.
-- **Quantify the cost.** Measure the real store-size delta of `--attributed-refs`
-  on the mongo graph and put a number in the flag help / DESIGN (currently just
-  "larger store").
+
+## Build speed (pure-Python wins, then maybe native)
+
+Measured on mongo (`/usr/bin/time` + `py-spy`, Graviton2 8 vCPU): `enrich-refs`
+runs in **~3.5 min wall, 99% CPU single-thread, 8.8 GB RSS**. The protobuf parse
+is **not** the cost — the `protobuf` runtime already uses the **upb (C) backend**,
+so parsing is compiled and near-invisible in the profile. The time is entirely
+**pure-Python object churn**, in two places:
+- `build_graph` construction (~51%): `add_reference` / `add_node` / `add_edge` /
+  `_occurrence_start_line` / `_attribute_containment` — millions of objects.
+- the `enrich_references` update loop (~39%): iterating 7.2M refs, two `dict.get`
+  + `list.append` per ref.
+- `executemany` (~0%): already solved by the composite index (28d3222).
+
+The algorithm is already right (the containment sweep is O((n+m)·log)); the cost
+is intrinsic to per-object allocation + refcounting + hashing in the interpreter.
+
+**Tier 1 — pure Python, no toolchain (partly done).**
+- *Done:* `__slots__` on `Node`/`Edge`/`Reference` (no per-instance `__dict__`)
+  and `gc.disable()` during the bulk build (no pointless cycle scans). Keeps the
+  pip-installable, no-compiler property. Re-measure the gain on the next build.
+- *Open:* columnar storage — replace object-per-element with **parallel typed
+  arrays** (`array`/`numpy`: `symbol_ids`, `file_ids`, `lines`) for refs/edges, so
+  there is no per-element object at all. Bigger win, moderate refactor (adapt the
+  consumers that iterate `Reference`/`Edge`). Optionally stream occurrence → row
+  straight to SQLite without materializing `graph.references` in full.
+- *Open:* parallelize by document (`multiprocessing`) — it is single-thread at
+  99% on 8 cores; documents are independent until the merge.
+
+**Tier 2 — native, only if Tier 1 is not enough.** A **native `build_graph`**
+(Rust via PyO3, or C++/Cython on the hot loops) attacking the construction +
+update loops — *not* a protobuf backend change (already C via upb). Explicit
+tension: it moves cppgraph from **pure Python (`pip install`, no toolchain)** to a
+compiled extension (per-platform build or distributed wheels) — the build
+dependency we deliberately avoid elsewhere — plus a second language and a binding
+to maintain. For a graph built **once** and queried many times, ~3.5 min
+amortized over its lifetime may simply be acceptable. Decide, don't drift into it.
 
 ## Synthetic factory-registry edges (reconnect plan→exec across dispatch)
 

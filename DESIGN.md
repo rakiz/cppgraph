@@ -80,7 +80,13 @@ additionally be *attributed* to the definition that contains it — exact via
 containment, no proxy. This is opt-in (`cppgraph build --attributed-refs`, or
 `cppgraph enrich-refs` to back-fill an existing store) because it costs a symbol
 id per reference; the store records `has_attributed_refs`, and `status` (CLI +
-MCP) advertises the granularity and the upgrade path. It powers the
+MCP) advertises the granularity and the upgrade path. Measured on mongo: the
+enrich attributed **3,032,620 / 7,237,345 references (42%)** and grew the store
+**+146 MB (+23%)**, 626 → 773 MB, in **~3.5 min** (8.8 GB RSS, single-thread on
+an 8-vCPU Graviton2). The unattributed 58% is expected, not a
+short-fall: they are the references that live *outside* any callable body —
+file/namespace scope and, above all, class bodies (field/param/return types),
+which aren't callable definitions. It powers the
 symbol-granularity **usage view** (`export --mode usage`): `symbol → enclosing
 definition` ("the *functions* that use this type", not just the files), falling
 back to file granularity for any reference left unattributed — always exact

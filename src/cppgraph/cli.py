@@ -256,9 +256,10 @@ def main(argv: list[str] | None = None) -> int:
         "used?' answers with the *functions* that use it, not just the files. "
         "Needs a scip-clang that emits enclosing_range (a #504 build); a stock "
         "binary produces no attribution and this is a no-op. Costs extra store "
-        "space (one symbol id per reference) — enable it when you want symbol-level "
-        "usage and can pay the space; otherwise the default file granularity is "
-        "already exact. Enrich an existing store later with `cppgraph enrich-refs`.",
+        "space (one symbol id per reference — measured ~+23%%, +146 MB on the "
+        "626 MB mongo graph) — enable it when you want symbol-level usage and can "
+        "pay the space; otherwise the default file granularity is already exact. "
+        "Enrich an existing store later with `cppgraph enrich-refs`.",
     )
 
     p_enrich = sub.add_parser(
