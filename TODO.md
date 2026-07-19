@@ -64,6 +64,13 @@ usage view). Open:
     Fixed to a single per-document line **sweep** with a stack of open intervals
     (`_attribute_containment`), O((refs+defs)·log). Regression test:
     `test_reference_outside_every_body_is_unattributed`.
+  - *Perf: enrich write re-scanned per UPDATE.* A second, independent bottleneck:
+    `enrich_references` UPDATEs `refs` filtering on `(symbol_id, file_id, line)`,
+    but the only index was `ix_refs(symbol_id)` — each UPDATE scanned every row of
+    that symbol (thousands on hub symbols like `ResumeToken`), x millions of
+    updates → 36 min and climbing. Fixed by building a temporary composite index
+    `ix_refs_enrich(symbol_id, file_id, line)` before the `executemany` (dropped
+    after — write-only), making each UPDATE an O(log n) seek.
   The data is already in the `.scip` (929k enclosing ranges, 99.3% of `src/mongo`
   files), so **no re-index needed** — re-run `enrich-refs` on the stored `.scip`
   to confirm it now finishes quickly, the real "attributed X of Y references"

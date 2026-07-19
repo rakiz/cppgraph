@@ -445,13 +445,25 @@ def enrich_references(path: str | Path, index: scip_pb2.Index) -> tuple[int, int
                 continue
             updates.append((eid, sid, file_ids.get(r.file) if r.file else None, r.line))
 
-        before = con.total_changes
-        # `IS` matches NULL file_id/line the same way the rows were stored.
-        con.executemany(
-            "UPDATE refs SET enclosing_id = ? WHERE symbol_id = ? AND file_id IS ? AND line IS ?",
-            updates,
-        )
-        attributed = con.total_changes - before
+        # Without a composite index the UPDATE below can only seek on symbol_id
+        # (the sole index, ix_refs), then scans every row of that symbol to match
+        # file_id/line. On hub symbols (thousands of use sites) that is a full scan
+        # per UPDATE, x millions of updates -> the enrich never finishes. A
+        # (symbol_id, file_id, line) index turns each UPDATE into an O(log n) seek
+        # (SQLite uses it for the `IS` NULL comparisons too). Drop it afterwards:
+        # it exists only to speed up the write, not to serve queries.
+        con.execute("CREATE INDEX IF NOT EXISTS ix_refs_enrich ON refs(symbol_id, file_id, line)")
+        try:
+            before = con.total_changes
+            # `IS` matches NULL file_id/line the same way the rows were stored.
+            con.executemany(
+                "UPDATE refs SET enclosing_id = ? "
+                "WHERE symbol_id = ? AND file_id IS ? AND line IS ?",
+                updates,
+            )
+            attributed = con.total_changes - before
+        finally:
+            con.execute("DROP INDEX IF EXISTS ix_refs_enrich")
 
         # Only claim symbol granularity when at least one reference was actually
         # attributed. A run that attributes 0 (stock .scip, or a mismatched index)
