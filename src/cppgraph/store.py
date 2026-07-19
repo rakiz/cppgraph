@@ -453,8 +453,12 @@ def enrich_references(path: str | Path, index: scip_pb2.Index) -> tuple[int, int
         )
         attributed = con.total_changes - before
 
+        # Only claim symbol granularity when at least one reference was actually
+        # attributed. A run that attributes 0 (stock .scip, or a mismatched index)
+        # must leave the view at file granularity — not flip the flag on and make
+        # `status` advertise "SYMBOL granularity (0 refs attributed)".
         for key, value in (
-            ("has_attributed_refs", "true"),
+            ("has_attributed_refs", "true" if attributed else "false"),
             ("attributed_ref_count", str(attributed)),
             ("schema_version", str(SCHEMA_VERSION)),
         ):

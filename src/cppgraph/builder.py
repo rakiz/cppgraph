@@ -100,25 +100,47 @@ def _occurrence_enclosing_range(occ: scip_pb2.Occurrence) -> tuple[int, int] | N
     return None
 
 
-def _innermost_enclosing(
-    intervals: list[tuple[int, int, str]], starts: list[int], line: int
-) -> str | None:
-    """The innermost callable definition whose `enclosing_range` interval contains
-    `line`, or None.
+def _attribute_containment(
+    intervals: list[tuple[int, int, str]], points: list[int]
+) -> list[str | None]:
+    """For each line in `points`, the innermost interval `[start, end]` (inclusive)
+    that contains it, or None.
 
-    `intervals` is `(start_line, end_line, symbol)` for callable definitions,
-    sorted by `start`; `starts` is their start lines (for a bisect). SCIP ranges
-    nest cleanly, so scanning from the greatest start <= line downwards, the first
-    interval that still contains `line` (`end >= line`) is the innermost match —
-    e.g. a call sitting past a nested lambda's body attributes to the outer
-    function, not the lambda."""
-    pos = bisect.bisect_right(starts, line) - 1
-    while pos >= 0:
-        start, end, symbol = intervals[pos]
-        if end >= line:
-            return symbol
-        pos -= 1
-    return None
+    `intervals` is `(start_line, end_line, symbol)` — each definition's own
+    `enclosing_range` body extent. SCIP ranges nest cleanly, so this is a single
+    line sweep with a stack of currently-open intervals whose top is the innermost.
+
+    O((n + m) log(n + m)) — sort the events, then one linear pass. The earlier
+    per-point scan was O(points x intervals): a use site outside *every* definition
+    body (namespace/file scope — includes, usings, global types), of which there
+    are many, made the scan walk every preceding interval down to 0 before giving
+    up. Here an uncontained point just sees an empty (or exhausted) stack in O(1)
+    amortized."""
+    OPEN, POINT = 0, 1
+    events: list[tuple[int, int, int, str | None]] = []
+    for start, end, symbol in intervals:
+        # OPEN carries the interval's end in the 3rd slot; the stack pops lazily.
+        events.append((start, OPEN, end, symbol))
+    for i, line in enumerate(points):
+        events.append((line, POINT, i, None))
+    # (line, phase): an interval starting on a point's line contains it, so OPEN
+    # (phase 0) sorts before POINT (phase 1) at equal line.
+    events.sort(key=lambda e: (e[0], e[1]))
+
+    result: list[str | None] = [None] * len(points)
+    stack: list[tuple[int, str]] = []  # (end, symbol), innermost on top
+    for line, phase, aux, symbol in events:
+        if phase == OPEN:
+            stack.append((aux, symbol))  # aux = end
+        else:  # POINT at index aux
+            # Discard intervals that closed before this line (points ascend, so
+            # they are never needed again). Under clean nesting the top has the
+            # smallest end, so popping exposes the next-outer enclosing interval.
+            while stack and stack[-1][0] < line:
+                stack.pop()
+            if stack:
+                result[aux] = stack[-1][1]
+    return result
 
 
 def build_graph(
@@ -198,11 +220,15 @@ def build_graph(
                     usage_intervals.append(interval)
         callable_defs.sort()
         boundary_lines = [line for line, _ in callable_defs]
-        callable_intervals.sort()
-        callable_starts = [iv[0] for iv in callable_intervals]
-        usage_intervals.sort()
-        usage_starts = [iv[0] for iv in usage_intervals]
 
+        # Calls: collect every call site, then attribute all of them to their
+        # enclosing callable in one containment sweep. Exact when the binary emits
+        # enclosing_range (#504) — the caller is the innermost callable definition
+        # whose body *contains* the call site (enclosing_range lives on
+        # *definitions*, never on the call occurrence). Falls back to the
+        # nearest-preceding callable definition when no interval contains it
+        # (stock binary, or a call outside every body).
+        call_sites: list[tuple[str, int]] = []
         for occ in doc.occurrences:
             if occ.symbol_roles & (DEFINITION | FORWARD_DEFINITION):
                 continue
@@ -211,19 +237,15 @@ def build_graph(
             line = _occurrence_start_line(occ)
             if line is None:
                 continue
-            # Exact when the binary emits enclosing_range (#504): the caller is the
-            # innermost callable definition whose body *contains* the call site.
-            # enclosing_range lives on *definitions* (their own extent), never on
-            # the call occurrence — so we test containment against those intervals,
-            # not by reading it off the call. Falls back to the nearest-preceding
-            # callable definition when no intervals exist (stock binary).
-            caller_symbol = _innermost_enclosing(callable_intervals, callable_starts, line)
+            call_sites.append((occ.symbol, line))
+        callers = _attribute_containment(callable_intervals, [line for _, line in call_sites])
+        for (callee, line), caller_symbol in zip(call_sites, callers):
             if caller_symbol is None:
                 pos = bisect.bisect_right(boundary_lines, line) - 1
                 if pos < 0:
                     continue  # no enclosing callable definition found in this document
                 _, caller_symbol = callable_defs[pos]
-            graph.add_edge("calls", caller_symbol, occ.symbol, doc.relative_path, line)
+            graph.add_edge("calls", caller_symbol, callee, doc.relative_path, line)
 
         if include_references:
             # Exact location index: every non-local use of a symbol. With
@@ -233,6 +255,7 @@ def build_graph(
             # (or class), not just the file. Needs a binary that emits
             # enclosing_range (#504); a stock binary has no intervals, so the
             # reference stays a pure location. `local ...` symbols are noise.
+            ref_sites: list[tuple[str, int]] = []
             for occ in doc.occurrences:
                 if occ.symbol_roles & (DEFINITION | FORWARD_DEFINITION):
                     continue
@@ -241,9 +264,12 @@ def build_graph(
                 line = _occurrence_start_line(occ)
                 if line is None:
                     continue
-                enclosing_symbol: str | None = None
-                if attribute_references:
-                    enclosing_symbol = _innermost_enclosing(usage_intervals, usage_starts, line)
-                graph.add_reference(occ.symbol, doc.relative_path, line, enclosing_symbol)
+                ref_sites.append((occ.symbol, line))
+            if attribute_references:
+                enclosing = _attribute_containment(usage_intervals, [line for _, line in ref_sites])
+            else:
+                enclosing = [None] * len(ref_sites)
+            for (sym, line), enclosing_symbol in zip(ref_sites, enclosing):
+                graph.add_reference(sym, doc.relative_path, line, enclosing_symbol)
 
     return graph

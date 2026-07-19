@@ -43,8 +43,10 @@ Nodes = symbols, identified by SCIP symbol string (stable across TUs).
 Node attrs: display name, kind, defining file+range, namespace/enclosing.
 
 Edges (implemented unless marked planned):
-- `calls`      caller-symbol → callee-symbol (attributed via nearest preceding
-               callable definition of a reference occurrence — see below)
+- `calls`      caller-symbol → callee-symbol (attributed by `enclosing_range`
+               containment with a #504 binary — the innermost callable
+               definition whose body contains the call site — and via the nearest
+               preceding callable definition as a stock-binary fallback; see below)
 - `inherits`   derived type → base type (from SCIP `is_implementation`
                relationships where both endpoints are types; queried by
                `bases`/`subtypes` and `impact --kind inherits`)
@@ -57,12 +59,15 @@ References are **not** edges. They are stored as an exact **location index**
 (the "C" approach), on by default (opt out with `cppgraph build
 --no-references`): every non-local, non-definition occurrence recorded as
 `symbol → file:line`, with no
-attribution to an enclosing symbol. Rationale: a reference edge's `src` ("who
-references") would need the same nearest-preceding proxy as `calls`, but
-references live disproportionately in *class bodies* (field/param/return types),
-exactly where that proxy fails — so attributing them would concentrate the
-known misattribution. Locations sidestep it entirely: the position is 100%
-exact, and the `references` query returns coordinates or — with `--root` — the
+attribution to an enclosing symbol by default. Rationale: the location is 100%
+exact on its own, and attributing "who references" is only exact with a #504
+binary. Without one, the sole option is the nearest-preceding proxy the stock
+`calls` fallback uses — and references live disproportionately in *class bodies*
+(field/param/return types), exactly where that proxy fails, so it is never
+applied to references (unattributed beats mis-attributed). Exact attribution is
+the opt-in `--attributed-refs`/`enrich-refs` path below, by containment — no
+proxy. Either way the position is 100% exact, and the `references` query returns
+coordinates or — with `--root` — the
 snippet the tool reads itself (same dual mode as `explain`). This answers "where
 is this type/symbol used?" — a dependency the call graph can't express (e.g.
 `ResumeTokenData#`, a plain struct: 0 callers, 155 exact use sites across the

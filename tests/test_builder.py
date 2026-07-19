@@ -184,6 +184,31 @@ def test_reference_attributes_to_innermost_callable_or_type() -> None:
     assert enclosing == sorted([method, cls])  # 15 -> method (innermost), 3 -> class
 
 
+def test_reference_outside_every_body_is_unattributed() -> None:
+    """A use at file scope, sitting *between* sibling definition bodies (a global's
+    type, an include-driven ref), belongs to no enclosing definition. It must
+    attribute to None — and cheaply: this is the case the old per-point scan walked
+    every preceding interval for. The sweep must still resolve a *later* use inside
+    a following sibling, proving the stack recovers across the gap."""
+    a = "cxx . . $ pkg/a(a1)."
+    b = "cxx . . $ pkg/b(b1)."
+    widget = "cxx . . $ pkg/Widget#"
+
+    doc = scip_pb2.Document(relative_path="siblings.cpp")
+    doc.occurrences.extend(
+        [
+            _def_with_body(a, line=1, end_line=10),  # a() body 1..10
+            _def_with_body(b, line=20, end_line=30),  # b() body 20..30
+            _occurrence(widget, line=15),  # between the two bodies -> None
+            _occurrence(widget, line=25),  # inside b() -> b
+        ]
+    )
+    graph = build_graph(scip_pb2.Index(documents=[doc]), attribute_references=True)
+
+    by_line = {r.line: r.enclosing_symbol for r in graph.references_of(widget)}
+    assert by_line == {15: None, 25: b}
+
+
 def test_references_unattributed_without_the_flag() -> None:
     """attribute_references defaults off: references stay pure locations."""
     typ = "cxx . . $ pkg/Widget#"

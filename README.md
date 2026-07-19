@@ -136,6 +136,12 @@ for its heavy steps.
    the `.scip`, so you can upgrade **without re-indexing**:
    `cppgraph enrich-refs --graph <…>.graph.db --scip <…>.scip`. With a stock
    binary the flag is a no-op, so don't offer the choice there.
+
+   > **Warn before enabling attribution.** Both `--attributed-refs` and
+   > `enrich-refs` re-parse the whole `.scip` and rebuild the graph in memory —
+   > this costs roughly **a store build**, not the ~1 min SQLite write (minutes,
+   > and several GB RAM on a large index). Tell the user the expected cost before
+   > kicking it off, rather than starting a long job silently.
 6. **Tell the user to open a new Claude Code session _from their project
    directory_** (that's how the server finds this project's graph), then ask
    *"what calls X?"*, *"impact of changing Y?"*, *"show the dependency graph of Z"*.
@@ -182,7 +188,9 @@ Notes:
   enables *exact* caller attribution and the symbol-granularity usage view
   (`--attributed-refs`), but needs the compiled #504 binary and makes the `.scip`
   and store larger. Without it you still get an exact graph, just with
-  file-granularity usage. You can add it later without re-indexing (`enrich-refs`).
+  file-granularity usage. You can add it later without re-indexing (`enrich-refs`)
+  — but note `enrich-refs` re-parses the `.scip` and rebuilds the graph, so it
+  costs about a **store build** (minutes + GB of RAM), not stage 5's ~1 min.
 
 **Two components:** the **builder** (`scip-clang`, external compiled binary) does
 the expensive, perf-critical C++ parsing, crash-isolated per TU; **cppgraph**
