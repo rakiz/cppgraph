@@ -233,6 +233,14 @@ def onboarding_plan(
                 "prompt": "Subtree filter (path substring; empty = whole tree)",
                 "default": "",
                 "info": "Scope to a source subtree; skip vendored/third-party trees.",
+                # Concrete candidates from the breakdown, so the agent presents real
+                # choices instead of inventing them. "" = whole tree; a free-text
+                # substring is also allowed.
+                "options": [{"value": "", "label": f"whole tree ({total} TU(s))"}]
+                + [
+                    {"value": k, "label": f"{k} ({n} TU(s), {t} test(s))"}
+                    for k, n, t in summary.groups
+                ],
             },
             {
                 "key": "no_tests",

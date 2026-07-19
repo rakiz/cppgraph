@@ -104,17 +104,32 @@ one however the target supports:
 Regenerate when it's stale (it reflects the build graph at generation time). The
 tool takes the path as an argument — never hard-code it.
 
-The turnkey path is `cppgraph init` — it finds the compdb, prints the breakdown,
-and walks the scope questions (subtree / tests / attribution) in order; run it, or
-use the manual steps below when you want to steer each stage.
+The onboarding is `cppgraph init`. **As an agent you MUST drive it as a strict
+question contract — the whole point is that the user chooses every dimension, not
+you:**
 
-Before indexing, inspect it with `cppgraph compdb-summary <compile_commands.json>`
-(total TUs, subtrees, test count + %; `--filter <substr>` previews a scope). The
-indexing scope — subtree filter, `reindex.sh --no-tests` — is the user's choice;
-present the breakdown and let them pick, don't decide for them. Skipping tests is
-a trade-off (faster index, but loses "which tests exercise symbol X") — offer it,
-don't default it. The chosen scope is recorded in the graph (`cppgraph status`
-shows it) and reused by `reindex.sh --update`.
+1. Run `cppgraph init --plan-json`. It returns the breakdown plus a `questions[]`
+   array (`filter`, `no_tests`, `attributed_refs`), each with its `info`,
+   `default`, and — for `filter` — concrete `options` from the breakdown.
+2. Ask the user **every** question in `questions[]`, one at a time, via your
+   question UI, surfacing all the options. For `filter`, offer the listed options
+   (whole tree + each subtree) plus a free substring. For `no_tests`, present the
+   count/% and the trade-off. For `attributed_refs`, ask it **only if**
+   `scip_clang.supports_attribution` is true (skip otherwise — a stock binary
+   can't do it).
+3. Assemble and run the command from *their* answers:
+   `cppgraph init <compdb> -y --filter <sub> [--no-tests] [--attributed-refs]
+   --print` (`--run` to execute).
+
+**Forbidden** (this is exactly what the wizard exists to prevent): deciding any
+answer yourself; recommending one and asking only to confirm; collapsing the
+questions into a single yes/no; skipping a question; or driving `reindex.sh`
+directly. Never run the bare interactive `cppgraph init` yourself — it blocks on
+stdin. You *may*, instead of asking the questions, offer the user the fully
+interactive wizard they run themselves: tell them to type `! cppgraph init` (the
+`!` prefix runs it in their session so they can answer the prompts). `compdb-summary <compdb>` gives the same breakdown standalone. The chosen
+scope is recorded in the graph (`cppgraph status` shows it) and reused by
+`reindex.sh --update`.
 
 ## Guardrails
 

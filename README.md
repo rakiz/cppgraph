@@ -101,14 +101,18 @@ for its heavy steps.
    (long/heavy). Apply the RULE above: propose the right command, get the OK, or
    let them run it. How to produce one per build system (CMake / Bazel / Make):
    [AGENTS.md](AGENTS.md) → "The compilation database".
-   **Then summarize what's indexable and let the user choose the scope — don't
-   pick for them.** The turnkey path is `cppgraph init`: it finds the compdb,
-   prints the breakdown, and asks the scope questions (subtree / tests /
-   attribution) in order. As an agent, drive it deterministically: get the
-   decision data with `cppgraph init --plan-json`, ask the user in your own UI,
-   then assemble the command non-interactively —
+   **Then let the user choose the scope — every dimension, don't pick for them.**
+   Use `cppgraph init` as a strict question contract:
+   `cppgraph init --plan-json` returns the breakdown + a `questions[]` array
+   (`filter`, `no_tests`, `attributed_refs`, the last only when the binary is #504).
+   **Ask the user every one of them** via your own UI — offer the `filter` options
+   the plan lists (whole tree + each subtree) plus a free substring, present the
+   tests count/% and trade-off, and never answer, recommend-and-confirm, collapse,
+   or skip any. Then run their choices:
    `cppgraph init <compdb> -y --filter <sub> [--no-tests] [--attributed-refs] --print`
-   (`--run` to execute). The manual equivalent, if you're steering each step:
+   (`--run` to execute). Do **not** drive `reindex.sh` directly or run the bare
+   interactive `cppgraph init` (it blocks on stdin). The manual breakdown command,
+   if you want it standalone:
    ```bash
    cppgraph compdb-summary <compile_commands.json>
    ```

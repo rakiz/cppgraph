@@ -281,6 +281,11 @@ def test_onboarding_plan_shape(tmp_path: Path) -> None:
     assert keys == ["filter", "no_tests", "attributed_refs"]
     attr_q = plan["questions"][2]
     assert attr_q["available"] is False
+    # The filter question carries concrete options from the breakdown, so the
+    # agent presents real choices (whole tree + each subtree) rather than inventing.
+    filter_values = [o["value"] for o in plan["questions"][0]["options"]]
+    assert "" in filter_values  # whole tree
+    assert "db" in filter_values  # a subtree from the breakdown
 
 
 def test_init_plan_json_via_cli(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
