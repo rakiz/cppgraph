@@ -266,6 +266,21 @@ version stays fixed and regeneration is reproducible.
 | `scip_pb2.py` / `.pyi`    | Always (imported by cppgraph)         | **Yes**, generated + committed (in `proto/`) |
 | `scip.proto`              | Source of truth for the above          | Yes, vendored at `src/cppgraph/proto/scip.proto` |
 
+## Uninstalling
+
+`scripts/uninstall.sh` mirrors setup — it asks, per item, what to remove (nothing
+goes without a yes): the MCP registration (`claude mcp remove cppgraph`), the
+scip-clang binary, the tool checkout + venv, and (default **no**) this project's
+`./.cppgraph` graph data. Project graphs live in each project's own
+`<project>/.cppgraph/`; the script only offers the current one — remove the rest
+per-project.
+
+```bash
+scripts/uninstall.sh            # interactive (recommended)
+scripts/uninstall.sh --dry-run  # show what would happen, change nothing
+scripts/uninstall.sh --yes      # non-interactive: MCP + binary + tool, keep data
+```
+
 ## 4. Indexing a project (any C++ project with a compile_commands.json)
 
 **Guided path: `cppgraph init`.** From the project directory it locates the
