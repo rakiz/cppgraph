@@ -297,6 +297,58 @@ def test_build_records_source_commit_provenance(
     assert meta["project_root"] == "file:///some/repo"
 
 
+def test_build_records_and_status_shows_index_scope(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    index = scip_pb2.Index()
+    index.metadata.project_root = "file:///some/repo"
+    doc = index.documents.add(relative_path="foo.cpp")
+    occ = doc.occurrences.add(
+        symbol="cxx . . $ mongo/Foo#bar(a1).", symbol_roles=scip_pb2.SymbolRole.Definition
+    )
+    occ.range.extend([0, 0, 3])
+    scip_path = tmp_path / "index.scip"
+    scip_path.write_bytes(index.SerializeToString())
+    out = tmp_path / "graph.db"
+
+    assert (
+        main(
+            [
+                "build",
+                "--scip",
+                str(scip_path),
+                "--out",
+                str(out),
+                "--index-filter",
+                "src/mongo",
+                "--index-no-tests",
+            ]
+        )
+        == 0
+    )
+    meta = GraphStore(out).meta()
+    assert meta["index_filter"] == "src/mongo"
+    assert meta["index_tests"] == "excluded"
+
+    capsys.readouterr()  # drop build output
+    assert main(["status", "--graph", str(out)]) == 0
+    assert "indexed scope: src/mongo (tests excluded)" in capsys.readouterr().out
+
+
+def test_status_omits_index_scope_for_legacy_graph(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A graph without recorded scope (legacy) must not crash status and must not
+    invent a scope line."""
+    graph = Graph()
+    graph.add_edge("calls", "a().", "b().", file="foo.cpp", line=1)
+    out = tmp_path / "graph.db"
+    write_sqlite(graph, out, meta={"source_commit": "abc"})
+
+    assert main(["status", "--graph", str(out)]) == 0
+    assert "indexed scope" not in capsys.readouterr().out
+
+
 def test_update_applies_partial_reindex(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     # Start from a store where foo.cpp has a() calling old().
     original = Graph()

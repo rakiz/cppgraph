@@ -56,7 +56,12 @@ set -euo pipefail
 #   COMPDB_PATH   the project's current compile_commands.json (required) —
 #                 refresh it first if the build *structure* changed (new
 #                 files/targets/includes; see INSTALL.md/AGENTS.md)
-#   SRC_FILTER    same substring filter as full build (default: "")
+#   SRC_FILTER    optional; normally omitted. The update reuses the *recorded*
+#                 index scope (subtree filter + tests state stored in the graph),
+#                 so it stays consistent with the original build. If you pass a
+#                 non-empty filter that disagrees with the recorded one, it errors
+#                 — changing scope requires a full rebuild, not an update. (Legacy
+#                 graphs without a recorded scope fall back to this argument.)
 #   PROJECT_ROOT  the git checkout to diff + index from (default: compdb dir)
 #
 #   Limitation (header changes): a changed header has no compdb entry of its
@@ -211,18 +216,52 @@ if [[ "${1:-}" == "--update" ]]; then
   PART_COMPDB="$OUT_DIR/${OUT_NAME}.partial.compdb.json"
   PART_SCIP="$OUT_DIR/${OUT_NAME}.partial.scip"
 
-  # The store's provenance anchor: the commit whose sources it reflects.
-  BASE_COMMIT="$("$VENV_PY" - "$GRAPH_DB" <<'PYEOF'
+  # The store's provenance anchor: the commit whose sources it reflects, plus the
+  # recorded index scope (subtree filter + tests state). An update must stay within
+  # the graph's scope, so the recorded scope — not a re-typed argument — is the
+  # source of truth. Emitted as 4 lines: commit, FILTER_SET/FILTER_UNSET, filter,
+  # tests. FILTER_UNSET marks a legacy graph built before scope was recorded.
+  # Read the 4 lines into vars without `mapfile` (absent in the bash 3.2 that
+  # ships on macOS). Each field is a whole line, so `sed -n 'Np'` is exact.
+  _META="$("$VENV_PY" - "$GRAPH_DB" <<'PYEOF'
 import sys
 from cppgraph.store import GraphStore
-print(GraphStore(sys.argv[1]).meta().get("source_commit", ""))
+m = GraphStore(sys.argv[1]).meta()
+print(m.get("source_commit", ""))
+print("FILTER_SET" if "index_filter" in m else "FILTER_UNSET")
+print(m.get("index_filter", ""))
+print(m.get("index_tests", ""))
 PYEOF
 )"
+  BASE_COMMIT="$(printf '%s\n' "$_META" | sed -n '1p')"
+  REC_FILTER_SET="$(printf '%s\n' "$_META" | sed -n '2p')"
+  REC_FILTER="$(printf '%s\n' "$_META" | sed -n '3p')"
+  REC_TESTS="$(printf '%s\n' "$_META" | sed -n '4p')"
   if [[ -z "$BASE_COMMIT" ]]; then
     echo "error: $GRAPH_DB has no meta.source_commit — can't diff for an" >&2
     echo "       incremental update. Rebuild it with git provenance, or do a" >&2
     echo "       full build." >&2
     exit 1
+  fi
+
+  # Reuse the recorded scope. A non-empty positional SRC_FILTER that disagrees with
+  # the recorded one would produce a graph that is neither the old scope nor a
+  # clean new one — refuse it; changing scope means a full rebuild. An omitted
+  # (empty) arg simply defers to the recorded scope.
+  if [[ "$REC_FILTER_SET" == "FILTER_SET" ]]; then
+    if [[ -n "$SRC_FILTER" && "$SRC_FILTER" != "$REC_FILTER" ]]; then
+      echo "error: this graph was indexed with scope '${REC_FILTER:-<whole tree>}'," >&2
+      echo "       but you passed filter '$SRC_FILTER'. An update must keep the graph's" >&2
+      echo "       scope. To index a different scope, do a full rebuild instead." >&2
+      exit 1
+    fi
+    SRC_FILTER="$REC_FILTER"
+    _tests_state="$REC_TESTS"
+    echo "  indexed scope: ${REC_FILTER:-<whole tree>}${_tests_state:+ (tests $_tests_state)}"
+  else
+    # Legacy graph without a recorded scope: fall back to the positional argument.
+    _tests_state=""
+    echo "  indexed scope: not recorded (legacy graph); using filter '${SRC_FILTER:-<none>}'"
   fi
   echo "[1/4] Diffing working tree against stored commit $BASE_COMMIT ..."
 
@@ -260,20 +299,29 @@ PYEOF
   # relative mix — see GOTCHA above).
   CHANGED_LIST="$OUT_DIR/${OUT_NAME}.changed.txt"
   printf '%s\n' "$CHANGED" > "$CHANGED_LIST"
-  MATCHED="$("$VENV_PY" - "$COMPDB" "$PART_COMPDB" "$CHANGED_LIST" <<'PYEOF'
+  # Honour the recorded tests state: a graph built --no-tests must not re-absorb
+  # test TUs on update. Drop them here (same is_test_file used by the full build).
+  _no_tests_update=0; [[ "$_tests_state" == "excluded" ]] && _no_tests_update=1
+  MATCHED="$("$VENV_PY" - "$COMPDB" "$PART_COMPDB" "$CHANGED_LIST" "$_no_tests_update" <<'PYEOF'
 import json, sys
-compdb_path, out_path, changed_path = sys.argv[1:4]
+
+from cppgraph.export import is_test_file
+
+compdb_path, out_path, changed_path, no_tests = sys.argv[1:5]
 with open(changed_path) as f:
     changed = [line for line in f.read().splitlines() if line]
 with open(compdb_path) as f:
     data = json.load(f)
 filtered = [e for e in data if any(c in e["file"] for c in changed)]
+if no_tests == "1":
+    filtered = [e for e in filtered if not is_test_file(e.get("file", ""))]
 with open(out_path, "w") as f:
     json.dump(filtered, f)
 print(len(filtered))
 PYEOF
 )"
-  echo "  $MATCHED changed TU(s) matched in the compdb"
+  _excl_note=""; [[ "$_no_tests_update" == 1 ]] && _excl_note=" (test TUs excluded per recorded scope)"
+  echo "  $MATCHED changed TU(s) matched in the compdb${_excl_note}"
 
   echo "[3/4] Re-indexing the changed TUs ..."
   if [[ "$MATCHED" -gt 0 ]]; then
@@ -405,6 +453,12 @@ if SRC_COMMIT="$(git -C "$PROJECT_ROOT" rev-parse HEAD 2>/dev/null)"; then
   echo "  source commit: $SRC_COMMIT"
 fi
 [[ -n "$SCIP_VARIANT" ]] && BUILD_PROVENANCE+=(--scip-variant "$SCIP_VARIANT")
+
+# Record the index scope (subtree filter + tests-included/excluded) in the graph,
+# so `cppgraph status` shows it and an incremental --update reuses the same scope.
+# --index-filter is always passed (empty = whole tree) to make the scope explicit.
+BUILD_PROVENANCE+=(--index-filter "$SRC_FILTER")
+[[ "$NO_TESTS" == 1 ]] && BUILD_PROVENANCE+=(--index-no-tests)
 
 if [[ "$HAVE_SCIP_CLANG" == 1 ]]; then
   echo "[2/3] Running scip-clang ..."

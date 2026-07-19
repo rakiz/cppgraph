@@ -100,7 +100,13 @@ def summarize_compdb(
 
 def format_summary(s: CompdbSummary) -> str:
     lines: list[str] = []
-    lines.append(f"compile_commands.json: {s.total} translation unit(s), {s.tests} test(s)")
+    # Surface the test share up front — it's the number that drives the
+    # "index tests or not?" decision (skipping them cuts roughly that fraction of
+    # the index time, at the cost of losing "which tests exercise symbol X").
+    tests_pct = f", {round(100 * s.tests / s.total)}%" if s.total else ""
+    lines.append(
+        f"compile_commands.json: {s.total} translation unit(s), {s.tests} test(s){tests_pct}"
+    )
     if s.common_prefix:
         lines.append(f"  (paths under {s.common_prefix}/)")
     if s.groups:

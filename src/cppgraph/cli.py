@@ -240,6 +240,21 @@ def main(argv: list[str] | None = None) -> int:
         "passes it from the binary's provenance sidecar.",
     )
     p_build.add_argument(
+        "--index-filter",
+        default=None,
+        help="the subtree substring the sources were filtered to before indexing "
+        "(empty string = whole tree). Recorded as the graph's index scope so "
+        "`cppgraph status` shows it and an incremental update reuses it. reindex.sh "
+        "passes the filter it applied.",
+    )
+    p_build.add_argument(
+        "--index-no-tests",
+        action="store_true",
+        help="record that test TUs were excluded from the index (the scope "
+        "counterpart of reindex.sh --no-tests). Provenance only — the actual "
+        "filtering happens upstream when the compdb is built.",
+    )
+    p_build.add_argument(
         "--references",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -621,11 +636,18 @@ def main(argv: list[str] | None = None) -> int:
             include_references=args.references,
             attribute_references=args.attributed_refs,
         )
+        # Record the tests state definitely whenever a scope is being recorded (a
+        # scope-aware caller like reindex.sh always passes --index-filter), so
+        # "tests included" is explicit rather than indistinguishable from a legacy
+        # graph that stored no scope at all.
+        scope_recorded = args.index_filter is not None or args.index_no_tests
         meta = build_provenance(
             index,
             source_commit=args.source_commit,
             source_dirty=True if args.source_dirty else None,
             scip_variant=args.scip_variant,
+            index_filter=args.index_filter,
+            index_excludes_tests=bool(args.index_no_tests) if scope_recorded else None,
         )
         write_sqlite(graph, args.out, meta=meta)
         attributed = sum(1 for r in graph.references if r.enclosing_symbol)
@@ -863,6 +885,12 @@ def main(argv: list[str] | None = None) -> int:
         if tool:
             ver = m.get("index_tool_version")
             print(f"  indexed with:  {tool}{' ' + ver if ver else ''}")
+        index_filter = m.get("index_filter")
+        if index_filter is not None:
+            scope = index_filter if index_filter else "whole tree"
+            tests = m.get("index_tests")
+            tests_note = f" (tests {tests})" if tests else ""
+            print(f"  indexed scope: {scope}{tests_note}")
         print(
             f"  nodes/edges:   {m.get('node_count', '?')} / {m.get('edge_count', '?')}"
             + (f" (+{m['ref_count']} refs)" if m.get("ref_count") else "")

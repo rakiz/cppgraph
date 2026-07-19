@@ -680,6 +680,11 @@ def status_report(
                 v for v in (m.get("index_tool"), m.get("index_tool_version")) if v
             )
             or None,
+            "index_filter": m.get("index_filter"),
+            "index_scope": (
+                None if m.get("index_filter") is None else (m.get("index_filter") or "whole tree")
+            ),
+            "index_tests": m.get("index_tests"),
             "schema_version": m.get("schema_version"),
             "cppgraph_version": m.get("cppgraph_version"),
             "has_references": m.get("has_references") == "true",

@@ -224,6 +224,8 @@ def build_provenance(
     source_commit: str | None = None,
     source_dirty: bool | None = None,
     scip_variant: str | None = None,
+    index_filter: str | None = None,
+    index_excludes_tests: bool | None = None,
 ) -> dict[str, str]:
     """Provenance to record in the store's `meta` table: *what* was indexed.
 
@@ -237,6 +239,14 @@ def build_provenance(
     auto-detected via `git rev-parse HEAD` on `project_root` at build time,
     which is exact when index→build run back-to-back. If `project_root` isn't a
     git checkout, no commit is recorded (no error).
+
+    `index_filter` / `index_excludes_tests` record the **index scope** — which
+    subtree was indexed and whether test TUs were dropped. Stamped by the caller
+    (`reindex.sh` knows both), they make the graph self-describing (`status`
+    shows the scope) and let an incremental `--update` reuse the exact same scope
+    instead of guessing. `index_filter` is recorded even when empty (whole tree),
+    so "whole tree" is explicit rather than indistinguishable from a legacy graph
+    that never recorded a scope at all. Left unset here -> no key written.
     """
     meta: dict[str, str] = {}
     md = index.metadata
@@ -252,6 +262,13 @@ def build_provenance(
     # sidecar). Lets `cppgraph status` tell when a graph is stale for the pin.
     if scip_variant:
         meta["index_tool_variant"] = scip_variant
+
+    # Index scope: recorded even when the filter is empty (whole tree), so a
+    # scoped graph is distinguishable from a legacy one that never stored a scope.
+    if index_filter is not None:
+        meta["index_filter"] = index_filter
+    if index_excludes_tests is not None:
+        meta["index_tests"] = "excluded" if index_excludes_tests else "included"
 
     commit = source_commit
     dirty = source_dirty

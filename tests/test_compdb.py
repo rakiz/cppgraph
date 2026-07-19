@@ -56,6 +56,6 @@ def test_cli_compdb_summary(tmp_path: Path, capsys: pytest.CaptureFixture[str]) 
     p.write_text(json.dumps(_ENTRIES))
     assert main(["compdb-summary", str(p), "--filter", "src/mongo"]) == 0
     out = capsys.readouterr().out
-    assert "5 translation unit(s), 1 test(s)" in out
+    assert "5 translation unit(s), 1 test(s), 20%" in out  # 1/5 tests
     assert "mongo/db" in out
     assert "keeps 3 of 5" in out

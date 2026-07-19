@@ -416,6 +416,25 @@ def test_build_provenance_uses_explicit_commit_and_copies_scip_metadata() -> Non
     assert "built_at" in meta
 
 
+def test_build_provenance_records_index_scope() -> None:
+    index = _index_with_metadata("file:///some/repo")
+    meta = build_provenance(index, index_filter="src/mongo", index_excludes_tests=True)
+    assert meta["index_filter"] == "src/mongo"
+    assert meta["index_tests"] == "excluded"
+
+    # Empty filter (whole tree) is still recorded — explicit, not "unknown".
+    meta = build_provenance(index, index_filter="", index_excludes_tests=False)
+    assert meta["index_filter"] == ""
+    assert meta["index_tests"] == "included"
+
+
+def test_build_provenance_omits_index_scope_when_not_given() -> None:
+    index = _index_with_metadata("file:///some/repo")
+    meta = build_provenance(index)
+    assert "index_filter" not in meta
+    assert "index_tests" not in meta
+
+
 def test_build_provenance_omits_commit_when_root_is_not_a_git_repo(tmp_path: Path) -> None:
     # A real, existing, non-git directory: git rev-parse fails, no commit stored.
     index = _index_with_metadata(f"file://{tmp_path}")
@@ -579,6 +598,29 @@ def test_update_recomputes_meta_counts_and_provenance(tmp_path: Path) -> None:
     assert meta["edge_count"] == "2"  # a->b, a->c
     # nodes: a, b, c
     assert meta["node_count"] == "3"
+
+
+def test_update_preserves_recorded_index_scope(tmp_path: Path) -> None:
+    """An incremental update stamps only the keys it provides (source_commit, ...),
+    so the scope recorded at build time survives — the graph stays self-describing
+    and `reindex.sh --update` can keep reading it."""
+    db = tmp_path / "graph.db"
+    original = Graph()
+    original.add_edge("calls", "a().", "b().", file="foo.cpp", line=5)
+    write_sqlite(
+        original,
+        db,
+        meta={"source_commit": "old", "index_filter": "src/mongo", "index_tests": "excluded"},
+    )
+
+    partial = _partial_index("foo.cpp")
+    _add_call(partial.documents[0], "a().", "b().", def_line=2, call_line=6)
+    update_store(db, partial, meta={"source_commit": "new"})
+
+    meta = GraphStore(db).meta()
+    assert meta["source_commit"] == "new"
+    assert meta["index_filter"] == "src/mongo"  # untouched by the update
+    assert meta["index_tests"] == "excluded"
 
 
 def test_implements_edges_are_stored(tmp_path: Path) -> None:
