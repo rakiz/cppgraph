@@ -45,6 +45,7 @@ from cppgraph.store import (
     changed_files_since,
     commits_behind,
     discover_graph,
+    read_dirty_fingerprints,
     staleness_verdict,
 )
 from cppgraph.updates import scip_update_advice, update_advice
@@ -728,7 +729,7 @@ def status_report(
             result["drift"] = {"checked": False, "reason": "no source commit recorded in the graph"}
         return result
 
-    changes = changed_files_since(root, commit)
+    changes = changed_files_since(root, commit, dirty_fingerprints=read_dirty_fingerprints(m))
     if changes is None:
         result["drift"] = {
             "checked": False,

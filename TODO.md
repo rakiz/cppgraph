@@ -18,6 +18,14 @@ isn't versioned yet, so it's a snapshot, not a log). Design detail is in
     only when no native binary is present.
   - **Step-back.** Let the user redo the previous stage (re-filter, re-index) from
     the resume prompt, not just accept the inferred next step.
+- **Align `reindex.sh --update` with the dirty fingerprints.** `status` (CLI +
+  MCP) now reads `meta.dirty_fingerprints` via `changed_files_since` so a graph
+  built from a dirty tree isn't falsely reported stale (and a revert *is* caught).
+  But `reindex.sh --update` computes its changed set with its own `git diff` in
+  shell (reindex.sh ~232-238), unaware of the fingerprints — so an explicit update
+  re-indexes dirty-at-build files it needn't, and wouldn't notice a revert. Feed
+  the fingerprints into that shell diff (or have it call the Python
+  `changed_files_since`) so the report and the actual update agree.
 - **Release blocker (0.1.0): re-measure the token numbers.** `README.md` and
   `COMPARISON.md` quote token counts that predate `DEFAULT_LIMIT = 40`
   (`mcp_server.py:56`). Re-run the measurement on the mongo graph (workstation)

@@ -20,6 +20,7 @@ Two halves:
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import subprocess
 from collections import deque
@@ -120,7 +121,34 @@ def _git(root: Path, *args: str) -> str | None:
     return result.stdout.strip()
 
 
-def changed_files_since(root: str | Path, base_commit: str) -> tuple[list[str], list[str]] | None:
+def dirty_fingerprints(root: str | Path, base_commit: str) -> dict[str, str]:
+    """`{path: git-blob-hash}` for the tracked files that differ from `base_commit`
+    in `root`'s working tree — i.e. the uncommitted edits *present at this moment*.
+
+    Recorded at build time (when the indexed tree was dirty) so a later staleness
+    check can tell "this file was already indexed in exactly this state" from "this
+    file changed since indexing". Content hash (`git hash-object`), not
+    `(mtime,size)`: a checkout/touch/reformat changes mtime without changing
+    content, which would otherwise resurrect the false-stale it's meant to kill."""
+    root = Path(root)
+    diff = _git(root, "diff", "--name-only", "--diff-filter=d", base_commit, "--")
+    if not diff:
+        return {}
+    fingerprints: dict[str, str] = {}
+    for path in (ln.strip() for ln in diff.splitlines()):
+        if not path:
+            continue
+        h = _git(root, "hash-object", "--", path)
+        if h:
+            fingerprints[path] = h
+    return fingerprints
+
+
+def changed_files_since(
+    root: str | Path,
+    base_commit: str,
+    dirty_fingerprints: dict[str, str] | None = None,
+) -> tuple[list[str], list[str]] | None:
     """Files that differ in `root`'s working tree from `base_commit`.
 
     Returns `(changed, deleted)` relative paths, or `None` if `root` isn't a
@@ -128,16 +156,53 @@ def changed_files_since(root: str | Path, base_commit: str) -> tuple[list[str], 
     against the commit, so uncommitted edits count too — this is exactly the
     changed-file set an incremental `cppgraph update` would consume, mirroring
     `reindex.sh --update`.
+
+    `dirty_fingerprints` (from the graph's provenance) are the blob hashes of files
+    that were uncommitted *when the graph was built* — indexed in that exact state.
+    For those files the fingerprint is authoritative, so the diff-vs-commit result
+    is corrected against it:
+    - content still equal to the fingerprint -> indexed as-is -> **not** stale,
+      dropped from `changed` (kills the false "N files changed" for a dirty build);
+    - content differs (edited further, **or reverted** to the committed version) ->
+      the index holds a different content than the tree -> **stale**, forced into
+      `changed` even when `git diff` no longer flags it (the revert case).
+    Deletions are left to the `deleted` set (a fingerprinted file now gone shows up
+    there via the commit diff).
     """
     root = Path(root)
     changed = _git(root, "diff", "--name-only", "--diff-filter=d", base_commit, "--")
     deleted = _git(root, "diff", "--name-only", "--diff-filter=D", base_commit, "--")
     if changed is None or deleted is None:
         return None
-    return (
-        [ln for ln in changed.splitlines() if ln.strip()],
-        [ln for ln in deleted.splitlines() if ln.strip()],
-    )
+    deleted_list = [ln for ln in deleted.splitlines() if ln.strip()]
+    changed_set = {ln for ln in changed.splitlines() if ln.strip()}
+    if dirty_fingerprints:
+        deleted_set = set(deleted_list)
+        for path, recorded in dirty_fingerprints.items():
+            if path in deleted_set:
+                continue  # gone now — handled as a deletion, not a change
+            current = _git(root, "hash-object", "--", path)
+            if current is None:
+                continue  # unreadable/removed — the deletion path covers it
+            if current == recorded:
+                changed_set.discard(path)  # indexed exactly as it is now
+            else:
+                changed_set.add(path)  # index holds a different content -> stale
+    return (sorted(changed_set), deleted_list)
+
+
+def read_dirty_fingerprints(meta: dict[str, str]) -> dict[str, str] | None:
+    """Parse the `dirty_fingerprints` provenance (JSON `{path: blob-hash}`) from a
+    store's meta, or None if absent/malformed. Pass the result to
+    `changed_files_since` so a dirty-at-build graph isn't reported stale."""
+    raw = meta.get("dirty_fingerprints")
+    if not raw:
+        return None
+    try:
+        value = json.loads(raw)
+    except (ValueError, TypeError):
+        return None
+    return value if isinstance(value, dict) else None
 
 
 def commits_behind(root: str | Path, base_commit: str) -> int | None:
@@ -283,6 +348,14 @@ def build_provenance(
         meta["source_commit"] = commit
     if dirty is not None:
         meta["source_dirty"] = "true" if dirty else "false"
+
+    # When the indexed tree was dirty, fingerprint the uncommitted files so a later
+    # staleness check doesn't flag them as "changed" (they were indexed as-is).
+    # See dirty_fingerprints / changed_files_since.
+    if dirty and commit and root is not None:
+        fingerprints = dirty_fingerprints(root, commit)
+        if fingerprints:
+            meta["dirty_fingerprints"] = json.dumps(fingerprints)
 
     meta["built_at"] = datetime.now(UTC).isoformat(timespec="seconds")
     try:

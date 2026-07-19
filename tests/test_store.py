@@ -20,6 +20,8 @@ from cppgraph.store import (
     GraphStore,
     IncompatibleStoreError,
     build_provenance,
+    changed_files_since,
+    read_dirty_fingerprints,
     update_store,
     write_sqlite,
 )
@@ -441,6 +443,55 @@ def test_build_provenance_omits_commit_when_root_is_not_a_git_repo(tmp_path: Pat
     meta = build_provenance(index)
     assert "source_commit" not in meta
     assert meta["project_root"] == f"file://{tmp_path}"
+
+
+def test_dirty_fingerprints_prevent_false_stale(tmp_path: Path) -> None:
+    """A graph built from a dirty tree records the uncommitted files' content
+    hashes; a later staleness check must NOT report those files as changed while
+    their content is unchanged since indexing — the false-stale we're killing."""
+    import subprocess as sp
+
+    def git(*a: str) -> sp.CompletedProcess:
+        return sp.run(["git", "-C", str(tmp_path), *a], check=True, capture_output=True, text=True)
+
+    git("init", "-q")
+    git("config", "user.email", "t@example.com")
+    git("config", "user.name", "t")
+    f = tmp_path / "a.cpp"
+    f.write_text("int a() { return 0; }\n")
+    git("add", "a.cpp")
+    git("commit", "-q", "-m", "init")
+    commit = git("rev-parse", "HEAD").stdout.strip()
+
+    # The state that actually gets indexed: an uncommitted edit.
+    f.write_text("int a() { return 1; }\n")
+
+    index = _index_with_metadata(f"file://{tmp_path}")
+    meta = build_provenance(index, source_commit=commit, source_dirty=True)
+    fps = read_dirty_fingerprints(meta)
+    assert fps is not None and "a.cpp" in fps
+
+    # With the fingerprints, the dirty-at-build file is not stale.
+    changed, _ = changed_files_since(tmp_path, commit, dirty_fingerprints=fps)
+    assert "a.cpp" not in changed
+    # Without them (legacy graph), the old behaviour flags it — the false stale.
+    changed_naive, _ = changed_files_since(tmp_path, commit)
+    assert "a.cpp" in changed_naive
+
+    # Edited *further* after indexing -> genuinely changed -> reported again.
+    f.write_text("int a() { return 2; }\n")
+    changed_more, _ = changed_files_since(tmp_path, commit, dirty_fingerprints=fps)
+    assert "a.cpp" in changed_more
+
+    # Reverted to the committed version: the tree now matches the commit, so a
+    # naive diff sees nothing — but the index still holds the DIRTY content, so it
+    # is stale and must be reported (the additive fingerprint check).
+    f.write_text("int a() { return 0; }\n")
+    changed_revert, _ = changed_files_since(tmp_path, commit, dirty_fingerprints=fps)
+    assert "a.cpp" in changed_revert
+    # sanity: a naive diff (no fingerprints) would wrongly call it up to date
+    changed_naive_revert, _ = changed_files_since(tmp_path, commit)
+    assert "a.cpp" not in changed_naive_revert
 
 
 def test_build_provenance_autodetects_commit_on_this_repo() -> None:

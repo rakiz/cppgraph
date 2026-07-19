@@ -24,6 +24,7 @@ from cppgraph.store import (
     commits_behind,
     discover_graph,
     enrich_references,
+    read_dirty_fingerprints,
     staleness_verdict,
     update_store,
     write_sqlite,
@@ -1024,7 +1025,9 @@ def main(argv: list[str] | None = None) -> int:
             print("  cannot check drift: no source commit recorded in the graph")
             return 0
 
-        result = changed_files_since(args.root, commit)
+        result = changed_files_since(
+            args.root, commit, dirty_fingerprints=read_dirty_fingerprints(m)
+        )
         if result is None:
             print(f"  cannot check drift: {args.root} is not a git checkout (or git unavailable)")
             return 0
