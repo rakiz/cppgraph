@@ -790,6 +790,43 @@ _NO_GRAPH = {
 }
 
 
+class _ReloadingStore:
+    """A `GraphStore` handle that reopens when the `.graph.db` changes on disk.
+
+    The MCP server is long-lived, but a `reindex.sh`/`cppgraph init` run overwrites
+    the graph file underneath it. Without reloading, every query (and `status`)
+    would keep answering from the stale graph held open at launch until Claude Code
+    restarts — the "status says 18k nodes, the rebuild made 15k" confusion. `get()`
+    checks the file mtime and re-opens (closing the old handle) when it advances.
+    """
+
+    def __init__(self, graph_path: str | Path | None) -> None:
+        self._path = Path(graph_path) if graph_path else None
+        self._store = GraphStore(self._path) if self._path else None
+        self._mtime = self._current_mtime()
+
+    def _current_mtime(self) -> float | None:
+        if self._path is None:
+            return None
+        try:
+            return self._path.stat().st_mtime
+        except OSError:
+            return None
+
+    def get(self) -> GraphStore | None:
+        if self._path is None:
+            return None
+        current = self._current_mtime()
+        if current is not None and (
+            self._store is None or self._mtime is None or current > self._mtime
+        ):
+            if self._store is not None:
+                self._store.close()
+            self._store = GraphStore(self._path)
+            self._mtime = current
+        return self._store
+
+
 def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
     """A FastMCP server for one project's graph (opened once, reused per call).
 
@@ -801,14 +838,15 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
     """
     from mcp.server.fastmcp import FastMCP
 
-    store = GraphStore(graph_path) if graph_path else None
+    stores = _ReloadingStore(graph_path)
     mcp = FastMCP("cppgraph")
 
     def _call(fn: Any, *args: Any, **kwargs: Any) -> dict[str, Any]:
         """Run a pure `(store, …) -> dict` query, or return the no-graph notice."""
-        if store is None:
+        s = stores.get()
+        if s is None:
             return dict(_NO_GRAPH)
-        return fn(store, *args, **kwargs)
+        return fn(s, *args, **kwargs)
 
     @mcp.tool()
     def find(query: str, limit: int = DEFAULT_LIMIT, hide_trivial: bool = False) -> dict[str, Any]:
@@ -1027,10 +1065,11 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         didn't launch)."""
         from cppgraph.viz_html import open_in_browser, write_temp_html
 
-        if store is None:
+        s = stores.get()
+        if s is None:
             return dict(_NO_GRAPH)
         graph_json = make_export(
-            store,
+            s,
             symbol,
             mode=mode,
             depth=depth,

@@ -30,6 +30,32 @@ CALLER = "cxx . . $ mongo/Foo#caller(a2)."
 MID = "cxx . . $ mongo/Foo#mid(a3)."
 
 
+def test_reloading_store_reopens_when_file_changes(tmp_path: Path) -> None:
+    """The long-lived server must not keep answering from the graph held open at
+    launch after a reindex overwrites it on disk."""
+    import os
+    import time
+
+    path = tmp_path / "graph.db"
+    g1 = Graph()
+    g1.nodes[FOO] = Node(symbol=FOO, display_name="foo", file="a.cpp", line=1)
+    write_sqlite(g1, path)
+
+    rs = mcp_server._ReloadingStore(path)
+    assert rs.get().has_symbol(FOO)
+    assert not rs.get().has_symbol(CALLER)
+
+    # Overwrite with a different graph; force a newer mtime (same-second writes
+    # might not advance it).
+    g2 = Graph()
+    g2.nodes[CALLER] = Node(symbol=CALLER, display_name="caller", file="b.cpp", line=2)
+    write_sqlite(g2, path)
+    future = time.time() + 5
+    os.utime(path, (future, future))
+
+    assert rs.get().has_symbol(CALLER)  # reloaded
+
+
 @pytest.fixture
 def store(tmp_path: Path) -> GraphStore:
     graph = Graph()
