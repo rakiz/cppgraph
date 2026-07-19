@@ -285,6 +285,7 @@ per-project.
 scripts/uninstall.sh            # interactive (recommended)
 scripts/uninstall.sh --dry-run  # show what would happen, change nothing
 scripts/uninstall.sh --yes      # non-interactive: MCP + binary + tool, keep data
+scripts/uninstall.sh --purge    # non-interactive: everything, incl. project data
 ```
 
 ## 4. Indexing a project (any C++ project with a compile_commands.json)

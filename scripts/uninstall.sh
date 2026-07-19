@@ -17,6 +17,8 @@ set -euo pipefail
 #   scripts/uninstall.sh            interactive (recommended)
 #   scripts/uninstall.sh --yes      non-interactive: remove MCP + binary + tool,
 #                                   KEEP project data (the safe defaults)
+#   scripts/uninstall.sh --purge    non-interactive: remove EVERYTHING, including
+#                                   this project's .cppgraph data (--all is a synonym)
 #   scripts/uninstall.sh --dry-run  print what would happen, change nothing
 #
 # Paths mirror setup.sh: the tool lives under ${XDG_DATA_HOME:-~/.local/share}/
@@ -29,9 +31,11 @@ PROJECT_CPG="$PWD/.cppgraph"
 
 ASSUME_YES=0
 DRY_RUN=0
+PURGE=0
 for arg in "$@"; do
   case "$arg" in
     -y | --yes) ASSUME_YES=1 ;;
+    --purge | --all) PURGE=1; ASSUME_YES=1 ;;
     --dry-run) DRY_RUN=1 ;;
     -h | --help)
       sed -n '2,30p' "$0"
@@ -124,7 +128,10 @@ fi
 # 4. This project's graph data — default NO (data is precious; other projects
 #    have their own .cppgraph to remove separately).
 if [[ -d "$PROJECT_CPG" ]]; then
-  if ask "Delete THIS project's graph data at $PROJECT_CPG?" n; then
+  # Default no (data is precious) — unless --purge/--all was asked, which means
+  # "remove everything, project data included".
+  proj_default=n; [[ "$PURGE" == 1 ]] && proj_default=y
+  if ask "Delete THIS project's graph data at $PROJECT_CPG?" "$proj_default"; then
     rm_path "project graph data" "$PROJECT_CPG"
   else
     echo "  kept project graph data (other projects keep their own <project>/.cppgraph)."
