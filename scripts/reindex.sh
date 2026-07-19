@@ -210,7 +210,9 @@ if [[ "${1:-}" == "--update" ]]; then
     exit 1
   fi
   COMPDB_DIR="$(cd "$(dirname "$COMPDB")" && pwd)"
-  PROJECT_ROOT="${4:-$COMPDB_DIR}"
+  # Same project-root rule as a full build: git top-level, not the compdb dir
+  # (which is often build/ — see the note in the full-build path below).
+  PROJECT_ROOT="${4:-$(git -C "$COMPDB_DIR" rev-parse --show-toplevel 2>/dev/null || echo "$COMPDB_DIR")}"
   OUT_NAME="$(basename "$GRAPH_DB")"; OUT_NAME="${OUT_NAME%.graph.db}"; OUT_NAME="${OUT_NAME%.db}"
   OUT_DIR="$(out_dir_for "$PROJECT_ROOT")"
   PART_COMPDB="$OUT_DIR/${OUT_NAME}.partial.compdb.json"
@@ -399,8 +401,16 @@ if [[ ! -f "$COMPDB" ]]; then
   exit 1
 fi
 COMPDB_DIR="$(cd "$(dirname "$COMPDB")" && pwd)"
-OUT_NAME="${3:-$(basename "$COMPDB_DIR")}"
-PROJECT_ROOT="${4:-$COMPDB_DIR}"
+# Default the project root to the git top-level of the compdb's directory, NOT the
+# compdb dir. A compile_commands.json commonly lives in build/; using build/ as the
+# root makes scip-clang cd there and drop every source under ../src/ (only vendored
+# code physically under build/ survives) — a silently broken graph. git top-level
+# is the real root. Falls back to the compdb dir when it isn't a git checkout.
+PROJECT_ROOT="${4:-$(git -C "$COMPDB_DIR" rev-parse --show-toplevel 2>/dev/null || echo "$COMPDB_DIR")}"
+OUT_NAME="${3:-$(basename "$PROJECT_ROOT")}"
+if [[ "$PROJECT_ROOT" != "$COMPDB_DIR" ]]; then
+  echo "  note: project root = $PROJECT_ROOT (compile_commands.json is under $COMPDB_DIR)" >&2
+fi
 
 OUT_DIR="$(out_dir_for "$PROJECT_ROOT")"
 OUT_COMPDB="$OUT_DIR/${OUT_NAME}.compdb.json"

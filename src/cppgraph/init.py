@@ -33,6 +33,22 @@ from cppgraph.compdb import CompdbSummary, format_summary, load_compdb, summariz
 _COMPDB_NAME = "compile_commands.json"
 
 
+def _git_toplevel(directory: Path) -> Path | None:
+    """The git repository root containing `directory`, or None (not a checkout /
+    git unavailable). Best-effort, never raises."""
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(directory), "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    top = out.stdout.strip()
+    return Path(top) if out.returncode == 0 and top else None
+
+
 @dataclass
 class IndexPlan:
     """The concrete scope decisions the wizard collected — everything needed to
@@ -188,9 +204,16 @@ def _resolve_targets(
     except (OSError, ValueError) as e:
         print_fn(f"error: {e}")
         return None
-    project_root_path = (
-        Path(project_root).resolve() if project_root else compdb_path.resolve().parent
-    )
+    # Default the project root to the git top-level of the compdb's directory, NOT
+    # the compdb dir: a compile_commands.json commonly lives in build/, and using
+    # build/ as the root makes scip-clang drop every source under ../src/ (silently
+    # broken graph — only vendored code under build/ survives). Fall back to the
+    # compdb dir when it isn't a git checkout.
+    if project_root:
+        project_root_path = Path(project_root).resolve()
+    else:
+        compdb_dir = compdb_path.resolve().parent
+        project_root_path = _git_toplevel(compdb_dir) or compdb_dir
     graph_name = name or default_name(project_root_path)
     return compdb_path, entries, project_root_path, graph_name
 

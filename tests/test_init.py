@@ -195,6 +195,30 @@ def test_run_init_offers_update_when_graph_exists(tmp_path: Path) -> None:
     assert "--update" in out
 
 
+def test_project_root_is_git_toplevel_not_build_dir(tmp_path: Path) -> None:
+    """A compile_commands.json in build/ must NOT make build/ the project root —
+    that drops every source under ../src/. The root is the git top-level."""
+    import subprocess as sp
+
+    sp.run(["git", "-C", str(tmp_path), "init", "-q"], check=True, capture_output=True)
+    build = tmp_path / "build"
+    build.mkdir()
+    compdb = _write_compdb(build / "compile_commands.json")
+
+    lines, prnt = _capturing_print()
+    run_init(
+        compdb=str(compdb),
+        run=False,
+        filter="",  # non-interactive
+        input_fn=_boom_input,
+        print_fn=prnt,
+    )
+    # The reindex.sh command must carry the repo root as PROJECT_ROOT, not build/.
+    cmd_line = next(line for line in lines if "reindex.sh" in line)
+    assert str(tmp_path.resolve()) in cmd_line
+    assert not cmd_line.rstrip().endswith("/build")
+
+
 def test_run_init_errors_without_compdb(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)  # no compile_commands.json here or above (tmp)
     lines, prnt = _capturing_print()
