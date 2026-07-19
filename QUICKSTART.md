@@ -54,6 +54,18 @@ next you point it at a project.
 
 ## 2. Index a project (once per project)
 
+**Easiest: `cppgraph init`.** From the project directory, it finds the
+`compile_commands.json`, shows what's indexable, and asks the scope questions in
+order (subtree / tests / attribution) with the info to choose well, then runs the
+pipeline. Deterministic and LLM-free:
+
+```bash
+cppgraph init                     # auto-finds the compdb; --print to only show
+                                  # the command; re-run to resume/update
+```
+
+Prefer to drive it yourself? The manual steps are below.
+
 First, see what's indexable and pick a scope — don't index blind:
 
 ```bash

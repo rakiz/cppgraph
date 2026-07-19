@@ -102,7 +102,10 @@ for its heavy steps.
    let them run it. How to produce one per build system (CMake / Bazel / Make):
    [AGENTS.md](AGENTS.md) → "The compilation database".
    **Then summarize what's indexable and let the user choose the scope — don't
-   pick for them.** Run:
+   pick for them.** The turnkey path is `cppgraph init`: it finds the compdb,
+   prints the breakdown, and asks the scope questions (subtree / tests /
+   attribution) in order — run it, or drive it non-interactively once flags land.
+   The manual equivalent, if you're steering each step yourself:
    ```bash
    cppgraph compdb-summary <compile_commands.json>
    ```

@@ -268,6 +268,12 @@ version stays fixed and regeneration is reproducible.
 
 ## 4. Indexing a project (any C++ project with a compile_commands.json)
 
+**Guided path: `cppgraph init`.** From the project directory it locates the
+`compile_commands.json`, shows what's indexable, asks the scope questions
+(subtree / tests / attribution) in order — each with the info to choose well —
+then runs the pipeline below. Re-run it to resume/update. It's a thin front-end
+over `reindex.sh`; drop to the raw script when you want to script or fine-tune.
+
 `scripts/reindex.sh` wraps the whole compdb-filter → scip-clang →
 cppgraph-build pipeline in one command. It is **generic** — cppgraph works on
 any project that provides a `compile_commands.json` (see `AGENTS.md`); the

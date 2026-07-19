@@ -304,6 +304,29 @@ def main(argv: list[str] | None = None) -> int:
         help="preview how many TUs a path-substring filter (reindex.sh's 2nd arg) would keep",
     )
 
+    p_init = sub.add_parser(
+        "init",
+        help="guided onboarding: find the compdb, show what's indexable, ask the "
+        "scope questions (subtree / tests / attribution) in order, then index",
+    )
+    p_init.add_argument(
+        "compdb", nargs="?", help="path to compile_commands.json (auto-found if omitted)"
+    )
+    p_init.add_argument(
+        "--project-root", default=None, help="git checkout to index (default: compdb dir)"
+    )
+    p_init.add_argument("--name", default=None, help="graph name (default: project dir basename)")
+    p_init.add_argument(
+        "--run",
+        dest="run",
+        action="store_true",
+        default=None,
+        help="run the assembled command instead of asking",
+    )
+    p_init.add_argument(
+        "--print", dest="run", action="store_false", help="only print the command, do not run it"
+    )
+
     p_update = sub.add_parser(
         "update",
         help="incrementally apply a partial re-index (only changed TUs) to an existing store",
@@ -679,6 +702,16 @@ def main(argv: list[str] | None = None) -> int:
             parser.error(str(e))
         print(format_summary(summarize_compdb(entries, filter=args.filter)))
         return 0
+
+    if args.command == "init":
+        from cppgraph.init import run_init
+
+        return run_init(
+            compdb=args.compdb,
+            project_root=args.project_root,
+            name=args.name,
+            run=args.run,
+        )
 
     if args.command == "enrich-refs":
         index = scip_pb2.Index()

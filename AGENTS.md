@@ -104,6 +104,10 @@ one however the target supports:
 Regenerate when it's stale (it reflects the build graph at generation time). The
 tool takes the path as an argument — never hard-code it.
 
+The turnkey path is `cppgraph init` — it finds the compdb, prints the breakdown,
+and walks the scope questions (subtree / tests / attribution) in order; run it, or
+use the manual steps below when you want to steer each stage.
+
 Before indexing, inspect it with `cppgraph compdb-summary <compile_commands.json>`
 (total TUs, subtrees, test count + %; `--filter <substr>` previews a scope). The
 indexing scope — subtree filter, `reindex.sh --no-tests` — is the user's choice;

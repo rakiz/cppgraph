@@ -6,25 +6,18 @@ isn't versioned yet, so it's a snapshot, not a log). Design detail is in
 
 ## Packaging / open-source
 
-- **Guided `cppgraph init` wizard (deterministic onboarding).** Today onboarding
-  is "an LLM reads the README and drives `reindex.sh`" — non-deterministic: each
-  agent improvises which questions to ask and can pick the wrong filter or forget
-  `--no-tests`. A small interactive command would be predictable and work without
-  an LLM: find `compile_commands.json`, print the `compdb-summary` breakdown
-  (TUs / subtrees / test %), then ask three questions — subtree filter, skip tests
-  (state the trade-off: loses "which tests exercise X"), symbol-granularity
-  (`--attributed-refs`, only if the binary is #504) — and run the pipeline.
-  - **Thin front-end, not a second pipeline:** reuse `compdb.summarize_compdb`,
-    `export.is_test_file`, and call `scripts/reindex.sh` behind it (Python
-    `cppgraph init` preferred, to reuse the code directly rather than re-parsing
-    in shell). The scope it collects is exactly what the graph now records in
-    `meta` (`index_filter`/`index_tests`).
-  - **Resumable / checkpoint via artifact detection:** the pipeline already writes
-    named artifacts per stage (`<name>.compdb.json` → `<name>.scip` →
-    `<name>.graph.db`, then enrich), so the wizard can infer where it stopped from
-    which files exist (e.g. `.scip` present, `.graph.db` missing → resume at build)
-    — no separate state file. Offer the inferred next step by default plus the
-    option to step back and redo the last stage (re-filter, re-index).
+- **`cppgraph init` wizard — extend the resume support.** The wizard ships
+  (`src/cppgraph/init.py`): it finds the compdb, shows the breakdown, asks the
+  scope questions in order (subtree / tests / attribution, the last gated on a
+  #504 binary), and runs `reindex.sh`. It already detects an existing
+  `<name>.graph.db` and offers update-vs-rebuild. Still open:
+  - **Mid-pipeline resume.** When `<name>.scip` exists but `<name>.graph.db`
+    doesn't (indexing done, build interrupted), offer to resume at the build step
+    via `cppgraph build --scip … --out …` directly, instead of re-running
+    scip-clang. Today it only notes the partial index; reindex.sh reuses a `.scip`
+    only when no native binary is present.
+  - **Step-back.** Let the user redo the previous stage (re-filter, re-index) from
+    the resume prompt, not just accept the inferred next step.
 - **Release blocker (0.1.0): re-measure the token numbers.** `README.md` and
   `COMPARISON.md` quote token counts that predate `DEFAULT_LIMIT = 40`
   (`mcp_server.py:56`). Re-run the measurement on the mongo graph (workstation)
