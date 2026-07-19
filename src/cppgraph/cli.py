@@ -326,6 +326,32 @@ def main(argv: list[str] | None = None) -> int:
     p_init.add_argument(
         "--print", dest="run", action="store_false", help="only print the command, do not run it"
     )
+    p_init.add_argument(
+        "-y",
+        "--non-interactive",
+        action="store_true",
+        help="don't prompt — take the scope from the flags below (the form an "
+        "agent drives after asking the user in its own UI)",
+    )
+    p_init.add_argument(
+        "--filter",
+        default=None,
+        help="subtree path-substring scope (implies --non-interactive; empty = whole tree)",
+    )
+    p_init.add_argument(
+        "--no-tests", action="store_true", help="exclude test TUs (non-interactive scope)"
+    )
+    p_init.add_argument(
+        "--attributed-refs",
+        action="store_true",
+        help="symbol-granularity usage (non-interactive scope; needs a #504 binary, else dropped)",
+    )
+    p_init.add_argument(
+        "--plan-json",
+        action="store_true",
+        help="emit the onboarding data (breakdown, questions, binary variant, "
+        "artifacts) as JSON and exit — for an agent to render the questions itself",
+    )
 
     p_update = sub.add_parser(
         "update",
@@ -704,13 +730,27 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "init":
-        from cppgraph.init import run_init
+        from cppgraph.init import onboarding_plan, run_init
 
+        if args.plan_json:
+            from cppgraph.init import _resolve_targets
+
+            resolved = _resolve_targets(
+                args.compdb, args.project_root, args.name, announce=False, print_fn=print
+            )
+            if resolved is None:
+                return 1
+            print(json.dumps(onboarding_plan(*resolved), indent=2))
+            return 0
         return run_init(
             compdb=args.compdb,
             project_root=args.project_root,
             name=args.name,
             run=args.run,
+            filter=args.filter,
+            no_tests=args.no_tests,
+            attributed_refs=args.attributed_refs,
+            non_interactive=args.non_interactive,
         )
 
     if args.command == "enrich-refs":

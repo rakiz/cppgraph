@@ -154,6 +154,130 @@ def _scoped_counts(entries: list[dict], src_filter: str) -> tuple[int, int]:
     return s.total, s.tests
 
 
+def _resolve_targets(
+    compdb: str | None,
+    project_root: str | None,
+    name: str | None,
+    *,
+    announce: bool,
+    print_fn,
+) -> tuple[Path, list[dict], Path, str] | None:
+    """Resolve `(compdb_path, entries, project_root, name)` shared by the run and
+    the `--plan-json` paths, so both see identical targets. Returns None (after
+    printing an error) when the compdb can't be located or parsed. `announce`
+    prints the auto-discovered path — off for `--plan-json` so stdout stays pure
+    JSON."""
+    if compdb:
+        compdb_path = Path(compdb)
+        if not compdb_path.is_file():
+            print_fn(f"error: {compdb_path} not found")
+            return None
+    else:
+        found = find_compdb(Path.cwd())
+        if found is None:
+            print_fn(
+                "error: no compile_commands.json found at or above the current "
+                "directory. Generate it from your build system, or pass its path."
+            )
+            return None
+        compdb_path = found
+        if announce:
+            print_fn(f"Found: {compdb_path}")
+    try:
+        entries = load_compdb(str(compdb_path))
+    except (OSError, ValueError) as e:
+        print_fn(f"error: {e}")
+        return None
+    project_root_path = (
+        Path(project_root).resolve() if project_root else compdb_path.resolve().parent
+    )
+    graph_name = name or default_name(project_root_path)
+    return compdb_path, entries, project_root_path, graph_name
+
+
+def onboarding_plan(
+    compdb_path: Path, entries: list[dict], project_root_path: Path, graph_name: str
+) -> dict:
+    """The decision-relevant onboarding data as a plain dict (for `--plan-json`):
+    the compdb breakdown, the scip-clang variant, existing artifacts, and the
+    questions with the info a UI needs to ask them well. This is the single source
+    of *data*; an LLM renders it in its own UI, then runs `cppgraph init -y …` to
+    get the exact command deterministically."""
+    summary = summarize_compdb(entries)
+    present, variant = scip_clang_info()
+    supports_attribution = variant == "enclosing_range-504"
+    status = artifact_status(out_dir_for(project_root_path), graph_name)
+    total = summary.total
+    tests_pct = round(100 * summary.tests / total) if total else 0
+    return {
+        "compdb": str(compdb_path),
+        "project_root": str(project_root_path),
+        "name": graph_name,
+        "summary": {
+            "total": total,
+            "tests": summary.tests,
+            "tests_pct": tests_pct,
+            "common_prefix": summary.common_prefix,
+            "groups": [{"subtree": k, "tus": n, "tests": t} for k, n, t in summary.groups],
+        },
+        "scip_clang": {
+            "present": present,
+            "variant": variant,
+            "supports_attribution": supports_attribution,
+        },
+        "artifacts": status,
+        "questions": [
+            {
+                "key": "filter",
+                "type": "string",
+                "prompt": "Subtree filter (path substring; empty = whole tree)",
+                "default": "",
+                "info": "Scope to a source subtree; skip vendored/third-party trees.",
+            },
+            {
+                "key": "no_tests",
+                "type": "bool",
+                "prompt": "Exclude tests?",
+                "default": False,
+                "info": (
+                    f"Tests are {summary.tests} of {total} TU(s) ({tests_pct}%). Excluding "
+                    "them speeds indexing by roughly that share, but the graph then can't "
+                    "answer 'which tests exercise symbol X'."
+                ),
+            },
+            {
+                "key": "attributed_refs",
+                "type": "bool",
+                "prompt": "Record symbol-granularity usage (--attributed-refs)?",
+                "default": False,
+                "available": supports_attribution,
+                "info": (
+                    "'where is this type used?' answers with the functions that use it, not "
+                    "just the files. Larger store (~+23%)."
+                    if supports_attribution
+                    else "Unavailable: needs a #504-built scip-clang; the local binary is "
+                    "stock or absent."
+                ),
+            },
+        ],
+    }
+
+
+def _gate_attribution(requested: bool, print_fn) -> bool:
+    """Attribution needs a #504 binary; if requested without one, warn and drop it
+    (mirrors reindex.sh). Used by the non-interactive path."""
+    if not requested:
+        return False
+    _present, variant = scip_clang_info()
+    if variant == "enclosing_range-504":
+        return True
+    print_fn(
+        "warning: --attributed-refs requested, but the local scip-clang is not a "
+        "#504 build — producing file-granularity usage instead."
+    )
+    return False
+
+
 # --- interactive driver -----------------------------------------------------
 #
 # `input_fn`/`print_fn` are injectable so the whole flow is scriptable in tests
@@ -184,89 +308,91 @@ def run_init(
     project_root: str | None = None,
     name: str | None = None,
     run: bool | None = None,
+    filter: str | None = None,
+    no_tests: bool = False,
+    attributed_refs: bool = False,
+    non_interactive: bool = False,
     input_fn=input,
     print_fn=print,
 ) -> int:
-    """Interactive `cppgraph init`. Returns a process exit code.
+    """`cppgraph init`. Returns a process exit code.
 
-    `run`: True = run the assembled command, False = print only, None = ask.
-    `input_fn`/`print_fn` are injected in tests to script the whole flow.
+    Two ways in off one code path:
+    - **interactive** (default): ask the scope questions on stdin;
+    - **non-interactive** (`non_interactive=True`, or implied by a `filter`): take
+      the scope from `filter`/`no_tests`/`attributed_refs`, no prompts — the form
+      an LLM drives after gathering answers in its own UI.
+
+    `run`: True = run the assembled command, False = print only, None = ask (and in
+    non-interactive mode, None means print only). `input_fn`/`print_fn` are injected
+    in tests to script the whole flow.
     """
-    # 1. Locate the compile_commands.json.
-    if compdb:
-        compdb_path = Path(compdb)
-        if not compdb_path.is_file():
-            print_fn(f"error: {compdb_path} not found")
-            return 1
-    else:
-        found = find_compdb(Path.cwd())
-        if found is None:
-            print_fn(
-                "error: no compile_commands.json found at or above the current "
-                "directory. Generate it from your build system, or pass its path."
-            )
-            return 1
-        compdb_path = found
-        print_fn(f"Found: {compdb_path}")
+    # A provided --filter is a clear non-interactive intent.
+    non_interactive = non_interactive or filter is not None
 
-    try:
-        entries = load_compdb(str(compdb_path))
-    except (OSError, ValueError) as e:
-        print_fn(f"error: {e}")
+    resolved = _resolve_targets(compdb, project_root, name, announce=True, print_fn=print_fn)
+    if resolved is None:
         return 1
+    compdb_path, entries, project_root_path, graph_name = resolved
 
-    project_root_path = (
-        Path(project_root).resolve() if project_root else compdb_path.resolve().parent
-    )
-    graph_name = name or default_name(project_root_path)
-
-    # 2. Show the breakdown so the scope choice is informed, not blind.
+    # Show the breakdown so the scope choice is informed, not blind.
     summary: CompdbSummary = summarize_compdb(entries)
     print_fn("")
     print_fn(format_summary(summary))
     print_fn("")
 
     script = reindex_script()
-
-    # 3. Resume: if a graph already exists for this name, offer update vs rebuild.
     out_dir = out_dir_for(project_root_path)
     status = artifact_status(out_dir, graph_name)
-    if status["graph"]:
-        graph_db = out_dir / f"{graph_name}.graph.db"
-        print_fn(f"A graph already exists: {graph_db}")
-        choice = _ask(
-            "[u]pdate incrementally / [r]ebuild from scratch / [q]uit",
-            "u",
-            input_fn,
-            print_fn,
-        ).lower()
-        if choice.startswith("q"):
-            return 0
-        if choice.startswith("u"):
-            if script is None:
-                print_fn("reindex.sh not found; run: cppgraph … (see docs)")
-                return 1
-            cmd = build_update_argv(script, graph_db, compdb_path)
-            return _finish(cmd, run, input_fn, print_fn)
-        # else fall through to a full rebuild
-    elif status["scip"]:
-        print_fn(
-            f"Note: a partial index ({graph_name}.scip) already exists; reindex.sh "
-            "will reuse it when no native scip-clang is present, or refresh it otherwise."
-        )
 
-    # 4. Scope questions, in order, each with the info to choose well.
-    src_filter = _ask_filter(entries, summary, input_fn, print_fn)
-    no_tests = _ask_no_tests(entries, src_filter, input_fn, print_fn)
-    attributed_refs = _ask_attributed(input_fn, print_fn)
+    if non_interactive:
+        if status["graph"]:
+            print_fn(
+                f"Note: rebuilding the existing graph "
+                f"({out_dir / f'{graph_name}.graph.db'}) with the given scope."
+            )
+        src_filter = filter or ""
+        chosen_no_tests = bool(no_tests)
+        chosen_attributed = _gate_attribution(attributed_refs, print_fn)
+        if run is None:
+            run = False  # never auto-run a heavy job without an explicit --run
+    else:
+        # Resume: if a graph already exists, offer update vs rebuild.
+        if status["graph"]:
+            graph_db = out_dir / f"{graph_name}.graph.db"
+            print_fn(f"A graph already exists: {graph_db}")
+            choice = _ask(
+                "[u]pdate incrementally / [r]ebuild from scratch / [q]uit",
+                "u",
+                input_fn,
+                print_fn,
+            ).lower()
+            if choice.startswith("q"):
+                return 0
+            if choice.startswith("u"):
+                if script is None:
+                    print_fn("reindex.sh not found; run: cppgraph … (see docs)")
+                    return 1
+                cmd = build_update_argv(script, graph_db, compdb_path)
+                return _finish(cmd, run, input_fn, print_fn)
+            # else fall through to a full rebuild
+        elif status["scip"]:
+            print_fn(
+                f"Note: a partial index ({graph_name}.scip) already exists; reindex.sh "
+                "will reuse it when no native scip-clang is present, or refresh it otherwise."
+            )
+        # Scope questions, in order, each with the info to choose well.
+        src_filter = _ask_filter(entries, summary, input_fn, print_fn)
+        chosen_no_tests = _ask_no_tests(entries, src_filter, input_fn, print_fn)
+        chosen_attributed = _ask_attributed(input_fn, print_fn)
 
     plan = IndexPlan(
         compdb=compdb_path,
         project_root=project_root_path,
         name=graph_name,
         src_filter=src_filter,
-        no_tests=no_tests,
-        attributed_refs=attributed_refs,
+        no_tests=chosen_no_tests,
+        attributed_refs=chosen_attributed,
     )
 
     if script is None:

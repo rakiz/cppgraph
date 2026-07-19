@@ -62,6 +62,8 @@ pipeline. Deterministic and LLM-free:
 ```bash
 cppgraph init                     # auto-finds the compdb; --print to only show
                                   # the command; re-run to resume/update
+# non-interactive (e.g. an agent that already asked you the questions):
+cppgraph init <compdb> -y --filter src/mongo --no-tests --print
 ```
 
 Prefer to drive it yourself? The manual steps are below.

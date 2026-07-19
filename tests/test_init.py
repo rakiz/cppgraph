@@ -11,15 +11,32 @@ from pathlib import Path
 
 import pytest
 
+from cppgraph.cli import main
 from cppgraph.init import (
     IndexPlan,
     artifact_status,
     build_reindex_argv,
     build_update_argv,
     find_compdb,
+    onboarding_plan,
     run_init,
     scip_clang_info,
 )
+
+
+def _boom_input(_prompt: str) -> str:
+    raise AssertionError("non-interactive mode must not prompt for input")
+
+
+def _make_504_bindir(tmp_path: Path) -> Path:
+    d = tmp_path / "bin504"
+    d.mkdir()
+    binary = d / "scip-clang"
+    binary.write_text("#!/bin/sh\n")
+    binary.chmod(0o755)
+    (d / "scip-clang.json").write_text(json.dumps({"variant": "enclosing_range-504"}))
+    return d
+
 
 _ENTRIES = [
     {"file": "/repo/src/mongo/db/query.cpp"},
@@ -185,3 +202,93 @@ def test_run_init_errors_without_compdb(tmp_path: Path, monkeypatch) -> None:
     # Either finds nothing (rc 1) — assert it did not crash and reported.
     assert rc == 1
     assert any("compile_commands.json" in line for line in lines)
+
+
+# --- non-interactive (mode a) -----------------------------------------------
+
+
+def test_run_init_non_interactive_assembles_command_without_prompting(tmp_path: Path) -> None:
+    compdb = _write_compdb(tmp_path / "compile_commands.json")
+    lines, prnt = _capturing_print()
+    rc = run_init(
+        compdb=str(compdb),
+        project_root=str(tmp_path),
+        name="proj",
+        run=False,
+        filter="src/mongo",  # implies non-interactive
+        no_tests=True,
+        input_fn=_boom_input,  # must never be called
+        print_fn=prnt,
+    )
+    assert rc == 0
+    out = "\n".join(lines)
+    assert "--no-tests" in out
+    assert "src/mongo" in out
+    assert "reindex.sh" in out
+
+
+def test_run_init_non_interactive_gates_attribution(tmp_path: Path, monkeypatch) -> None:
+    compdb = _write_compdb(tmp_path / "compile_commands.json")
+
+    # With a #504 binary: --attributed-refs survives.
+    monkeypatch.setenv("CPPGRAPH_BIN_DIR", str(_make_504_bindir(tmp_path)))
+    lines, prnt = _capturing_print()
+    run_init(
+        compdb=str(compdb),
+        project_root=str(tmp_path),
+        name="proj",
+        run=False,
+        non_interactive=True,
+        filter="",
+        attributed_refs=True,
+        input_fn=_boom_input,
+        print_fn=prnt,
+    )
+    assert "--attributed-refs" in "\n".join(lines)
+
+    # Without one (empty bin dir): dropped, with a warning.
+    monkeypatch.setenv("CPPGRAPH_BIN_DIR", str(tmp_path / "empty"))
+    lines, prnt = _capturing_print()
+    run_init(
+        compdb=str(compdb),
+        project_root=str(tmp_path),
+        name="proj",
+        run=False,
+        non_interactive=True,
+        filter="",
+        attributed_refs=True,
+        input_fn=_boom_input,
+        print_fn=prnt,
+    )
+    cmd_line = next(line for line in lines if "reindex.sh" in line)
+    assert "--attributed-refs" not in cmd_line  # dropped from the command
+    assert any("warning" in line.lower() for line in lines)
+
+
+# --- structured output (mode b) ---------------------------------------------
+
+
+def test_onboarding_plan_shape(tmp_path: Path) -> None:
+    compdb = _write_compdb(tmp_path / "compile_commands.json")
+    from cppgraph.compdb import load_compdb
+
+    plan = onboarding_plan(compdb, load_compdb(str(compdb)), tmp_path, "proj")
+    assert plan["summary"]["total"] == 3
+    assert plan["summary"]["tests"] == 1
+    assert plan["summary"]["tests_pct"] == 33
+    assert plan["scip_clang"]["supports_attribution"] is False  # empty CPPGRAPH_BIN_DIR
+    keys = [q["key"] for q in plan["questions"]]
+    assert keys == ["filter", "no_tests", "attributed_refs"]
+    attr_q = plan["questions"][2]
+    assert attr_q["available"] is False
+
+
+def test_init_plan_json_via_cli(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    compdb = _write_compdb(tmp_path / "compile_commands.json")
+    rc = main(
+        ["init", str(compdb), "--project-root", str(tmp_path), "--name", "proj", "--plan-json"]
+    )
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["name"] == "proj"
+    assert payload["summary"]["total"] == 3

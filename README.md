@@ -104,8 +104,11 @@ for its heavy steps.
    **Then summarize what's indexable and let the user choose the scope — don't
    pick for them.** The turnkey path is `cppgraph init`: it finds the compdb,
    prints the breakdown, and asks the scope questions (subtree / tests /
-   attribution) in order — run it, or drive it non-interactively once flags land.
-   The manual equivalent, if you're steering each step yourself:
+   attribution) in order. As an agent, drive it deterministically: get the
+   decision data with `cppgraph init --plan-json`, ask the user in your own UI,
+   then assemble the command non-interactively —
+   `cppgraph init <compdb> -y --filter <sub> [--no-tests] [--attributed-refs] --print`
+   (`--run` to execute). The manual equivalent, if you're steering each step:
    ```bash
    cppgraph compdb-summary <compile_commands.json>
    ```
