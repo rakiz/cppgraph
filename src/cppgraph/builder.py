@@ -38,9 +38,35 @@ does emit it (a #504-built scip-clang). Specifically:
 from __future__ import annotations
 
 import bisect
+import functools
+import gc
+from collections.abc import Callable
 
 from cppgraph.model import Graph
 from cppgraph.proto import scip_pb2
+
+
+def _gc_disabled[T](fn: Callable[..., T]) -> Callable[..., T]:
+    """Run `fn` with the cyclic garbage collector off, restoring its prior state.
+
+    A build creates millions of short-lived-then-retained objects; with the GC on,
+    it repeatedly walks the whole young+old generations looking for cycles that
+    never exist here (nodes/edges/refs don't form reference cycles), pure overhead.
+    Disabling it for the duration is a measurable win. Exception-safe and
+    re-entrant: it only re-enables the GC if it was enabled on entry."""
+
+    @functools.wraps(fn)
+    def wrapper(*args: object, **kwargs: object) -> T:
+        was_enabled = gc.isenabled()
+        gc.disable()
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            if was_enabled:
+                gc.enable()
+
+    return wrapper
+
 
 DEFINITION = scip_pb2.SymbolRole.Definition
 FORWARD_DEFINITION = scip_pb2.SymbolRole.ForwardDefinition
@@ -143,6 +169,7 @@ def _attribute_containment(
     return result
 
 
+@_gc_disabled
 def build_graph(
     index: scip_pb2.Index,
     *,

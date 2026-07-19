@@ -8,7 +8,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 
-@dataclass
+# `slots=True`: these three are created in the millions during a build (mongo:
+# ~0.8M nodes, ~3.5M edges, ~7.2M references). Without slots each instance carries
+# a per-object `__dict__` (a full hash table); slots stores the fields in a compact
+# fixed layout instead — markedly less memory and faster creation/attribute access,
+# which is where the build spends ~51% of its time (pure-Python object churn).
+@dataclass(slots=True)
 class Node:
     symbol: str
     display_name: str = ""
@@ -16,7 +21,7 @@ class Node:
     line: int | None = None  # 0-indexed start line of the defining occurrence
 
 
-@dataclass
+@dataclass(slots=True)
 class Edge:
     kind: str  # "calls" | "implements" | "inherits"
     src: str
@@ -25,7 +30,7 @@ class Edge:
     line: int | None = None
 
 
-@dataclass
+@dataclass(slots=True)
 class Reference:
     """A single non-definition use of a symbol at a source location.
 

@@ -30,7 +30,7 @@ from importlib import metadata as importlib_metadata
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from cppgraph.builder import build_graph
+from cppgraph.builder import _gc_disabled, build_graph
 from cppgraph.model import Edge, Graph, Node, Reference
 
 if TYPE_CHECKING:
@@ -405,6 +405,7 @@ def update_store(
         store.close()
 
 
+@_gc_disabled
 def enrich_references(path: str | Path, index: scip_pb2.Index) -> tuple[int, int]:
     """Add symbol-granularity reference attribution to an existing store in place.
 
