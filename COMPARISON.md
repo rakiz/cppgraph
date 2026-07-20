@@ -147,19 +147,45 @@ needs the whole enclosing function). cppgraph's cost is the **MCP tool JSON** th
 LLM ingests: `find` (splits the name into its distinct compiler symbols, which
 grep cannot) + `who_calls` on the one you mean — exact, nothing left to filter.
 
-Measured on MongoDB (`src/mongo`, commit `d2afb4f`), one question across the
-whole spectrum, reproducible with `scripts/measure_tokens.py --suite`:
+**What was indexed.** MongoDB `src/mongo` at commit `d2afb4f`, **tests
+included** — 5,416 translation units (1,963 of them tests), 821k symbols. Tests
+are in the index *on purpose*: grep scans every file, tests among them, so for
+the comparison to be fair cppgraph must have seen those files too. (`who_calls`
+still filters test *callers* out of the answer by default — that's a cppgraph
+feature, and grep's test matches are counted as noise for the production
+question.) The resulting store is **577 MB** on disk (from a ~1.0 GB `.scip`),
+built once (minutes to hours — see the pipeline table in the README) and reused
+for every query: all the wins below are *after* that one-time cost.
+
+One question across the whole spectrum, reproducible with
+`scripts/measure_tokens.py --suite`:
 
 | Regime | Symbol (`who calls …?`) | grep raw | grep + read | cppgraph | grep noise | Verdict\*\* |
 |---|---|---:|---:|---:|:---:|:---:|
 | **Rare unique name** — grep's best case | `setBlockNewUserShardedDDL` | 94 | 1,836 | 232 | 0% | grep wins raw; **8× loss** on read |
 | | `_amIFreshEnoughForPriorityTakeover` | 105 | 1,976 | 197 | 33% | **10×** |
 | **Real method** (worked example below) | `ChangeStreamEventTransformation::makeResumeToken` | 6,635 | 110,857 | 408 | 98% | **272×** |
-| **Real class / method** | `ResumeToken::parse` | 68,651 | 598,711 | 3,122 | 96% | grep **incomplete** |
-| | `PlanExecutor::getPostBatchResumeToken` | 43,145 | 419,162 | 2,756 | 100% | grep **incomplete** |
-| | `BSONObjBuilder::obj` (4000+ callers) | 281,594 | 4,037,937 | 7,961 | 99% | grep **incomplete** |
-| **Ubiquitous type name** | `NamespaceString::NamespaceString` | 717,673 | 8,015,288 | 5,365 | 98% | grep **incomplete** |
-| | `OperationContext::getClient` | 973,323 | 11,952,684 | 6,281 | 100% | grep **incomplete** |
+| **Real class / method** | `ResumeToken::parse` | 68,651 | 598,711 | 3,122 | 96% | **192×†** |
+| | `PlanExecutor::getPostBatchResumeToken` | 43,145 | 419,162 | 2,756 | 100% | **152×†** |
+| | `BSONObjBuilder::obj` (4000+ callers) | 281,594 | 4,037,937 | 7,961 | 99% | **507×†** |
+| **Ubiquitous type name** | `NamespaceString::NamespaceString` | 717,673 | 8,015,288 | 5,365 | 98% | **1,494×†** |
+| | `OperationContext::getClient` | 973,323 | 11,952,684 | 6,281 | 100% | **1,903×†** |
+
+**†** = theoretical multiplier: grep + read exceeds one context (~200k tok), so
+nobody ingests it. The number shows the **scale** of what grep would need to
+answer completely; in practice grep has to **cut** the dump to what fits and
+answer from that partial view — so the result is **neither correct** (unverified
+matches, name-collisions, comments/decls counted as calls) **nor complete**
+(silently missing call sites), with no signal that anything was dropped. The
+rare-name rows (no †) are real, ingestible costs.
+
+**Latency, too.** Per query (best of 3, warm cache): `grep -rn` scans `src/mongo`
+in **~1.2 s**; cppgraph's `find` + `who_calls` returns in **~0.15 s** off the
+prebuilt store — ~8× faster, and that's *excluding* the one-time index build.
+Neither figure counts the time the LLM then spends *consuming* the returned
+tokens — but that time is **proportional to the token columns above**, so the
+same ratios carry straight over to end-to-end latency: grep isn't just costlier
+on a hot symbol, it's slow enough that the agent truncates.
 
 Reading the spectrum:
 
@@ -209,11 +235,11 @@ more in cppgraph than a trivial one — but that *is* the complete, attributed
 answer, and `find` is capped at 40 symbols so even the most ambiguous name stays
 bounded. grep's dump never contains an attributed caller list at all.
 
-\*\* **Verdict** is vs cppgraph. A ratio holds while grep + read fits
-one context (~200k tok); past that the grep+read figure is a theoretical ceiling
-nobody ingests, so the verdict is *incomplete* — grep still runs, but the agent
-truncates the dump to what fits and answers from a partial, unverified view.
-**Method:** tokens ≈ **characters ÷ 4** (`scripts/measure_tokens.py`,
+\*\* **Verdict** is the grep + read / cppgraph multiplier. It's a real,
+ingestible ratio while grep + read fits one context (~200k tok); past that
+(marked **†**) it's theoretical — the scale of what grep would need, not what an
+agent ingests, so grep truncates and its answer is incomplete (see the † note
+above). **Method:** tokens ≈ **characters ÷ 4** (`scripts/measure_tokens.py`,
 tunable) — the rough rule for prose; code and SCIP strings (punctuation, hex
 hashes, paths) tokenize *denser* (~3–3.5 chars/token), so true counts are
 **higher on both sides** — deliberately conservative, ratios stable. No exact
@@ -239,11 +265,11 @@ a one-time index (~minutes) amortized over every later query.
 ## Reproduce
 
 ```sh
-# cppgraph (pipeline graph already built at scratch/pipeline_refs.graph.db)
-.venv/bin/cppgraph find makeResumeToken --graph scratch/pipeline_refs.graph.db
-.venv/bin/cppgraph callers '<method symbol>' --graph scratch/pipeline_refs.graph.db
-.venv/bin/cppgraph impact  '<method symbol>' --graph scratch/pipeline_refs.graph.db
-.venv/bin/cppgraph references '<ResumeTokenData# symbol>' --graph scratch/pipeline_refs.graph.db
+# cppgraph (full src/mongo graph, tests included; <mongo>/.cppgraph/mongo.graph.db)
+.venv/bin/cppgraph find makeResumeToken --graph <mongo>/.cppgraph/mongo.graph.db
+.venv/bin/cppgraph callers '<method symbol>' --graph <mongo>/.cppgraph/mongo.graph.db
+.venv/bin/cppgraph impact  '<method symbol>' --graph <mongo>/.cppgraph/mongo.graph.db
+.venv/bin/cppgraph references '<ResumeTokenData# symbol>' --graph <mongo>/.cppgraph/mongo.graph.db
 
 # graphify (on a copy of the sources, outside the mongo repo — it writes graphify-out/)
 cp -R <mongo>/src/mongo/db/pipeline /tmp/gp && cd /tmp/gp

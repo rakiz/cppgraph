@@ -141,15 +141,20 @@ class Measurement:
         return self.whole_ctx_c / max(self.answer_compact, 1)
 
     @property
+    def incomplete(self) -> bool:
+        """True when grep+read exceeds one context budget: the multiplier is then
+        purely theoretical (nobody ingests it), so grep truncates somewhere and
+        its answer is necessarily incomplete."""
+        return _tok(self.whole_ctx_c) > CONTEXT_BUDGET_TOKENS
+
+    @property
     def verdict(self) -> str:
-        """A ratio while grep stays within one context budget; past it the honest
-        answer is not a (fictional) multiplier but *incomplete* — the grep+read
-        cost shown alongside is a theoretical ceiling, so in practice the agent
-        truncates it and answers from a partial, unverified view."""
-        if _tok(self.whole_ctx_c) > CONTEXT_BUDGET_TOKENS:
-            return "incomplete"
+        """The grep+read / cppgraph multiplier, with a '†' when it's theoretical
+        (past the context budget) — there the number shows the *scale* of what
+        grep would need, and the '†' flags that grep truncates → incomplete."""
         r = self.real_ratio
-        return f"{r:.0f}x" if r >= 10 else f"{r:.1f}x"
+        rr = f"{r:,.0f}x" if r >= 10 else f"{r:.1f}x"
+        return rr + ("†" if self.incomplete else "")
 
 
 def measure(
@@ -294,11 +299,11 @@ def report_detail(m: Measurement, src_root: str, subtree: str | None) -> None:
     print("\nverdict (tokens), for answering the one specific symbol:")
     print(f"  raw grep floor      / cppgraph : {m.ratio:>6.1f}x  (grep's dump alone)")
     budget_note = (
-        "  <- grep+read overflows a context; agent truncates → partial answer"
-        if _tok(m.whole_ctx_c) > CONTEXT_BUDGET_TOKENS
+        "  <- theoretical (†): grep truncates → incomplete answer"
+        if m.incomplete
         else "  <- the real comparison"
     )
-    print(f"  grep + read (honest)/ cppgraph : {m.verdict:>7}{budget_note}")
+    print(f"  grep + read (honest)/ cppgraph : {m.verdict:>8}{budget_note}")
     if m.sub_c is not None:
         print(f"  targeted raw grep   / cppgraph : {m.sub_c / max(m.answer_compact, 1):>6.1f}x")
     print(
@@ -308,10 +313,10 @@ def report_detail(m: Measurement, src_root: str, subtree: str | None) -> None:
         "  answer the question it must read around each hit. Even a rare, unique\n"
         "  name — grep's best case on the raw floor — flips to a cppgraph win once\n"
         "  that reading is counted. cppgraph is ~always leaner.\n"
-        f"- Past a ~{CONTEXT_BUDGET_TOKENS // 1000}k-token context budget the grep+read cost is a\n"
-        "  theoretical ceiling nobody ingests: the verdict is 'incomplete', not a\n"
-        "  multiplier — grep still runs, but the agent truncates the dump and answers\n"
-        "  from a partial, unverified view (silently missing call sites).\n"
+        f"- Past a ~{CONTEXT_BUDGET_TOKENS // 1000}k-token context budget the grep+read multiplier\n"  # noqa: E501
+        "  is theoretical (marked †): nobody ingests it, so grep truncates the dump\n"
+        "  and answers from a partial view — necessarily incomplete, silently missing\n"
+        "  call sites. The big number shows the scale of what grep would need.\n"
         "- cppgraph rows are the MCP JSON the LLM ingests. The default ships a\n"
         "  readable label derived from the SCIP string (not the 150-250-char raw\n"
         "  string) and drops test callers — the two ANSWER rows show the cost with\n"
@@ -378,15 +383,15 @@ def run_suite(src_root: str, store: GraphStore) -> None:
             )
         print()
     print(
-        f"* verdict vs cppgraph. 'grep raw' is only the match dump (a floor); grep\n"
-        "can't tell a call from a decl/comment/same-named symbol, so to actually\n"
-        f"answer it must read around each hit ('grep+read' = grep -C {GREP_VERIFY_CONTEXT}).\n"
+        f"* verdict = grep+read / cppgraph. 'grep raw' is only the match dump (a\n"
+        "floor); grep can't tell a call from a decl/comment/same-named symbol, so to\n"
+        f"actually answer it must read around each hit ('grep+read' = grep -C {GREP_VERIFY_CONTEXT}).\n"  # noqa: E501
         "'cppgraph' = find + who_calls(target), exact, nothing left to filter.\n"
-        f"A ratio holds while grep+read fits one context (~{CONTEXT_BUDGET_TOKENS // 1000}k tok);\n"
-        "past that the grep+read figure is a theoretical ceiling nobody ingests, so\n"
-        "the verdict is 'incomplete' — grep still runs, but the agent truncates the\n"
-        "dump to what fits and answers from a partial, unverified view (missed call\n"
-        "sites, no signal it's incomplete). cppgraph answers in a few k tokens, exact."
+        f"† = theoretical: grep+read exceeds one context (~{CONTEXT_BUDGET_TOKENS // 1000}k tok), so\n"  # noqa: E501
+        "nobody ingests it — the multiplier shows the scale of what grep would need,\n"
+        "and in practice grep truncates the dump and answers from a partial view, so\n"
+        "its answer is necessarily incomplete (silently missing call sites). cppgraph\n"
+        "answers in a few k tokens, exact and complete, either way."
     )
 
 
