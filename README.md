@@ -182,7 +182,8 @@ symbols merged) and needs **~110,000** to read-and-disambiguate; cppgraph `find`
 + `who_calls` ingests **~400**, exact — **272× leaner**. On a rare, uniquely
 named symbol (grep's best case) cppgraph still wins ~8× once grep reads to
 verify; on a hot type like `OperationContext` grep's dump alone (~970k tokens)
-**overflows the context** — it simply can't answer, where cppgraph stays at ~6k.
+**overflows the context** — the agent truncates and answers from a partial view,
+silently missing call sites, where cppgraph stays at ~6k, exact and complete.
 The trade-off is a one-time index (minutes), amortized over every later query.
 Full spectrum, noise ratios, and the token-lean defaults:
 **[COMPARISON.md](COMPARISON.md)** (reproduce with `scripts/measure_tokens.py --suite`).

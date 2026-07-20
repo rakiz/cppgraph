@@ -155,11 +155,11 @@ whole spectrum, reproducible with `scripts/measure_tokens.py --suite`:
 | **Rare unique name** — grep's best case | `setBlockNewUserShardedDDL` | 94 | 1,836 | 232 | 0% | grep wins raw; **8× loss** on read |
 | | `_amIFreshEnoughForPriorityTakeover` | 105 | 1,976 | 197 | 33% | **10×** |
 | **Real method** (worked example below) | `ChangeStreamEventTransformation::makeResumeToken` | 6,635 | 110,857 | 408 | 98% | **272×** |
-| **Real class / method** | `ResumeToken::parse` | 68,651 | 598,711 | 3,122 | 96% | grep **infeasible** |
-| | `PlanExecutor::getPostBatchResumeToken` | 43,145 | 419,162 | 2,756 | 100% | grep **infeasible** |
-| | `BSONObjBuilder::obj` (4000+ callers) | 281,594 | 4,037,937 | 7,961 | 99% | grep **infeasible** |
-| **Ubiquitous type name** | `NamespaceString::NamespaceString` | 717,673 | 8,015,288 | 5,365 | 98% | grep **infeasible** |
-| | `OperationContext::getClient` | 973,323 | 11,952,684 | 6,281 | 100% | grep **infeasible** |
+| **Real class / method** | `ResumeToken::parse` | 68,651 | 598,711 | 3,122 | 96% | grep **incomplete** |
+| | `PlanExecutor::getPostBatchResumeToken` | 43,145 | 419,162 | 2,756 | 100% | grep **incomplete** |
+| | `BSONObjBuilder::obj` (4000+ callers) | 281,594 | 4,037,937 | 7,961 | 99% | grep **incomplete** |
+| **Ubiquitous type name** | `NamespaceString::NamespaceString` | 717,673 | 8,015,288 | 5,365 | 98% | grep **incomplete** |
+| | `OperationContext::getClient` | 973,323 | 11,952,684 | 6,281 | 100% | grep **incomplete** |
 
 Reading the spectrum:
 
@@ -169,14 +169,19 @@ Reading the spectrum:
   they're real calls (which it must, to be correct), it costs **~8–10× more**.
   And these are the symbols you'd never reach for a graph anyway — grep already
   works. So grep wins only the queries you wouldn't ask cppgraph.
-- **The common case — any real class or method you'd navigate — grep can't do
-  at all.** Its output is 95–100% noise (comments, decls, and every same-named
-  symbol), and reading enough to disambiguate blows past a whole context window.
-  cppgraph answers in a few thousand tokens, exact.
+- **The common case — any real class or method you'd navigate — grep answers,
+  but incompletely.** Its output is 95–100% noise (comments, decls, and every
+  same-named symbol), and reading enough to disambiguate blows past a whole
+  context window. grep doesn't fail loudly: the agent truncates the dump to what
+  fits and answers from a partial, unverified view — **silently missing call
+  sites**, with no signal it's incomplete. cppgraph answers in a few thousand
+  tokens, exact and complete.
 - **On a hot type name** (`OperationContext`, `NamespaceString`) the raw grep
   dump *alone* is ~700k–970k tokens — it overflows the context before any
   reading. The 8–12M "grep + read" figure is a theoretical ceiling nobody
-  ingests; the honest verdict is simply **infeasible.** cppgraph: ~5–6k, exact.
+  ingests; in practice the agent truncates hard, so the answer is **incomplete
+  and unreliable** — which is worse than a loud failure, because it looks done.
+  cppgraph: ~5–6k, exact and complete.
 
 **Worked example — `makeResumeToken`, tying back to over/under-capture.** The
 method resolves to **four** distinct symbols across `src/mongo` (the method, two
@@ -206,8 +211,9 @@ bounded. grep's dump never contains an attributed caller list at all.
 
 \*\* **Verdict** is vs cppgraph. A ratio holds while grep + read fits
 one context (~200k tok); past that the grep+read figure is a theoretical ceiling
-nobody ingests, so the verdict is *infeasible* — grep can't answer within a
-context. **Method:** tokens ≈ **characters ÷ 4** (`scripts/measure_tokens.py`,
+nobody ingests, so the verdict is *incomplete* — grep still runs, but the agent
+truncates the dump to what fits and answers from a partial, unverified view.
+**Method:** tokens ≈ **characters ÷ 4** (`scripts/measure_tokens.py`,
 tunable) — the rough rule for prose; code and SCIP strings (punctuation, hex
 hashes, paths) tokenize *denser* (~3–3.5 chars/token), so true counts are
 **higher on both sides** — deliberately conservative, ratios stable. No exact

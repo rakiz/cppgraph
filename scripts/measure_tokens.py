@@ -72,10 +72,11 @@ GREP_VERIFY_CONTEXT = 10
 FIND_CAP = 40
 
 # A realistic single-context budget (tokens). Past this a "grep + read" ratio is
-# a fiction: nobody ingests millions of tokens. So the honest verdict switches
-# from a multiplier to *infeasible* — grep can't answer within one context.
-# Below it: grep raw fits but verifying every hit ('grep+read') overflows →
-# grep gives a dump it can't afford to disambiguate. Below that: a real ratio.
+# a fiction: nobody ingests millions of tokens. But grep doesn't *fail* there —
+# it returns everything and the agent silently truncates to what fits, then
+# answers from a partial view without knowing what it dropped. So the honest
+# verdict switches from a multiplier to *incomplete*: grep's answer is
+# unreliable (missed call sites, unverified matches), not impossible to attempt.
 CONTEXT_BUDGET_TOKENS = 200_000
 
 
@@ -142,10 +143,11 @@ class Measurement:
     @property
     def verdict(self) -> str:
         """A ratio while grep stays within one context budget; past it the honest
-        answer is not a (fictional) multiplier but *infeasible* — the grep+read
-        cost shown alongside is a theoretical ceiling nobody actually ingests."""
+        answer is not a (fictional) multiplier but *incomplete* — the grep+read
+        cost shown alongside is a theoretical ceiling, so in practice the agent
+        truncates it and answers from a partial, unverified view."""
         if _tok(self.whole_ctx_c) > CONTEXT_BUDGET_TOKENS:
-            return "infeasible"
+            return "incomplete"
         r = self.real_ratio
         return f"{r:.0f}x" if r >= 10 else f"{r:.1f}x"
 
@@ -292,7 +294,7 @@ def report_detail(m: Measurement, src_root: str, subtree: str | None) -> None:
     print("\nverdict (tokens), for answering the one specific symbol:")
     print(f"  raw grep floor      / cppgraph : {m.ratio:>6.1f}x  (grep's dump alone)")
     budget_note = (
-        "  <- grep+read overflows a context; grep can't answer"
+        "  <- grep+read overflows a context; agent truncates → partial answer"
         if _tok(m.whole_ctx_c) > CONTEXT_BUDGET_TOKENS
         else "  <- the real comparison"
     )
@@ -307,8 +309,9 @@ def report_detail(m: Measurement, src_root: str, subtree: str | None) -> None:
         "  name — grep's best case on the raw floor — flips to a cppgraph win once\n"
         "  that reading is counted. cppgraph is ~always leaner.\n"
         f"- Past a ~{CONTEXT_BUDGET_TOKENS // 1000}k-token context budget the grep+read cost is a\n"
-        "  theoretical ceiling nobody ingests: the honest verdict is 'infeasible',\n"
-        "  not a multiplier — grep simply can't answer a hot symbol within a context.\n"
+        "  theoretical ceiling nobody ingests: the verdict is 'incomplete', not a\n"
+        "  multiplier — grep still runs, but the agent truncates the dump and answers\n"
+        "  from a partial, unverified view (silently missing call sites).\n"
         "- cppgraph rows are the MCP JSON the LLM ingests. The default ships a\n"
         "  readable label derived from the SCIP string (not the 150-250-char raw\n"
         "  string) and drops test callers — the two ANSWER rows show the cost with\n"
@@ -381,8 +384,9 @@ def run_suite(src_root: str, store: GraphStore) -> None:
         "'cppgraph' = find + who_calls(target), exact, nothing left to filter.\n"
         f"A ratio holds while grep+read fits one context (~{CONTEXT_BUDGET_TOKENS // 1000}k tok);\n"
         "past that the grep+read figure is a theoretical ceiling nobody ingests, so\n"
-        "the honest verdict is 'infeasible' — grep can't answer within a context at\n"
-        "all. Either way cppgraph answers in a few k tokens, exact."
+        "the verdict is 'incomplete' — grep still runs, but the agent truncates the\n"
+        "dump to what fits and answers from a partial, unverified view (missed call\n"
+        "sites, no signal it's incomplete). cppgraph answers in a few k tokens, exact."
     )
 
 
