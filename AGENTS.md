@@ -92,7 +92,17 @@ So you cannot hand the user a bare interactive wizard and expect them to answer 
 through you. Instead: **ask the scope in your own question UI, then run the index
 non-interactively with those answers as flags.**
 
-1. **Get the options:** run `cppgraph index --plan-json` from the project directory.
+**You drive Phase B; the user does not type any of these commands.** The
+`--plan-json` call and the `index.sh … -y …` command below are *yours* to run — do
+not print them to the user as steps to perform or explain. To the user, Phase B is
+just: (a) you offer to index the project so they can query it, (b) they answer one
+or two plain questions (which part of the code? include tests?), (c) you run it and
+report progress, (d) when it's done you tell them to open a new Claude Code session
+from the project directory. Keep the flags and JSON out of the conversation.
+
+1. **Get the options:** run `cppgraph index --plan-json` from the project directory
+   (use the installed binary: `~/.local/share/cppgraph/repo/.venv/bin/cppgraph`, or
+   `scripts/index.sh --plan-json` — a bare `cppgraph` is not on PATH).
    It auto-locates the `compile_commands.json` (root / `build/` / up the tree) and
    returns the compdb breakdown plus a `questions[]` array (`filter`, `no_tests`,
    `attributed_refs`), each with its `info`, `default`, and — for `filter` —

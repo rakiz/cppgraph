@@ -67,9 +67,16 @@ UI), then run the script non-interactively with those choices as flags.**
 
 ### Phase B — index a project (per-project; the heavy step)
 
-1. **Get the scope options:** `cppgraph index --plan-json` (from the project dir; it
+**You drive Phase B; the user types none of these commands.** They are yours to
+run — don't print `--plan-json` or the `index.sh … -y …` line to the user or ask
+them to run it. To the user, Phase B is: you offer to index the project, they answer
+one or two plain questions (which part of the code? include tests?), you run it and
+report progress, then they open a new Claude Code session.
+
+1. **Get the scope options:** run `~/.local/share/cppgraph/repo/scripts/index.sh
+   --plan-json` (a bare `cppgraph` isn't on PATH) from the project dir; it
    auto-locates the `compile_commands.json` — if it reports none, generate one, see
-   [AGENTS.md](AGENTS.md) → "Fallback", after the user's OK). It returns the compdb
+   [AGENTS.md](AGENTS.md) → "Fallback", after the user's OK. It returns the compdb
    breakdown, the questions (subtree / tests / attribution), and `artifacts` (whether
    a `.scip`/`.graph.db` already exists).
 2. **Ask the user** each question, surfacing the real options. If `artifacts` shows
