@@ -17,7 +17,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from cppgraph.init import find_compdb, scip_clang_bin_dir
-from cppgraph.prompt import Prompter, make_prompter
+from cppgraph.prompt import Prompter, interactive, make_prompter
 
 _DEFAULT_SCIP_VERSION = "0.4.0"
 
@@ -97,16 +97,38 @@ def _build_scip(bin_dir: Path, p: Prompter) -> bool:
     return proc.returncode == 0
 
 
+def _valid_sources(native: str | None, host_can_build: bool) -> list[tuple[str, str]]:
+    """The scip-clang sources valid on this host, each `(value, label-with-cost)`."""
+    options: list[tuple[str, str]] = []
+    if native:
+        options.append(("download", "download prebuilt binary (stock, no #504) — ~1 min"))
+    if host_can_build:
+        options.append(("build", "build #504 locally — ~30-60 min, needs Docker"))
+    options.append(("emulate", "no host binary; index via an x86 container — slower later"))
+    return options
+
+
 def obtain_scip_clang(
-    p: Prompter, *, bin_dir: Path | None = None, from_scratch: bool = False
+    p: Prompter,
+    *,
+    bin_dir: Path | None = None,
+    from_scratch: bool = False,
+    source: str | None = None,
+    assume_yes: bool = False,
+    can_prompt: bool = True,
 ) -> str:
-    """Stage S2. Returns one of: `present` (a usable binary is in place),
-    `emulate` (no host binary — index via a container later), `aborted`, `failed`."""
+    """Stage S2. `source` forces the choice (skip the menu); `can_prompt` is False
+    under a pipe (no interactive stdin). Returns one of: `present` (a usable binary
+    is in place), `emulate` (index via a container later), `aborted`, `failed`, or
+    `need-input` (non-interactive and no `source` given — the caller must re-run
+    with `--scip-source`). Never silently picks a costly default."""
     bin_dir = bin_dir or scip_clang_bin_dir()
     bin_dir.mkdir(parents=True, exist_ok=True)
     binary = bin_dir / "scip-clang"
     native, host_can_build = platform_sources()
     version = _pinned_scip_version()
+    valid = _valid_sources(native, host_can_build)
+    valid_values = {v for v, _ in valid}
 
     if os.access(binary, os.X_OK) and not from_scratch:
         side = read_sidecar(bin_dir) or {}
@@ -119,20 +141,39 @@ def obtain_scip_clang(
                 ("installed", side.get("installed_at", "unknown")),
             ],
         )
-        if not p.confirm("Re-obtain it (replace the current binary)?", default=False):
-            return "present"
+        # Keep it unless explicitly told to re-obtain — a self-built #504 binary is
+        # expensive, so the default (and the non-interactive answer) is to keep.
+        if source is None:
+            reobtain = (
+                p.confirm("Re-obtain it (replace the current binary)?", False)
+                if (can_prompt and not assume_yes)
+                else False
+            )
+            if not reobtain:
+                return "present"
 
-    # Build the selectable source list for this host, each with its rough cost.
-    options: list[tuple[str, str]] = []
-    if native:
-        options.append(("download", "download prebuilt binary (stock, no #504) — ~1 min"))
-    if host_can_build:
-        options.append(("build", "build #504 locally — ~30-60 min, needs Docker"))
-    options.append(("emulate", "no host binary; index via an x86 container — slower later"))
-    options.append(("abort", "don't install — stop setup"))
-
-    default = "download" if native else ("build" if host_can_build else "emulate")
-    choice = p.select("How should scip-clang be obtained?", options, default)
+    # Resolve the source: an explicit flag wins; otherwise ask if we can, else stop.
+    if source is not None:
+        if source not in valid_values:
+            p.note(
+                f"error: --scip-source {source} is not valid on this platform. "
+                f"Valid here: {', '.join(sorted(valid_values))}."
+            )
+            return "failed"
+        choice = source
+    elif can_prompt:
+        choice = p.select(
+            "How should scip-clang be obtained?",
+            [*valid, ("abort", "don't install — stop setup")],
+            "download" if native else ("build" if host_can_build else "emulate"),
+        )
+    else:
+        # Non-interactive and no source given: STOP, never default into a costly
+        # download/build/emulate. Tell the caller exactly how to re-run.
+        p.note("", "ACTION NEEDED — choose how to obtain scip-clang, then re-run:")
+        for value, label in valid:
+            p.note(f"  scripts/setup.sh --scip-source {value}   # {label}")
+        return "need-input"
 
     if choice == "abort":
         p.note("Aborted — scip-clang not installed.")
@@ -166,7 +207,9 @@ def _mcp_registered() -> bool:
     return proc.returncode == 0
 
 
-def register_mcp(p: Prompter, *, from_scratch: bool = False) -> str:
+def register_mcp(
+    p: Prompter, *, from_scratch: bool = False, assume_yes: bool = False, can_prompt: bool = True
+) -> str:
     """Stage S3. Registers the cppgraph MCP server (user scope). Returns
     `registered`, `kept`, `skipped` (no claude CLI), or `failed`."""
     if not _claude_available():
@@ -177,7 +220,14 @@ def register_mcp(p: Prompter, *, from_scratch: bool = False) -> str:
         p.note(f"note: {mcp_bin} not found — is the venv set up? Skipping MCP registration.")
         return "skipped"
     if _mcp_registered() and not from_scratch:
-        if not p.confirm("The MCP server 'cppgraph' is already registered. Re-register?", False):
+        # Already pointing at this checkout's cppgraph-mcp; re-registering is
+        # idempotent. Keep it unless asked to redo (non-interactive: keep).
+        reregister = (
+            p.confirm("MCP 'cppgraph' already registered. Re-register?", False)
+            if (can_prompt and not assume_yes)
+            else False
+        )
+        if not reregister:
             return "kept"
     subprocess.run(["claude", "mcp", "remove", "cppgraph", "--scope", "user"], capture_output=True)
     proc = subprocess.run(
@@ -197,29 +247,42 @@ def run_setup(
     prompter: Prompter | None = None,
     from_scratch: bool = False,
     chain_index: bool = True,
+    scip_source: str | None = None,
+    assume_yes: bool = False,
 ) -> int:
     """`cppgraph setup`: obtain scip-clang (S2), register the MCP server (S3), then
-    hand off to the project index wizard (S4). Returns a process exit code."""
+    hand off to the project index wizard (S4). Returns a process exit code.
+
+    `scip_source` forces the indexer source (skip the menu). Under a pipe (no
+    interactive stdin) and without it, S2 stops with `ACTION NEEDED` rather than
+    picking a costly default."""
     p = prompter or make_prompter()
+    can_prompt = interactive()
 
-    scip = obtain_scip_clang(p, from_scratch=from_scratch)
-    if scip in ("aborted", "failed"):
-        return 3 if scip == "aborted" else 1
+    scip = obtain_scip_clang(
+        p,
+        from_scratch=from_scratch,
+        source=scip_source,
+        assume_yes=assume_yes,
+        can_prompt=can_prompt,
+    )
+    if scip in ("aborted", "failed", "need-input"):
+        return 1 if scip == "failed" else 3
 
-    register_mcp(p, from_scratch=from_scratch)
+    register_mcp(p, from_scratch=from_scratch, assume_yes=assume_yes, can_prompt=can_prompt)
 
-    p.note("")
-    p.note("Tool setup complete.")
+    p.note("", "Tool setup complete.")
     if not chain_index:
         return 0
 
     # S4: index a project now if we're standing in one, else point the way.
-    if find_compdb(Path.cwd()) is not None:
-        p.note("Found a compile_commands.json here — starting the project index wizard.")
-        p.note("")
+    if find_compdb(Path.cwd()) is not None and can_prompt:
+        p.note("Found a compile_commands.json here — starting the project index wizard.", "")
         from cppgraph.init import run_init
 
-        return run_init()
+        return run_init(prompter=p)
     p.note("To index a project, run this from the project directory:")
-    p.note(f"  {_repo_root() / 'scripts' / 'index.sh'}")
+    p.note(
+        f"  {_repo_root() / 'scripts' / 'index.sh'}   (or: cppgraph index <compdb> -y --filter …)"
+    )
     return 0

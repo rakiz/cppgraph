@@ -367,6 +367,19 @@ def main(argv: list[str] | None = None) -> int:
         "project (the interactive per-machine setup; run via scripts/setup.sh)",
     )
     p_setup.add_argument(
+        "--scip-source",
+        choices=["download", "build", "emulate"],
+        default=None,
+        help="how to obtain scip-clang (skips the menu; required when non-interactive)",
+    )
+    p_setup.add_argument(
+        "-y",
+        "--yes",
+        dest="assume_yes",
+        action="store_true",
+        help="don't re-prompt to replace an existing binary / MCP registration (keep them)",
+    )
+    p_setup.add_argument(
         "--from-scratch",
         action="store_true",
         help="re-walk every setup stage, re-obtaining artifacts that already exist",
@@ -757,7 +770,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "setup":
         from cppgraph.setup_cmd import run_setup
 
-        return run_setup(from_scratch=args.from_scratch, chain_index=args.chain_index)
+        return run_setup(
+            from_scratch=args.from_scratch,
+            chain_index=args.chain_index,
+            scip_source=args.scip_source,
+            assume_yes=args.assume_yes,
+        )
 
     if args.command in ("init", "index"):
         from cppgraph.init import onboarding_plan, run_init
@@ -772,8 +790,19 @@ def main(argv: list[str] | None = None) -> int:
                 return 1
             print(json.dumps(onboarding_plan(*resolved), indent=2))
             return 0
-        from cppgraph.prompt import make_prompter
+        from cppgraph.prompt import interactive, make_prompter
 
+        # Interactive prompts need a real terminal; a piped run (e.g. Claude Code's
+        # `! …`) gets EOF and would silently take defaults. Stop instead, unless the
+        # scope was given as flags (-y / --filter) or only the plan is requested.
+        if not args.non_interactive and not interactive():
+            print(
+                "[cppgraph] `index` needs an interactive terminal for the scope "
+                "questions. Re-run in a real shell, or pass the scope as flags: "
+                "cppgraph index <compdb> -y --filter <sub> [--no-tests] "
+                "[--attributed-refs] --run"
+            )
+            return 3
         return run_init(
             compdb=args.compdb,
             project_root=args.project_root,

@@ -60,6 +60,41 @@ def test_obtain_emulate_installs_nothing(tmp_path: Path, monkeypatch) -> None:
     assert not (bindir / "scip-clang").exists()
 
 
+def test_obtain_non_interactive_without_source_stops(tmp_path: Path, monkeypatch) -> None:
+    """Under a pipe (can_prompt=False) with no --scip-source, it must NOT default
+    into a costly build/download — it stops with ACTION NEEDED."""
+    bindir = tmp_path / "bin"
+    monkeypatch.setattr(setup_cmd, "platform_sources", lambda: (None, True))  # build-capable host
+    p, out = _scripted_prompter([])  # a prompt here would raise IndexError? no — returns ""
+    result = setup_cmd.obtain_scip_clang(p, bin_dir=bindir, source=None, can_prompt=False)
+    assert result == "need-input"
+    assert not (bindir / "scip-clang").exists()
+    assert any("ACTION NEEDED" in line for line in out)
+
+
+def test_obtain_explicit_source_emulate_no_prompt(tmp_path: Path, monkeypatch) -> None:
+    """An explicit --scip-source is honoured with no prompt, even non-interactive."""
+    bindir = tmp_path / "bin"
+    monkeypatch.setattr(setup_cmd, "platform_sources", lambda: (None, True))
+    result = setup_cmd.obtain_scip_clang(
+        p := Prompter(_boom, lambda *a: None), bin_dir=bindir, source="emulate", can_prompt=False
+    )
+    assert result == "emulate"
+    assert p is p  # (silence unused)
+
+
+def test_obtain_invalid_source_for_platform_fails(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(setup_cmd, "platform_sources", lambda: (None, False))  # no download/build
+    p, out = _scripted_prompter([])
+    result = setup_cmd.obtain_scip_clang(p, bin_dir=tmp_path / "bin", source="download")
+    assert result == "failed"
+    assert any("not valid on this platform" in line for line in out)
+
+
+def _boom(_prompt: str) -> str:
+    raise AssertionError("must not prompt when a source is given")
+
+
 def test_register_mcp_skips_without_claude(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(setup_cmd, "_claude_available", lambda: False)
     p, out = _scripted_prompter([])

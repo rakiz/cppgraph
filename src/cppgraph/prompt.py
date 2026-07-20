@@ -17,13 +17,26 @@ import sys
 from collections.abc import Callable, Sequence
 
 
+def interactive() -> bool:
+    """True only when both stdin and stdout are a real terminal — i.e. prompts can
+    actually be answered. False under a pipe (e.g. a Claude Code `! …` run), where a
+    prompt would receive EOF; callers must then stop rather than silently default."""
+    return sys.stdin.isatty() and sys.stdout.isatty()
+
+
+def _flush_print(*args: object) -> None:
+    """`print`, but always flushed — so a wizard's own lines appear in real order,
+    not buffered to the end behind a subprocess's live output under a pipe."""
+    print(*args, flush=True)
+
+
 class Prompter:
     """Plain-stdlib prompter: prints with `print_fn`, reads lines with `input_fn`.
     Selectable menus are rendered as a numbered list read from `input_fn`, so a
     scripted `input_fn` drives the whole flow in tests."""
 
     def __init__(
-        self, input_fn: Callable[[str], str] = input, print_fn: Callable[..., None] = print
+        self, input_fn: Callable[[str], str] = input, print_fn: Callable[..., None] = _flush_print
     ):
         self._input = input_fn
         self._print = print_fn
@@ -136,7 +149,7 @@ def tui_available() -> bool:
 def make_prompter(*, force_plain: bool = False) -> Prompter:
     """The best prompter for the current context: the rich/questionary TUI when it
     is installed and stdin/stdout are a terminal, otherwise the stdlib one."""
-    if force_plain or not (sys.stdin.isatty() and sys.stdout.isatty()) or not tui_available():
+    if force_plain or not interactive() or not tui_available():
         return Prompter()
     try:
         return _TuiPrompter()

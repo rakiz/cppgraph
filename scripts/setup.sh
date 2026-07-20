@@ -7,12 +7,15 @@
 # and runs the project index wizard. Every step checks what already exists and asks
 # before (re)doing it; nothing expensive is overwritten without your say-so.
 #
-#   scripts/setup.sh                 set up the tool, then index the current project
-#   scripts/setup.sh --version 0.2.0 pin the tool to a released tag before setup
-#   scripts/setup.sh --nightly       track the main branch
-#   scripts/setup.sh --branch foo    check out a branch
-#   scripts/setup.sh --from-scratch  re-walk every setup stage
-#   scripts/setup.sh --no-index      stop after tool setup (skip the project wizard)
+#   scripts/setup.sh                          set up the tool interactively, then index
+#   scripts/setup.sh --scip-source build      obtain scip-clang without prompting
+#                                             (download|build|emulate — needed when run
+#                                             non-interactively, e.g. via Claude Code `!`)
+#   scripts/setup.sh --version 0.2.0          pin the tool to a released tag before setup
+#   scripts/setup.sh --nightly | --branch foo track main / a branch
+#   scripts/setup.sh --from-scratch           re-walk every setup stage
+#   scripts/setup.sh --no-index               stop after tool setup (skip the index wizard)
+#   -y/--yes                                  keep an existing binary / MCP registration
 #
 # Prereq: `uv` (https://docs.astral.sh/uv/).
 set -euo pipefail
@@ -26,7 +29,8 @@ while [ $# -gt 0 ]; do
     --version) ref_arg="${2:?--version needs a value (e.g. 0.2.0)}"; ref_mode="version"; shift 2 ;;
     --branch)  ref_arg="${2:?--branch needs a value}"; ref_mode="branch"; shift 2 ;;
     --nightly) ref_mode="nightly"; shift ;;
-    --from-scratch|--no-index) passthrough+=("$1"); shift ;;
+    --scip-source) passthrough+=("$1" "${2:?--scip-source needs download|build|emulate}"); shift 2 ;;
+    -y|--yes|--from-scratch|--no-index) passthrough+=("$1"); shift ;;
     -h|--help) sed -n '2,/^# Prereq/p' "$0"; exit 0 ;;
     *) echo "unknown argument: $1 (see --help)" >&2; exit 2 ;;
   esac

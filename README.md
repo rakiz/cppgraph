@@ -22,95 +22,63 @@ https://github.com/rakiz/cppgraph"* — that points it at this section.
 If you are that agent, follow these steps exactly. They are deterministic; the
 scripts fail loudly with actionable messages.
 
-There are two phases. **Phase A (machine setup)** is one-time: you clone the repo,
-the user runs `setup.sh` in their terminal. **Phase B (index a project)** is
-per-project and has the heavy steps — the user runs `index.sh` and answers the
-prompts. Your role is to clone, hand off the exact command, and give a realistic
-time estimate before any heavy step.
+Two phases. **Phase A (machine setup):** clone, then run setup with the scip-clang
+source the user chose. **Phase B (index a project):** run the index with the scope
+the user chose. **You gather each choice by asking the user (in your own question
+UI), then run the script non-interactively with those choices as flags.**
 
-> **RULE — heavy steps need explicit sign-off (do not skip).** The expensive
-> steps that use significant CPU are: generating a `compile_commands.json`,
-> **building the graph / indexing**, and — only on the ARM-Linux build path —
-> **compiling scip-clang from source** (`--scip-source build`, PR #504,
-> ~30 min on 8 cores, longer on fewer). **Give a realistic estimate — do not
-> overstate, and do not mislabel which step is the long one.**
->
-> - **Indexing** is the routine heavy step and usually the **longest** for a real
->   codebase — **minutes to hours**, CPU-bound. Reference points: ~20 min for
->   ~6 000 TUs on a fast 14-core x86; but **~4 h for 6 482 TUs on an 8-core AWS
->   Graviton2** (older ARM cores are several times slower *per core*, not just
->   fewer). So estimate by TU count **and** CPU, not TU count alone; the index
->   wizard prints a per-machine range right before it starts.
-> - **The scip-clang binary** is **light when downloaded** (a prebuilt binary,
->   seconds) — the default on macOS arm64 / Linux x86_64. It is heavy **only**
->   when compiled from source (ARM-Linux, or anyone wanting #504). Don't call the
->   binary "the heavy step" on the download path.
->
-> Before running any heavy step, in **one message** you **MUST**:
-> 1. say what it does and a realistic time estimate (per above);
-> 2. show the **exact command, verbatim** (so they can run it themselves);
-> 3. ask the user to pick: **"I run it for you"** or **"you run it yourself"**.
->
-> Then stop and wait — do not start until they choose, and never launch it in
-> the background. Tip: for a first try, suggest scoping to one subtree (a filter
-> like `src/foo/`) so it finishes in a couple of minutes. The wizard runs in the
-> user's terminal, so they answer the prompts and see the progress themselves.
+> **RULE — `!` commands can't be answered, so you ask, then pass flags.** A Claude
+> Code `! …` run has no interactive stdin: a prompt inside it gets EOF. So the
+> interactive menus are for a human in a real terminal, **not** for you. Your loop
+> is: (1) **ask the user** every choice via your question UI — the scip-clang source
+> (Phase A) and the index scope (Phase B) — surfacing the real options; (2) run the
+> script **non-interactively** with those choices as flags. Decide nothing yourself;
+> the answers are the user's. Give a realistic **time estimate** with each heavy
+> step: indexing is the long one (**minutes to hours**, CPU-bound — ~20 min for
+> ~6 000 TUs on a fast 14-core x86, **~4 h for 6 482 TUs on an 8-core Graviton2**);
+> downloading scip-clang is seconds, compiling it (#504) is ~30–60 min.
 
 ### Phase A — set up the machine (once)
 
-**Your job is the strict minimum: clone the repo, then hand off.** Clone into the
-per-machine tool dir (**always this path** — not the user's project, and not a dev
-checkout; even "install from a local copy" means clone that copy *into* this path):
-
-```bash
-git clone https://github.com/rakiz/cppgraph "${XDG_DATA_HOME:-$HOME/.local/share}/cppgraph/repo"
-```
-Then tell the user to run **exactly this, verbatim** (the `!` prefix runs it in
-their session so they answer the prompts):
-
-```
-! ~/.local/share/cppgraph/repo/scripts/setup.sh
-```
-
-`scripts/setup.sh` is the **sole** entry point — it creates the venv first. Never
-tell the user to run `cppgraph setup` directly, or `.venv/bin/cppgraph …`, or
-anything under a dev checkout: on a fresh machine none of that exists until
-`setup.sh` has run. Don't run it yourself either (it's interactive).
-
-`setup.sh` needs [`uv`](https://docs.astral.sh/uv/). It creates the venv + deps,
-then runs the interactive `cppgraph setup`:
-
-- **Obtain scip-clang** — the user picks the source from a menu, each with its cost:
-  **download** (prebuilt, no #504, ~1 min — macOS arm64 / Linux x86_64), **build**
-  (#504 natively, ~30–60 min, Docker, Linux only — unlocks symbol-granularity
-  usage), or **emulate** (no host binary; indexing later runs in an x86 container,
-  much slower). An "abort" choice stops without installing. On **Windows**, work
-  inside **WSL2**; on an **Intel Mac**, only *emulate* applies.
-- **Register the MCP server** (once per machine; idempotent, project-aware).
-- **Hand off to the project index wizard** for the current project (Phase B).
-
-Every stage checks what already exists and asks before (re)doing it — a self-built
-#504 binary or a multi-hour `.scip` is never clobbered silently.
+1. **Clone** into the per-machine tool dir (**always this path** — not the user's
+   project, not a dev checkout; even "install from a local copy" means clone that
+   copy *into* this path):
+   ```bash
+   git clone https://github.com/rakiz/cppgraph "${XDG_DATA_HOME:-$HOME/.local/share}/cppgraph/repo"
+   ```
+2. **Ask the user how to obtain scip-clang** — present the sources valid on their
+   platform, each with its cost: **download** (prebuilt, ~1 min — macOS arm64 /
+   Linux x86_64 only), **build** (#504 natively, ~30–60 min, Docker, Linux only —
+   unlocks symbol-granularity usage), **emulate** (no host binary; indexing later
+   runs in an x86 container, much slower). Windows → WSL2; Intel Mac → only emulate.
+3. **Run it with their choice** (`!` runs it non-interactively; `--scip-source` is
+   what makes that work — without it a piped run stops with `ACTION NEEDED`):
+   ```
+   ! ~/.local/share/cppgraph/repo/scripts/setup.sh --scip-source <download|build|emulate>
+   ```
+   `setup.sh` is the **sole** entry point — it creates the venv, obtains scip-clang,
+   registers the MCP server, and (in a real terminal) offers to index the current
+   project. Never tell the user to run `cppgraph setup` / `.venv/bin/cppgraph …` /
+   anything under a dev checkout: none of that exists on a fresh machine until
+   `setup.sh` has run.
 
 ### Phase B — index a project (per-project; the heavy step)
 
-`setup.sh` runs this automatically the first time; afterwards, to index another
-project (or refresh a stale one), the user runs it directly:
-
-```
-! ~/.local/share/cppgraph/repo/scripts/index.sh
-```
-
-The wizard auto-locates the project's `compile_commands.json` (root / `build/` / up
-the tree; if it reports none, generate one — see [AGENTS.md](AGENTS.md) →
-"Fallback" — after the user's OK, since it may run a full build), shows the
-breakdown, asks the scope questions as selectable menus (subtree / tests /
-attribution), and — when a `.scip` or `.graph.db` already exists — shows its
-details and asks reuse-vs-recompute. It records the chosen scope in the graph and
-reuses it on incremental updates. **You hand the user the command; they answer the
-prompts.** Then tell them to **open a new Claude Code session _from their project
-directory_** (that's how the server finds this project's graph) and ask *"what
-calls X?"*, *"impact of changing Y?"*, *"show the dependency graph of Z"*.
+1. **Get the scope options:** `cppgraph index --plan-json` (from the project dir; it
+   auto-locates the `compile_commands.json` — if it reports none, generate one, see
+   [AGENTS.md](AGENTS.md) → "Fallback", after the user's OK). It returns the compdb
+   breakdown + the questions (subtree / tests / attribution).
+2. **Ask the user** each of those, surfacing the real options.
+3. **Run it with their answers** (non-interactive, so `!` works):
+   ```
+   ! ~/.local/share/cppgraph/repo/scripts/index.sh <compdb> -y --filter <sub> [--no-tests] [--attributed-refs] --run
+   ```
+   An existing `.scip`/`.graph.db` is reused, never overwritten, unless recompute is
+   requested; the chosen scope is recorded and reused by later updates. (A human in a
+   real terminal can instead run `scripts/index.sh` with no flags for the interactive
+   wizard.) Then tell the user to **open a new Claude Code session _from their project
+   directory_** (that's how the server finds this project's graph) and ask *"what
+   calls X?"*, *"impact of changing Y?"*, *"show the dependency graph of Z"*.
 
 Humans: the same flow, step by step, is in [QUICKSTART.md](QUICKSTART.md).
 

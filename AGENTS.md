@@ -85,45 +85,43 @@ when you want to measure at scale; keep such paths out of the shipped code.)
 - **Small, reversible steps.** Don't gold-plate (e.g. don't rewrite in Rust)
   without a measurement demanding it.
 
-## Indexing a project — hand the user `scripts/index.sh`
+## Indexing a project — ask the scope, then run with flags
 
-**To index (or re-index) a project, tell the user to run the interactive wizard in
-their own terminal:**
+A Claude Code `! …` run has **no interactive stdin** — a prompt inside it gets EOF.
+So you cannot hand the user a bare interactive wizard and expect them to answer it
+through you. Instead: **ask the scope in your own question UI, then run the index
+non-interactively with those answers as flags.**
 
-```
-! ~/.local/share/cppgraph/repo/scripts/index.sh
-```
+1. **Get the options:** run `cppgraph index --plan-json` from the project directory.
+   It auto-locates the `compile_commands.json` (root / `build/` / up the tree) and
+   returns the compdb breakdown plus a `questions[]` array (`filter`, `no_tests`,
+   `attributed_refs`), each with its `info`, `default`, and — for `filter` —
+   concrete `options`. **Do not inspect the build system or offer to generate a
+   compdb** unless `--plan-json` reports none (only then, see the fallback below,
+   after the user's OK — it may run a full build).
+2. **Ask the user every question** in `questions[]`, via your question UI, surfacing
+   the real options. `filter`: the listed subtrees + whole tree + a free substring.
+   `no_tests`: the count/% and the trade-off. `attributed_refs`: only when
+   `scip_clang.supports_attribution` is true. Decide nothing yourself.
+3. **Run it with their answers** (non-interactive, so `!` works):
+   ```
+   ! ~/.local/share/cppgraph/repo/scripts/index.sh <compdb> -y --filter <sub> [--no-tests] [--attributed-refs] --run
+   ```
+   An existing `.scip`/`.graph.db` is reused (never overwritten) unless a recompute
+   is requested; the chosen scope is recorded in the graph and reused by later
+   updates. Give a time estimate first — indexing is the long step.
 
-The `!` prefix runs it in their session, so they answer the prompts directly. The
-wizard is deterministic: it auto-locates the `compile_commands.json` (project root,
-`build/`, or up the tree), shows the compdb breakdown, asks the scope questions
-(subtree / tests / attribution) as selectable menus, and — when a `.scip` or
-`.graph.db` already exists — shows its details and asks whether to reuse or
-recompute it. Nothing expensive is overwritten without the user's say-so. **You
-decide nothing; the user answers in their terminal.**
+Never run the bare interactive `cppgraph index` (or `scripts/index.sh` with no
+flags) through `!` — it gets EOF and stops. (A human at a real terminal *can* run
+`scripts/index.sh` with no flags for the interactive wizard; that's for them, not
+you.) When the graph is stale enough to matter — read `cppgraph status` (or the MCP
+`status` tool: commits behind, changed files) — tell the user, and re-run step 3.
 
-Do not run the bare `cppgraph index` yourself — it blocks on stdin. Do not inspect
-the build system or offer to generate a `compile_commands.json` up front; the
-wizard finds an existing one, and only if it reports none do you generate one (see
-the fallback below).
-
-When the graph is stale enough to matter — read `cppgraph status` (or the MCP
-`status` tool: commits behind, changed files) — tell the user it's worth
-refreshing and to run `! ~/.local/share/cppgraph/repo/scripts/index.sh` again. The
-wizard offers an incremental update when a graph already exists. The chosen scope
-is recorded in the graph (`cppgraph status` shows it) and reused by the update.
-
-*If you would rather ask the scope questions in your own UI* (instead of handing
-off): run `cppgraph index --plan-json` for the breakdown + `questions[]`, ask the
-user every question, then run `cppgraph index <compdb> -y --filter <sub>
-[--no-tests] [--attributed-refs] --run`. This is the exception; the hand-off above
-is the norm.
-
-### Fallback: no compile_commands.json (only when the wizard reports none)
+### Fallback: no compile_commands.json (only when `--plan-json` reports none)
 
 cppgraph needs a `compile_commands.json` (the input to `scip-clang`) — the
 target's artifact, never stored in this repo. Produce one however the target
-supports, then re-run `cppgraph init`:
+supports, then re-run the index:
 
 - CMake: configure with `-DCMAKE_EXPORT_COMPILE_COMMANDS=ON` → written to the
   build dir; symlink/copy it to the project root.
@@ -146,8 +144,8 @@ when it's stale (it reflects the build graph at generation time).
   directory (its own outputs: `graph.db`, `.scip`, filtered compdb), dropped in
   with a `.gitignore` of `*` so it never dirties the repo — like `.vscode/`.
   Everything else is read (`compile_commands.json`, and sources with `--root`).
-- Per-machine tool install — **you do the strict minimum, the user runs the
-  setup.** Exactly two actions, no variation:
+- Per-machine tool install — **ask the source, then run with a flag** (a `! …` run
+  can't answer prompts):
 
   1. Clone the repo to its data dir (**always this path**, even when asked to
      install "from a local copy" — clone the local checkout *into* the data dir,
@@ -156,23 +154,22 @@ when it's stale (it reflects the build graph at generation time).
      git clone <repo> "${XDG_DATA_HOME:-$HOME/.local/share}/cppgraph/repo"
      ```
      (`<repo>` = `https://github.com/rakiz/cppgraph`, or a local path when testing.)
-  2. Tell the user to run **exactly this**, verbatim — the entry point is always
-     the `scripts/setup.sh` launcher:
+  2. **Ask the user how to obtain scip-clang** in your question UI — the sources
+     valid on their platform, each with its cost: **download** (~1 min; macOS arm64
+     / Linux x86_64 only), **build** (#504, ~30–60 min, Docker, Linux only),
+     **emulate** (no host binary; slower indexing later).
+  3. Run `setup.sh` with their choice as a flag (this is what lets `!` work):
      ```
-     ! ~/.local/share/cppgraph/repo/scripts/setup.sh
+     ! ~/.local/share/cppgraph/repo/scripts/setup.sh --scip-source <download|build|emulate>
      ```
+     Without `--scip-source`, a piped run stops with `ACTION NEEDED` rather than
+     picking a costly default — that's deliberate.
 
-  **Never** tell the user to run `cppgraph setup` directly, or anything under a dev
-  checkout like `~/code_projects/...`, or `.venv/bin/cppgraph …` — on a fresh
-  machine that path and that venv do not exist yet. Only `scripts/setup.sh` creates
-  the venv; it is the sole entry point. Do not run it yourself (it's interactive and
-  blocks on stdin) — hand it to the user.
-
-  `setup.sh` creates the venv, then runs the interactive `cppgraph setup`: it
-  obtains the scip-clang indexer (the user picks the source — download / build #504
-  / emulate — from a menu, with time estimates), registers the MCP server, and
-  hands off to the project index wizard. Every stage checks what already exists and
-  asks before (re)doing it. You decide none of it — clone, then hand off. The whole
+  **Never** run `cppgraph setup` directly, `.venv/bin/cppgraph …`, or anything under
+  a dev checkout like `~/code_projects/...` — on a fresh machine that path and venv
+  don't exist until `setup.sh` has run. `scripts/setup.sh` is the sole entry point:
+  it creates the venv, obtains scip-clang (per `--scip-source`), registers the MCP
+  server, then — in a real terminal — offers to index the current project. The whole
   tool lives under one persistent data dir, `${XDG_DATA_HOME:-~/.local/share}/cppgraph/`
   — the git checkout + its `.venv` in `repo/`, and the `scip-clang` binary (a
   per-machine artifact, one per arch, shared across projects) in `bin/` (override
