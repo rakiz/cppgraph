@@ -131,6 +131,9 @@ if [[ -d "$PROJECT_CPG" ]]; then
   # Default no (data is precious) — unless --purge/--all was asked, which means
   # "remove everything, project data included".
   proj_default=n; [[ "$PURGE" == 1 ]] && proj_default=y
+  if ls "$PROJECT_CPG"/*.scip >/dev/null 2>&1; then
+    echo "  WARNING: this includes a .scip index, which can take HOURS to rebuild." >&2
+  fi
   if ask "Delete THIS project's graph data at $PROJECT_CPG?" "$proj_default"; then
     rm_path "project graph data" "$PROJECT_CPG"
   else

@@ -201,15 +201,20 @@ when it's stale (it reflects the build graph at generation time).
   `CPPGRAPH_BIN_DIR`). A data dir, not a cache, so a self-built binary and the
   checkout the global MCP registration points at aren't wiped by cache cleaners.
   Not under `scratch/`, which is dev-only throwaway (example graphs, etc.).
-- Uninstall — the script lives with the installed tool, **not** a dev checkout. Hand
-  the user this exact path (it asks, per item, what to remove):
+- Uninstall — **always use the script; never improvise `rm -rf`.** There is no
+  uninstall *flag* on `setup.sh`; the tool is a separate script that lives with the
+  installed tool (not a dev checkout). Hand the user this exact path:
   ```
   ! ~/.local/share/cppgraph/repo/scripts/uninstall.sh
   ```
-  `--dry-run` to preview, `--purge` to remove everything including this project's
-  `.cppgraph` data. Same rule as install: never point at `~/code_projects/...` or
-  any dev checkout — the real install is always under
-  `${XDG_DATA_HOME:-~/.local/share}/cppgraph/`.
+  It asks per item what to remove and, crucially, **keeps each project's
+  `.cppgraph/` index data by default** — a `.scip` there can take *hours* to rebuild.
+  **Never** propose or run `rm -rf` on `~/.local/share/cppgraph` or a project's
+  `.cppgraph/`, and never print a delete command for the index data: let
+  `uninstall.sh` handle it safely (it warns before touching anything precious).
+  `--dry-run` previews; `--purge` removes everything including project data (only if
+  the user explicitly asks for that). Same rule as install: never point at
+  `~/code_projects/...` or any dev checkout.
 
 ## Layout
 

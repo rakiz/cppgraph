@@ -95,6 +95,12 @@ progress; (d) when done, they open a new Claude Code session.
    directory_** (that's how the server finds this project's graph) and ask *"what
    calls X?"*, *"impact of changing Y?"*, *"show the dependency graph of Z"*.
 
+**Uninstalling:** run `! ~/.local/share/cppgraph/repo/scripts/uninstall.sh` (it asks
+per item). There is no uninstall flag on `setup.sh`, and you must **never** improvise
+`rm -rf` on `~/.local/share/cppgraph` or a project's `.cppgraph/` — the latter holds
+a `.scip` index that can take hours to rebuild; `uninstall.sh` keeps project data by
+default and warns before touching anything precious.
+
 Humans: the same flow, step by step, is in [QUICKSTART.md](QUICKSTART.md).
 
 ## Status
