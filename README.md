@@ -46,11 +46,14 @@ UI), then run the script non-interactively with those choices as flags.**
    ```bash
    git clone https://github.com/rakiz/cppgraph "${XDG_DATA_HOME:-$HOME/.local/share}/cppgraph/repo"
    ```
-2. **Ask the user how to obtain scip-clang** — present the sources valid on their
-   platform, each with its cost: **download** (prebuilt, ~1 min — macOS arm64 /
-   Linux x86_64 only), **build** (#504 natively, ~30–60 min, Docker, Linux only —
-   unlocks symbol-granularity usage), **emulate** (no host binary; indexing later
-   runs in an x86 container, much slower). Windows → WSL2; Intel Mac → only emulate.
+2. **Get the valid sources from the tool (don't guess the platform):**
+   ```
+   ! ~/.local/share/cppgraph/repo/scripts/setup.sh --list-sources
+   ```
+   It prints this machine's OS/arch and the sources that actually apply (e.g. no
+   `download` on ARM-Linux). **Ask the user to pick from exactly those** — costs:
+   download ~1 min, build (#504) ~30–60 min Docker, emulate (slower indexing).
+   Windows → WSL2; Intel Mac → only emulate.
 3. **Run it with their choice** (`!` runs it non-interactively; `--scip-source` is
    what makes that work — without it a piped run stops with `ACTION NEEDED`):
    ```

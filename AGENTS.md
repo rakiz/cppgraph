@@ -158,10 +158,12 @@ when it's stale (it reflects the build graph at generation time).
      git clone <repo> "${XDG_DATA_HOME:-$HOME/.local/share}/cppgraph/repo"
      ```
      (`<repo>` = `https://github.com/rakiz/cppgraph`, or a local path when testing.)
-  2. **Ask the user how to obtain scip-clang** in your question UI — the sources
-     valid on their platform, each with its cost: **download** (~1 min; macOS arm64
-     / Linux x86_64 only), **build** (#504, ~30–60 min, Docker, Linux only),
-     **emulate** (no host binary; slower indexing later).
+  2. **Get the valid sources from the tool — do NOT guess the platform.** Run
+     `! ~/.local/share/cppgraph/repo/scripts/setup.sh --list-sources` (pure bash, no
+     venv needed): it prints this machine's OS/arch and the sources that actually
+     apply (e.g. no `download` on ARM-Linux). **Ask the user to pick from exactly
+     those** — each has a cost: download ~1 min, build (#504) ~30–60 min Docker,
+     emulate (slower indexing). Offering a source the tool didn't list will fail.
   3. Run `setup.sh` with their choice as a flag (this is what lets `!` work):
      ```
      ! ~/.local/share/cppgraph/repo/scripts/setup.sh --scip-source <download|build|emulate>

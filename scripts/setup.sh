@@ -7,6 +7,8 @@
 # and runs the project index wizard. Every step checks what already exists and asks
 # before (re)doing it; nothing expensive is overwritten without your say-so.
 #
+#   scripts/setup.sh --list-sources           print the scip-clang sources valid on
+#                                             THIS machine (no venv needed), then exit
 #   scripts/setup.sh                          set up the tool interactively, then index
 #   scripts/setup.sh --scip-source build      obtain scip-clang without prompting
 #                                             (download|build|emulate — needed when run
@@ -22,10 +24,28 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."  # repo root
 
+# The valid scip-clang sources for THIS machine, from uname — so a caller (agent or
+# human) never has to guess the platform. Prints, then exits; needs no venv.
+list_sources() {
+  local os arch; os="$(uname -s)"; arch="$(uname -m)"
+  local native="" build=0
+  case "$os/$arch" in
+    Darwin/arm64|Linux/x86_64) native=1 ;;
+  esac
+  case "$os" in Linux) build=1 ;; esac
+  echo "platform: $os $arch"
+  echo "valid scip-clang sources (pass one as --scip-source):"
+  [ -n "$native" ] && echo "  download   prebuilt binary (stock, no #504) — ~1 min"
+  [ "$build" = 1 ] && echo "  build      compile #504 locally — ~30-60 min, needs Docker (Linux only)"
+  echo "  emulate    no host binary; index via an x86 container — slower at index time"
+  [ -z "$native" ] && echo "note: 'download' is NOT available on $os $arch."
+}
+
 # --- optional version/ref selection (cppgraph is pure Python: a version is a tag) ---
 ref_mode="default"; ref_arg=""; passthrough=()
 while [ $# -gt 0 ]; do
   case "$1" in
+    --list-sources) list_sources; exit 0 ;;
     --version) ref_arg="${2:?--version needs a value (e.g. 0.2.0)}"; ref_mode="version"; shift 2 ;;
     --branch)  ref_arg="${2:?--branch needs a value}"; ref_mode="branch"; shift 2 ;;
     --nightly) ref_mode="nightly"; shift ;;
