@@ -135,65 +135,86 @@ working tree.
 
 The tool an LLM actually reaches for first isn't graphify or Serena — it's
 `grep`. So the most practical comparison is: how many **tokens** does it cost to
-answer a dependency question each way? (Fewer tokens ingested = cheaper, faster,
-and more room left in the context window.)
+answer *"who calls X?"* each way? (Fewer tokens ingested = cheaper, faster, and
+more room left in the context window.)
 
-Same question, *"who calls the **method** `makeResumeToken`?"*. `makeResumeToken`
-resolves to **four** distinct symbols across `src/mongo` (a method, two
-test-helper free functions, an anonymous-namespace test symbol). Measured with
-`scripts/measure_tokens.py` — the cppgraph rows count the **MCP tool JSON**, i.e.
-what the LLM ingests:
+The honest grep cost is **not the raw match dump.** grep can't tell a call from
+a declaration, a comment, a string, or a *different* symbol that happens to share
+the name — so to actually answer the question it has to **read around every hit**
+to judge it. The raw dump is only a floor; the real cost is grep + that reading
+(modelled as `grep -C 10`, deliberately conservative — real disambiguation often
+needs the whole enclosing function). cppgraph's cost is the **MCP tool JSON** the
+LLM ingests: `find` (splits the name into its distinct compiler symbols, which
+grep cannot) + `who_calls` on the one you mean — exact, nothing left to filter.
 
-| Approach | Chars | ≈ Tokens\* | Correct? |
-|---|---|---|---|
-| `grep -rn makeResumeToken src/mongo` (untargeted) | 26,540 | ~6,600 | ✗ 4 symbols merged; decls/comments/strings; needs file reads to disambiguate |
-| grep on the known subtree `.../db/pipeline` (best case) | 23,569 | ~5,900 | ✗ same problems; targeting barely helps |
-| cppgraph `find` (1,009) + `who_calls` on the method (613) | 1,622 | **~400** | ✓ exact — the method's 3 callers, nothing else |
+Measured on MongoDB (`src/mongo`, commit `d2afb4f`), one question across the
+whole spectrum, reproducible with `scripts/measure_tokens.py --suite`:
 
-**~16× fewer tokens** (untargeted) / ~15× (even against the best-case targeted
-grep) — and exact, where grep is ambiguous *and* still needs follow-up file
-reads. `find` alone is the step grep can't do: it splits the name into its four
-real symbols with their definition sites.
+| Regime | Symbol (`who calls …?`) | grep raw | grep + read | cppgraph | grep noise | Verdict\*\* |
+|---|---|---:|---:|---:|:---:|:---:|
+| **Rare unique name** — grep's best case | `setBlockNewUserShardedDDL` | 94 | 1,836 | 232 | 0% | grep wins raw; **8× loss** on read |
+| | `_amIFreshEnoughForPriorityTakeover` | 105 | 1,976 | 197 | 33% | **10×** |
+| **Real method** (worked example below) | `ChangeStreamEventTransformation::makeResumeToken` | 6,635 | 110,857 | 408 | 98% | **272×** |
+| **Real class / method** | `ResumeToken::parse` | 68,651 | 598,711 | 3,122 | 96% | grep **infeasible** |
+| | `PlanExecutor::getPostBatchResumeToken` | 43,145 | 419,162 | 2,756 | 100% | grep **infeasible** |
+| | `BSONObjBuilder::obj` (4000+ callers) | 281,594 | 4,037,937 | 7,961 | 99% | grep **infeasible** |
+| **Ubiquitous type name** | `NamespaceString::NamespaceString` | 717,673 | 8,015,288 | 5,365 | 98% | grep **infeasible** |
+| | `OperationContext::getClient` | 973,323 | 11,952,684 | 6,281 | 100% | grep **infeasible** |
 
-**Cheaper is good; *correct* is better.** Fewer tokens would be a poor trade if
-the answer were worse — it's the opposite. Of grep's **156** dumped lines, only
-**3** are real call sites of the method: **98% is noise** for this question
-(comments, strings, declarations, and the three *other* symbols sharing the
-name). cppgraph returns exactly those 3 callers — **100% signal, compiler-
-resolved**, nothing to read-and-filter. So the LLM ingests ~16× fewer tokens
-*and* they're the right ones.
+Reading the spectrum:
 
-**It scales up on a hub symbol.** The same question on `ResumeToken::parse`
-(`scripts/measure_tokens.py ResumeToken … 'ResumeToken#parse'`): grep dumps
-**~68,600 tokens** (1,636 lines, **95.6% noise** — only 72 are real calls);
-cppgraph answers in **~1,690 tokens**, exact. That's **~41× fewer tokens** — the
-conservative ~16× above is deliberately the *small* example, not the ceiling.
+- **grep's best case is a rare, uniquely-named symbol** — a private helper it
+  pins in ~2 lines. There its *raw* dump (94 tok) is cheaper than cppgraph's
+  ~200-token scaffolding. But the moment grep reads those lines to confirm
+  they're real calls (which it must, to be correct), it costs **~8–10× more**.
+  And these are the symbols you'd never reach for a graph anyway — grep already
+  works. So grep wins only the queries you wouldn't ask cppgraph.
+- **The common case — any real class or method you'd navigate — grep can't do
+  at all.** Its output is 95–100% noise (comments, decls, and every same-named
+  symbol), and reading enough to disambiguate blows past a whole context window.
+  cppgraph answers in a few thousand tokens, exact.
+- **On a hot type name** (`OperationContext`, `NamespaceString`) the raw grep
+  dump *alone* is ~700k–970k tokens — it overflows the context before any
+  reading. The 8–12M "grep + read" figure is a theoretical ceiling nobody
+  ingests; the honest verdict is simply **infeasible.** cppgraph: ~5–6k, exact.
 
-**Where those tokens go — and the token-lean defaults.** Each fan-out hit could
-carry the raw 150-250-char SCIP symbol string; instead the tools ship a readable
-label derived from that string (`full_symbols=True` to opt out) and drop test
-callers (`exclude_tests=False` to keep them). On a hub symbol the two compound.
-`who_calls(ResumeToken::parse)` (`scripts/measure_tokens.py ResumeToken … 'ResumeToken#parse'`):
+**Worked example — `makeResumeToken`, tying back to over/under-capture.** The
+method resolves to **four** distinct symbols across `src/mongo` (the method, two
+test-helper free functions, an anonymous-namespace test symbol) — the same
+name-collision that sinks a tree-sitter tool. grep dumps **156 lines / ~6,635
+tokens**, of which **3** are real call sites: **98% noise.** To trust those 3 you
+read around each of the 156 → **~110,857 tokens.** cppgraph: `find` (255 tok,
+splits the four apart) + `who_calls` on the method (153 tok) = **~408 tokens**,
+exactly the 3 callers. **272× leaner, and exact where grep is ambiguous.**
 
-| who_calls payload | Chars | ≈ Tokens | |
-|---|---|---|---|
-| raw SCIP strings + test callers kept (pre-optimisation) | 11,102 | ~2,780 | 100 callers |
-| + drop test callers | 3,472 | ~870 | 13 production callers (−69%) |
-| + derive labels from SCIP (**default**) | 1,998 | ~500 | −42% again → **~5.5× leaner** overall |
+**Where cppgraph's own tokens go — the token-lean defaults.** Each fan-out hit
+could carry the raw 150-250-char SCIP symbol string; instead the tools ship a
+readable label derived from it (`full_symbols=True` to opt out) and drop test
+callers (`exclude_tests=False` to keep them). On a hub symbol the two compound —
+`who_calls(ResumeToken::parse)`:
 
-The flip side, kept honest: a symbol with many *genuine* production callers still
-costs more in cppgraph — but that *is* the complete, attributed answer; grep's
-6,600 tokens don't contain an attributed caller list at all. The token win is in
-disambiguation + targeting a specific symbol, which is the actual question.
+| who_calls payload | ≈ Tokens | |
+|---|---:|---|
+| raw SCIP strings + test callers kept (pre-optimisation) | ~5,055 | 73 callers |
+| + drop test callers | ~1,050 | 14 production callers (−79%) |
+| + derive labels from SCIP (**default**) | ~555 | −47% again |
 
-\* **Method & honesty.** Tokens ≈ **characters ÷ 4** (`scripts/measure_tokens.py`,
-tunable). That's the rough rule for prose; code and SCIP symbol strings (heavy
-punctuation, hex hashes, paths) tokenize *denser* (~3–3.5 chars/token), so true
-counts are **higher on both sides** — deliberately conservative, ratio stable. No
-exact tokenizer is used: Claude's isn't available offline, and a proxy (e.g.
-tiktoken's `o200k_base`) would shift both sides similarly. grep is scoped to all
-of `src/mongo` (the realistic case — the LLM isn't told how to scope). cppgraph
-pays a one-time index (~minutes) amortized over every later query.
+The flip side, kept honest: a symbol with many *genuine* production callers costs
+more in cppgraph than a trivial one — but that *is* the complete, attributed
+answer, and `find` is capped at 40 symbols so even the most ambiguous name stays
+bounded. grep's dump never contains an attributed caller list at all.
+
+\*\* **Verdict** is vs cppgraph. A ratio holds while grep + read fits
+one context (~200k tok); past that the grep+read figure is a theoretical ceiling
+nobody ingests, so the verdict is *infeasible* — grep can't answer within a
+context. **Method:** tokens ≈ **characters ÷ 4** (`scripts/measure_tokens.py`,
+tunable) — the rough rule for prose; code and SCIP strings (punctuation, hex
+hashes, paths) tokenize *denser* (~3–3.5 chars/token), so true counts are
+**higher on both sides** — deliberately conservative, ratios stable. No exact
+tokenizer is used (Claude's isn't available offline; a proxy like tiktoken's
+`o200k_base` would shift both sides similarly). grep is scoped to all of
+`src/mongo` — the realistic case, the LLM isn't told how to scope. cppgraph pays
+a one-time index (~minutes) amortized over every later query.
 
 ## Verdict — when to use which
 
@@ -223,7 +244,11 @@ cp -R <mongo>/src/mongo/db/pipeline /tmp/gp && cd /tmp/gp
 graphify update . --no-cluster            # → graphify-out/graph.json
 graphify explain "makeResumeToken"        # inspect nodes/edges
 
-# token cost: grep (whole tree + a known subtree) vs cppgraph find+who_calls
+# token cost — the whole spectrum (grep raw / grep+read / cppgraph) in one table
+.venv/bin/python scripts/measure_tokens.py --suite \
+  <mongo>/src/mongo <mongo>/.cppgraph/mongo.graph.db
+
+# or a detailed single-symbol breakdown (where every token goes)
 .venv/bin/python scripts/measure_tokens.py makeResumeToken \
   <mongo>/src/mongo <mongo>/.cppgraph/mongo.graph.db \
   <mongo>/src/mongo/db/pipeline 'ChangeStreamEventTransformation#makeResumeToken'

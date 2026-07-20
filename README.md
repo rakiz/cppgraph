@@ -35,8 +35,10 @@ UI), then run the script non-interactively with those choices as flags.**
 > script **non-interactively** with those choices as flags. Decide nothing yourself;
 > the answers are the user's. Give a realistic **time estimate** with each heavy
 > step: indexing is the long one (**minutes to hours**, CPU-bound — ~20 min for
-> ~6 000 TUs on a fast 14-core x86, **~4 h for 6 482 TUs on an 8-core Graviton2**);
-> downloading scip-clang is seconds, compiling it (#504) is ~30–60 min.
+> ~6 000 TUs on a fast 14-core x86, **~4 h for 6 482 TUs on an 8-core Graviton2
+> (m6g), ~1 h 42 for 4 301 TUs on an 8-core Graviton3 (m7g.2xlarge)**);
+> downloading scip-clang is seconds, compiling it (#504) is ~30–60 min (~26 min
+> measured on m7g.2xlarge).
 
 ### Phase A — set up the machine (once)
 
@@ -136,7 +138,9 @@ Notes:
   (`enclosing_range`) — you compile (`docker/build-scip-clang/`).
 - **Stage 4 is the variable one.** Measured extremes: ~20 min on a fast 14-core
   x86 for ~6 000 TUs; **~4 h for 6 482 TUs on an 8-core AWS Graviton2**
-  (`m6g.2xlarge` — older Neoverse-N1 cores are slow at this). the index wizard prints
+  (`m6g.2xlarge` — older Neoverse-N1 cores are slow at this); **~1 h 42 for
+  4 301 TUs on an 8-core Graviton3** (`m7g.2xlarge` — ~1.4 s/TU vs ~2.2 on
+  Graviton2). the index wizard prints
   a per-machine estimate right before it starts. Fewer/older cores → proportionally
   longer; scope to a subtree (stage 3) to cut it down.
 - **`enclosing_range` (#504) is a choice at indexing**, with consequences: it
@@ -169,13 +173,18 @@ comments/decls, misses `ptr->method()` / virtual dispatch / templates) and
 **token-expensive** (noisy output, then whole-file reads to disambiguate, all
 through the model's context).
 
-Measured on MongoDB, *"who calls the method `makeResumeToken`?"*: grep ingests
-~6,600 tokens and is wrong (4 symbols merged); cppgraph `find` + `who_calls`
-ingests **~400** and is exact — **~16× fewer, and correct**. On a hub symbol the
-gap widens to **~41×** (`ResumeToken::parse`). The trade-off is a one-time index
-(minutes), amortized over every later query. Full numbers, noise ratios, and the
-token-lean output defaults: **[COMPARISON.md](COMPARISON.md)** (reproduce with
-`scripts/measure_tokens.py`).
+grep's *raw* dump is only a floor: it can't tell a call from a decl, a comment,
+or a different same-named symbol, so to answer correctly it must **read around
+every hit** — and that's where the cost explodes. Measured on MongoDB, *"who
+calls the method `makeResumeToken`?"*: grep dumps ~6,600 tokens (98% noise, 4
+symbols merged) and needs **~110,000** to read-and-disambiguate; cppgraph `find`
++ `who_calls` ingests **~400**, exact — **272× leaner**. On a rare, uniquely
+named symbol (grep's best case) cppgraph still wins ~8× once grep reads to
+verify; on a hot type like `OperationContext` grep's dump alone (~970k tokens)
+**overflows the context** — it simply can't answer, where cppgraph stays at ~6k.
+The trade-off is a one-time index (minutes), amortized over every later query.
+Full spectrum, noise ratios, and the token-lean defaults:
+**[COMPARISON.md](COMPARISON.md)** (reproduce with `scripts/measure_tokens.py --suite`).
 
 ## Documentation
 
