@@ -16,9 +16,11 @@ dispatch, and pointer/reference method calls).
 
 ## Install with your AI agent
 
-If someone pointed you (an AI coding agent) here with *"install this tool:
-https://github.com/rakiz/cppgraph"*, follow these steps exactly. They are
-deterministic; the scripts fail loudly with actionable messages.
+**To install, tell your agent:** *"Follow instructions to install
+https://github.com/rakiz/cppgraph"* — that points it at this section.
+
+If you are that agent, follow these steps exactly. They are deterministic; the
+scripts fail loudly with actionable messages.
 
 There are two phases. **Phase A (machine setup)** is one-time: you clone the repo,
 the user runs `setup.sh` in their terminal. **Phase B (index a project)** is
