@@ -128,7 +128,7 @@ runs the C++ front-end once per translation unit, so it scales with cores/CPU).
 | 2 | **Get `compile_commands.json`** — from the target's build system, if not already present | `compile_commands.json` | **~3 min** (warm) … **~15 min** (cold) — the *target's* build, not cppgraph |
 | 3 | **Filter what to index** — scope to a subtree, optionally drop tests | `<name>.compdb.json` | **seconds** |
 | 4 | **Index** — `scip-clang` runs the C++ front-end per TU → SCIP | `<name>.scip` | **the big one: ~20 min → several hours** |
-| 5 | **Build the store** — parse SCIP, intern symbols + edges into SQLite | `<name>.graph.db` | **~1 min** |
+| 5 | **Build the store** — parse SCIP, intern symbols + edges into SQLite | `<name>.graph.db` | **~30 s** (filtered `src/mongo`) … **~3.5 min** (full repo + refs) |
 
 Then you're ready to query (see the gains below).
 
@@ -148,8 +148,9 @@ Notes:
   (`--attributed-refs`), but needs the compiled #504 binary and makes the `.scip`
   and store larger. Without it you still get an exact graph, just with
   file-granularity usage. You can add it later without re-indexing (`enrich-refs`)
-  — but note `enrich-refs` re-parses the `.scip` and rebuilds the graph, so it
-  costs about a **store build** (mongo: ~3.5 min, ~9 GB RAM), not stage 5's ~1 min.
+  — but note `enrich-refs` re-parses the `.scip` and rebuilds the graph *with*
+  references, so it costs a **full store build** (mongo: ~3.5 min, ~9 GB RAM) —
+  the top of stage 5's range, not its filtered ~30 s floor.
 
 **Two components:** the **builder** (`scip-clang`, external compiled binary) does
 the expensive, perf-critical C++ parsing, crash-isolated per TU; **cppgraph**
