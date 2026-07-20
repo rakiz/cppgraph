@@ -37,7 +37,7 @@ UI), then run the script non-interactively with those choices as flags.**
 > step: indexing is the long one (**minutes to hours**, CPU-bound — ~20 min for
 > ~6 000 TUs on a fast 14-core x86, **~4 h for 6 482 TUs on an 8-core Graviton2
 > (m6g), ~1 h 42 for 4 301 TUs on an 8-core Graviton3 (m7g.2xlarge)**);
-> downloading scip-clang is seconds, compiling it (#504) is ~30–60 min (~26 min
+> downloading scip-clang is seconds, compiling it (#504) is ~25–60 min (~26 min
 > measured on m7g.2xlarge).
 
 ### Phase A — set up the machine (once)
@@ -54,7 +54,7 @@ UI), then run the script non-interactively with those choices as flags.**
    ```
    It prints this machine's OS/arch and the sources that actually apply (e.g. no
    `download` on ARM-Linux). **Ask the user to pick from exactly those** — costs:
-   download ~1 min, build (#504) ~30–60 min Docker, emulate (slower indexing).
+   download ~1 min, build (#504) ~25–60 min Docker, emulate (slower indexing).
    Windows → WSL2; Intel Mac → only emulate.
 3. **Run it with their choice** (`!` runs it non-interactively; `--scip-source` is
    what makes that work — without it a piped run stops with `ACTION NEEDED`):
@@ -124,7 +124,7 @@ runs the C++ front-end once per translation unit, so it scales with cores/CPU).
 
 | # | Stage | Produces | Rough time |
 |---|-------|----------|------------|
-| 1 | **Get `scip-clang`** — copy the prebuilt binary, or compile from source | the per-machine indexer binary | **~1 min** (copy) … **~30–45 min** (compile) |
+| 1 | **Get `scip-clang`** — copy the prebuilt binary, or compile from source | the per-machine indexer binary | **~1 min** (copy) … **~25–60 min** (compile, #504; ~26 min measured on m7g) |
 | 2 | **Get `compile_commands.json`** — from the target's build system, if not already present | `compile_commands.json` | **~3 min** (warm) … **~15 min** (cold) — the *target's* build, not cppgraph |
 | 3 | **Filter what to index** — scope to a subtree, optionally drop tests | `<name>.compdb.json` | **seconds** |
 | 4 | **Index** — `scip-clang` runs the C++ front-end per TU → SCIP | `<name>.scip` | **the big one: ~20 min → several hours** |

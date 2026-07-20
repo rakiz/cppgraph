@@ -76,7 +76,7 @@ It's a **per-machine** artifact — one per CPU arch, shared by this checkout an
 every project you index — so each machine keeps a single copy in the persistent
 user data dir, `${XDG_DATA_HOME:-~/.local/share}/cppgraph/bin/scip-clang`
 (override with `CPPGRAPH_BIN_DIR`). It goes in the data dir, **not a cache**: a
-self-built binary (ARM-Linux, PR #504) costs 30-60 min to rebuild and can't be
+self-built binary (ARM-Linux, PR #504) costs ~25-60 min to rebuild and can't be
 re-downloaded, so it must survive cache cleaners. Not under `scratch/` or any
 project's `.cppgraph/`.
 
@@ -89,7 +89,7 @@ too — the GitHub API resolves either).
 | source | what it does | when |
 |---|---|---|
 | `download` | fetch the prebuilt release binary (no PR #504) | macOS arm64, Linux x86_64 |
-| `build` | compile it locally with `enclosing_range`/PR #504 (`docker/build-scip-clang/`, ~30-60 min, Docker, **Linux host only** — produces a Linux binary) | ARM-Linux, or anyone wanting #504 |
+| `build` | compile it locally with `enclosing_range`/PR #504 (`docker/build-scip-clang/`, ~25-60 min, Docker, **Linux host only** — produces a Linux binary) | ARM-Linux, or anyone wanting #504 |
 | `emulate` | install no host binary; index through an x86 container | ARM-Linux without building, Intel Mac, Windows |
 
 The menu lists only the sources valid on this host, each with its rough cost, plus

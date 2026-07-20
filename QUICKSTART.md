@@ -13,7 +13,7 @@ Z"), in a handful of commands.
   - macOS Apple Silicon (arm64) ✅
   - Linux x86_64 ✅
   - **ARM-Linux (aarch64, e.g. Ubuntu arm64)** → no prebuilt binary. Two options:
-    **build scip-clang natively** (the setup wizard's *build* option, ~30-60 min,
+    **build scip-clang natively** (the setup wizard's *build* option, ~25-60 min,
     Docker — recommended, and gets PR #504), or run the x86_64 binary via a
     container (emulated, slow — for a subsystem only). See
     [INSTALL.md](INSTALL.md) → "ARM-Linux / Windows: index via a container" and
@@ -40,7 +40,7 @@ git clone https://github.com/rakiz/cppgraph "${XDG_DATA_HOME:-$HOME/.local/share
 
 `setup.sh` (needs [`uv`](https://docs.astral.sh/uv/)) asks how to obtain scip-clang
 from a menu — **download** the prebuilt binary (~1 min; macOS arm64 / Linux
-x86_64), **build** it locally with PR #504 (~30–60 min, Docker, Linux only), or
+x86_64), **build** it locally with PR #504 (~25–60 min, Docker, Linux only), or
 **emulate** via an x86 container — with an "abort" choice throughout. It then
 registers the MCP server (globally, auto-discovering each project's `.cppgraph/` at
 launch) and hands off to the project index wizard. Every stage checks what already
