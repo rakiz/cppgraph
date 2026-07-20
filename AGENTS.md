@@ -85,42 +85,41 @@ when you want to measure at scale; keep such paths out of the shipped code.)
 - **Small, reversible steps.** Don't gold-plate (e.g. don't rewrite in Rust)
   without a measurement demanding it.
 
-## Indexing a project — ALWAYS start with `cppgraph init`
+## Indexing a project — hand the user `scripts/index.sh`
 
-**Your first and only entry point to index is `cppgraph init --plan-json`. Run it
-before anything else — do not inspect the build system, and do NOT offer to
-generate a `compile_commands.json`: `init` auto-locates an existing one (at the
-project root, `build/`, or up the tree).** Only if `init` reports that it found
-none do you generate one (see the fallback below).
+**To index (or re-index) a project, tell the user to run the interactive wizard in
+their own terminal:**
 
-**Then drive it as a strict question contract — the user chooses every dimension,
-not you:**
+```
+! ~/.local/share/cppgraph/repo/scripts/index.sh
+```
 
-1. Run `cppgraph init --plan-json`. It returns the compdb breakdown plus a
-   `questions[]` array (`filter`, `no_tests`, `attributed_refs`), each with its
-   `info`, `default`, and — for `filter` — concrete `options` from the breakdown.
-2. Ask the user **every** question in `questions[]`, one at a time, via your
-   question UI, surfacing all the options. For `filter`, offer the listed options
-   (whole tree + each subtree) plus a free substring. For `no_tests`, present the
-   count/% and the trade-off. For `attributed_refs`, ask it **only if**
-   `scip_clang.supports_attribution` is true (skip otherwise — a stock binary
-   can't do it).
-3. Assemble and run the command from *their* answers:
-   `cppgraph init <compdb> -y --filter <sub> [--no-tests] [--attributed-refs]
-   --print` (`--run` to execute).
+The `!` prefix runs it in their session, so they answer the prompts directly. The
+wizard is deterministic: it auto-locates the `compile_commands.json` (project root,
+`build/`, or up the tree), shows the compdb breakdown, asks the scope questions
+(subtree / tests / attribution) as selectable menus, and — when a `.scip` or
+`.graph.db` already exists — shows its details and asks whether to reuse or
+recompute it. Nothing expensive is overwritten without the user's say-so. **You
+decide nothing; the user answers in their terminal.**
 
-**Forbidden** (this is exactly what the wizard exists to prevent): doing any of it
-without asking; deciding an answer yourself; recommending one and asking only to
-confirm; collapsing the questions into a single yes/no; skipping a question;
-offering to generate a compdb before `init` says there's none; or driving
-`reindex.sh` directly. Never run the bare interactive `cppgraph init` yourself —
-it blocks on stdin. You *may*, instead of asking the questions, offer the user the
-fully interactive wizard they run themselves: tell them to type `! cppgraph init`
-(the `!` prefix runs it in their session so they answer the prompts). The chosen
-scope is recorded in the graph (`cppgraph status` shows it) and reused by
-`reindex.sh --update`.
+Do not run the bare `cppgraph index` yourself — it blocks on stdin. Do not inspect
+the build system or offer to generate a `compile_commands.json` up front; the
+wizard finds an existing one, and only if it reports none do you generate one (see
+the fallback below).
 
-### Fallback: no compile_commands.json (only when `init` reports none)
+When the graph is stale enough to matter — read `cppgraph status` (or the MCP
+`status` tool: commits behind, changed files) — tell the user it's worth
+refreshing and to run `! ~/.local/share/cppgraph/repo/scripts/index.sh` again. The
+wizard offers an incremental update when a graph already exists. The chosen scope
+is recorded in the graph (`cppgraph status` shows it) and reused by the update.
+
+*If you would rather ask the scope questions in your own UI* (instead of handing
+off): run `cppgraph index --plan-json` for the breakdown + `questions[]`, ask the
+user every question, then run `cppgraph index <compdb> -y --filter <sub>
+[--no-tests] [--attributed-refs] --run`. This is the exception; the hand-off above
+is the norm.
+
+### Fallback: no compile_commands.json (only when the wizard reports none)
 
 cppgraph needs a `compile_commands.json` (the input to `scip-clang`) — the
 target's artifact, never stored in this repo. Produce one however the target
@@ -147,26 +146,55 @@ when it's stale (it reflects the build graph at generation time).
   directory (its own outputs: `graph.db`, `.scip`, filtered compdb), dropped in
   with a `.gitignore` of `*` so it never dirties the repo — like `.vscode/`.
   Everything else is read (`compile_commands.json`, and sources with `--root`).
-- Per-machine tool install: `scripts/bootstrap.sh` is the one-command installer
-  (clone + `setup.sh` + `register-mcp.sh`, each confirmed). Driving it as an agent,
-  after asking the user whether to install and which scip-clang source: run it
-  non-interactively — `bootstrap.sh --yes --scip-source <download|build|emulate>`
-  (or `--repo <path>` to install from a local clone). Without `--yes`/`--scip-source`
-  it stops (ACTION NEEDED) rather than deciding — surface the choice, don't bypass
-  it. The whole tool lives under one persistent data dir,
-  `${XDG_DATA_HOME:-~/.local/share}/cppgraph/` —
-  the git checkout + its `.venv` in `repo/`, and the `scip-clang` binary (a
+- Per-machine tool install — **you do the strict minimum, the user runs the
+  setup.** Exactly two actions, no variation:
+
+  1. Clone the repo to its data dir (**always this path**, even when asked to
+     install "from a local copy" — clone the local checkout *into* the data dir,
+     don't point at the source checkout):
+     ```
+     git clone <repo> "${XDG_DATA_HOME:-$HOME/.local/share}/cppgraph/repo"
+     ```
+     (`<repo>` = `https://github.com/rakiz/cppgraph`, or a local path when testing.)
+  2. Tell the user to run **exactly this**, verbatim — the entry point is always
+     the `scripts/setup.sh` launcher:
+     ```
+     ! ~/.local/share/cppgraph/repo/scripts/setup.sh
+     ```
+
+  **Never** tell the user to run `cppgraph setup` directly, or anything under a dev
+  checkout like `~/code_projects/...`, or `.venv/bin/cppgraph …` — on a fresh
+  machine that path and that venv do not exist yet. Only `scripts/setup.sh` creates
+  the venv; it is the sole entry point. Do not run it yourself (it's interactive and
+  blocks on stdin) — hand it to the user.
+
+  `setup.sh` creates the venv, then runs the interactive `cppgraph setup`: it
+  obtains the scip-clang indexer (the user picks the source — download / build #504
+  / emulate — from a menu, with time estimates), registers the MCP server, and
+  hands off to the project index wizard. Every stage checks what already exists and
+  asks before (re)doing it. You decide none of it — clone, then hand off. The whole
+  tool lives under one persistent data dir, `${XDG_DATA_HOME:-~/.local/share}/cppgraph/`
+  — the git checkout + its `.venv` in `repo/`, and the `scip-clang` binary (a
   per-machine artifact, one per arch, shared across projects) in `bin/` (override
   `CPPGRAPH_BIN_DIR`). A data dir, not a cache, so a self-built binary and the
   checkout the global MCP registration points at aren't wiped by cache cleaners.
   Not under `scratch/`, which is dev-only throwaway (example graphs, etc.).
+- Uninstall — the script lives with the installed tool, **not** a dev checkout. Hand
+  the user this exact path (it asks, per item, what to remove):
+  ```
+  ! ~/.local/share/cppgraph/repo/scripts/uninstall.sh
+  ```
+  `--dry-run` to preview, `--purge` to remove everything including this project's
+  `.cppgraph` data. Same rule as install: never point at `~/code_projects/...` or
+  any dev checkout — the real install is always under
+  `${XDG_DATA_HOME:-~/.local/share}/cppgraph/`.
 
 ## Layout
 
 ```
 src/cppgraph/     package (cli, builder, scip parser, store, queries, mcp, export)
 viz/              bundled offline graph viewer (HTML + vendored vis-network)
-scripts/          setup.sh, reindex.sh, register-mcp.sh
+scripts/          setup.sh, index.sh, index-in-container.sh, uninstall.sh
 tests/            pytest
 scratch/          dev-only throwaway: example graphs, ad-hoc outputs (gitignored)
                   (the scip-clang binary lives in ~/.local/share/cppgraph/bin, not here)

@@ -213,7 +213,7 @@ self-describing without the `.scip`: `project_root` and the indexing tool +
 version (copied from SCIP `Metadata`), `built_at`, `node_count`/`edge_count`,
 `cppgraph_version`, and — the one thing SCIP doesn't carry — the **source
 commit** (`source_commit` + `source_dirty`). It's captured best-effort:
-`reindex.sh` reads `git rev-parse HEAD` at *index* time (the accurate moment —
+the index pipeline reads `git rev-parse HEAD` at *index* time (the accurate moment —
 the state scip-clang actually reads) and passes it to `build --source-commit`;
 absent that, `build` auto-detects via git on `project_root`, which is exact
 when index→build run back-to-back. Non-git projects simply record no commit
@@ -299,7 +299,7 @@ designing the builder so this isn't a later rewrite:
   `find`, `who_calls`, `what_it_calls`, `base_classes`, `subclasses`,
   `find_references`, `path`, `impact_of` (`kind` = calls|inherits),
   `explain_symbol`, `status`. The intended loop: `status` tells the LLM whether the graph is
-  current (else `reindex.sh --update`); then `impact_of`/`who_calls`/`path`/
+  current (else an incremental update); then `impact_of`/`who_calls`/`path`/
   `explain_symbol` answer "what does this change affect?" with compiler-exact
   edges — no grep guessing, no loading files into context.
   - *Token budgeting*: every fan-out reply is capped (`DEFAULT_LIMIT=40`,

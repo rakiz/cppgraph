@@ -13,7 +13,7 @@ Z"), in a handful of commands.
   - macOS Apple Silicon (arm64) ✅
   - Linux x86_64 ✅
   - **ARM-Linux (aarch64, e.g. Ubuntu arm64)** → no prebuilt binary. Two options:
-    **build scip-clang natively** (`setup.sh --scip-source build`, ~30-60 min,
+    **build scip-clang natively** (the setup wizard's *build* option, ~30-60 min,
     Docker — recommended, and gets PR #504), or run the x86_64 binary via a
     container (emulated, slow — for a subsystem only). See
     [INSTALL.md](INSTALL.md) → "ARM-Linux / Windows: index via a container" and
@@ -29,91 +29,58 @@ project on the machine.
 
 ## 1. Set up the machine (once)
 
-**One command** — clone into the per-machine tool dir, venv + deps, scip-clang,
-MCP registration, each gated by a confirmation:
-
-```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/rakiz/cppgraph/main/scripts/bootstrap.sh)
-```
-
-Use `bash <(curl …)`, not `curl … | bash` (keeps your terminal for the prompts).
-It confirms before installing and asks how to get scip-clang (download ~1 min /
-build PR #504 ~30–60 min / emulate), with a "don't install" option throughout.
-
-Prefer to do it by hand (or drive each step)?
+Clone into the per-machine tool dir, then run `setup.sh` — it creates the venv +
+deps and runs the interactive setup (obtain scip-clang, register the MCP server,
+then index your first project):
 
 ```bash
 git clone https://github.com/rakiz/cppgraph "${XDG_DATA_HOME:-$HOME/.local/share}/cppgraph/repo"
-cd "${XDG_DATA_HOME:-$HOME/.local/share}/cppgraph/repo"
-scripts/setup.sh          # venv + deps, then asks the scip-clang source
-scripts/register-mcp.sh   # register the MCP server, once per machine
+"${XDG_DATA_HOME:-$HOME/.local/share}/cppgraph/repo/scripts/setup.sh"
 ```
 
-`setup.sh` asks how to obtain scip-clang (download the prebuilt binary, build it
-locally with PR #504, or route to an emulated container). On a terminal it prompts
-per option (with a don't-install choice); non-interactively it stops and asks you
-to pass `--scip-source download|build|emulate|auto` (or `CPPGRAPH_SCIP_SOURCE`)
-rather than deciding for you.
-
-`register-mcp.sh` is part of this one-time setup: it registers the server
-globally and auto-discovers each project's `.cppgraph/` at launch, so you run it
-now — before indexing anything — and never again. That's the whole machine setup;
-next you point it at a project.
+`setup.sh` (needs [`uv`](https://docs.astral.sh/uv/)) asks how to obtain scip-clang
+from a menu — **download** the prebuilt binary (~1 min; macOS arm64 / Linux
+x86_64), **build** it locally with PR #504 (~30–60 min, Docker, Linux only), or
+**emulate** via an x86 container — with an "abort" choice throughout. It then
+registers the MCP server (globally, auto-discovering each project's `.cppgraph/` at
+launch) and hands off to the project index wizard. Every stage checks what already
+exists and asks before (re)doing it.
 
 ## 2. Index a project (once per project)
 
-**Easiest: `cppgraph init`.** From the project directory, it finds the
-`compile_commands.json`, shows what's indexable, and asks the scope questions in
-order (subtree / tests / attribution) with the info to choose well, then runs the
-pipeline. Deterministic and LLM-free:
+`setup.sh` indexes your first project automatically. To index another (or refresh
+one), run the wizard from the project directory:
 
 ```bash
-cppgraph init                     # auto-finds the compdb; --print to only show
-                                  # the command; re-run to resume/update
-# non-interactive (e.g. an agent that already asked you the questions):
-cppgraph init <compdb> -y --filter src/mongo --no-tests --print
+"${XDG_DATA_HOME:-$HOME/.local/share}/cppgraph/repo/scripts/index.sh"
+# or, if the venv is on PATH:  cppgraph index
 ```
 
-Prefer to drive it yourself? The manual steps are below.
+It finds the `compile_commands.json`, shows what's indexable, and asks the scope
+questions as selectable menus (subtree / tests / attribution) with the info to
+choose well. When a `.scip` or `.graph.db` already exists it shows its details and
+asks whether to reuse or recompute — nothing expensive is overwritten by surprise.
 
-First, see what's indexable and pick a scope — don't index blind:
-
-```bash
-cppgraph compdb-summary /path/to/project/compile_commands.json
-# total TUs, which subtrees they live in, how many are tests;
-# add --filter src/ to preview how many a filter would keep.
-```
-
-Then index. The 2nd argument is a **path-substring filter** (scope to your source
-subtree, skip third-party/vendored code); add `--no-tests` to leave test TUs out
-for a lighter, production-only graph:
+Prefer to see the breakdown first, or drive it non-interactively?
 
 ```bash
-scripts/reindex.sh /path/to/project/compile_commands.json src/ myproject
-scripts/reindex.sh --no-tests /path/to/project/compile_commands.json src/mongo mongo
-# → writes /path/to/project/.cppgraph/<name>.graph.db (gitignored, next to your
-#   code; a big codebase takes ~minutes, one time).
+cppgraph compdb-summary /path/to/project/compile_commands.json   # TUs, subtrees, tests %
+cppgraph index <compdb> -y --filter src/mongo --no-tests --run   # scope from flags, no prompts
 ```
 
 `--no-tests` is a trade-off, not a free win: tests are often a big share of TUs
 (the summary shows the %), so skipping them speeds indexing — but the graph then
 can't answer "which tests exercise symbol X". Keep them if that matters. The
 scope you pick (filter + tests) is recorded in the graph: `cppgraph status` shows
-it, and `reindex.sh --update <graph.db> <compdb>` reuses it — no need to re-pass
-the filter (a divergent one errors; changing scope means a full rebuild).
+it, and an incremental update reuses it — no need to re-pass the filter.
 
 **Usage-view granularity (only if your scip-clang is a #504 build).** By default
-the reference index is *file* granularity ("used somewhere in these files"). Add
-`--attributed-refs` for *symbol* granularity ("used by *these functions*") — more
-useful, larger store:
-
-```bash
-scripts/reindex.sh --attributed-refs /path/to/project/compile_commands.json src/ myproject
-```
-
-No rush to decide: the default keeps the `.scip`, so you can upgrade later
-without re-indexing — `cppgraph enrich-refs --graph <…>.graph.db --scip <…>.scip`.
-With a stock (non-#504) binary the flag does nothing.
+the reference index is *file* granularity ("used somewhere in these files"). Answer
+yes to the attribution question (or pass `--attributed-refs`) for *symbol*
+granularity ("used by *these functions*") — more useful, larger store. No rush: the
+`.scip` is kept, so you can upgrade later without re-indexing —
+`cppgraph enrich-refs --graph <…>.graph.db --scip <…>.scip`. With a stock
+(non-#504) binary attribution does nothing.
 
 ## 3. Use it from Claude Code (the main way)
 
@@ -157,8 +124,8 @@ project, or to target a specific store, pass `--graph <path/to/.cppgraph/name.gr
 ## Keeping it fresh
 
 The graph is a snapshot. `cppgraph status --root /path/to/project` (run from the
-project) tells you how far it has drifted and whether to run an incremental
-`scripts/reindex.sh --update` or a full rebuild.
+project) tells you how far it has drifted; re-run `scripts/index.sh` and the wizard
+offers an incremental update or a full rebuild.
 
 ## Feedback
 

@@ -26,7 +26,7 @@ timeout and shut down before any `.scip` was written:
 So emulation is fine to *try* a subsystem, but for a real codebase on ARM-Linux
 use the **native** binary instead: build one from source with the sibling
 [`../build-scip-clang/`](../build-scip-clang) image (it drops the binary in the
-per-machine data dir `reindex.sh` reads), and index natively with `reindex.sh` —
+per-machine data dir `scripts/index.sh` reads), and index natively with `scripts/index.sh` —
 no container, full parallelism.
 
 ## Toolchain caveat

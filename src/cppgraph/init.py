@@ -1,34 +1,31 @@
-"""Guided, deterministic onboarding: `cppgraph init`.
+"""Guided, deterministic onboarding: `cppgraph index`.
 
-Onboarding used to be "an LLM reads the README and drives `reindex.sh`" — which
-is non-deterministic: each agent improvises the questions and can pick the wrong
-scope or forget `--no-tests`. This module asks the *same* questions in the *same
-order*, each with the information needed to choose well, then runs the existing
-pipeline. It works without an LLM.
+Asks the scope questions in a fixed order, each with the information needed to
+choose well (which subtree, whether to drop tests, whether to record
+symbol-granularity usage), then runs the index pipeline. It works without an LLM,
+and gives an agent one deterministic path to hand the user.
 
 Design:
-- **Thin front-end, not a second pipeline.** It reuses `summarize_compdb` /
-  `is_test_file` for the breakdown and *calls `scripts/reindex.sh`* to do the
-  actual work — no duplicated indexing logic.
+- **Thin front-end over `cppgraph.pipeline`.** It reuses `summarize_compdb` /
+  `is_test_file` for the breakdown and calls the pipeline for the actual work.
 - **Pure helpers** (`find_compdb`, `scip_clang_info`, `out_dir_for`,
-  `artifact_status`, `build_reindex_argv`) carry the decisions and are unit-tested
-  without any I/O; `run_init` is the thin interactive driver (input/print
-  injectable, so the whole flow is scriptable in tests).
+  `artifact_status`) carry the decisions and are unit-tested without any I/O;
+  `run_init` is the interactive driver (the `Prompter` is injectable, so the whole
+  flow is scriptable in tests).
 - **Resumable via artifact detection.** The pipeline writes named artifacts per
   stage (`<name>.compdb.json` → `<name>.scip` → `<name>.graph.db`); the wizard
-  infers where a previous run stopped from which files exist and offers to resume
-  rather than blindly redo.
+  reads which files exist and offers to reuse or recompute each, rather than
+  blindly redoing an expensive stage.
 """
 
 from __future__ import annotations
 
 import os
-import shlex
 import subprocess
-from dataclasses import dataclass
 from pathlib import Path
 
 from cppgraph.compdb import CompdbSummary, format_summary, load_compdb, summarize_compdb
+from cppgraph.prompt import Prompter
 
 _COMPDB_NAME = "compile_commands.json"
 
@@ -49,19 +46,6 @@ def _git_toplevel(directory: Path) -> Path | None:
     return Path(top) if out.returncode == 0 and top else None
 
 
-@dataclass
-class IndexPlan:
-    """The concrete scope decisions the wizard collected — everything needed to
-    assemble the `reindex.sh` invocation."""
-
-    compdb: Path
-    project_root: Path
-    name: str
-    src_filter: str  # "" = whole tree
-    no_tests: bool
-    attributed_refs: bool
-
-
 def find_compdb(start: Path) -> Path | None:
     """Locate a `compile_commands.json` at or above `start`.
 
@@ -80,7 +64,7 @@ def find_compdb(start: Path) -> Path | None:
 
 
 def scip_clang_bin_dir() -> Path:
-    """The per-machine scip-clang bin dir, mirroring `reindex.sh`:
+    """The per-machine scip-clang bin dir:
     `$CPPGRAPH_BIN_DIR`, else `${XDG_DATA_HOME:-~/.local/share}/cppgraph/bin`."""
     override = os.environ.get("CPPGRAPH_BIN_DIR")
     if override:
@@ -93,7 +77,7 @@ def scip_clang_info(bin_dir: Path | None = None) -> tuple[bool, str | None]:
     """`(binary_present, variant)` for the local scip-clang.
 
     `variant` comes from the `scip-clang.json` provenance sidecar next to the
-    binary (the same file `reindex.sh` reads) — `"stock"`, `"enclosing_range-504"`,
+    binary — `"stock"`, `"enclosing_range-504"`,
     or None when there is no sidecar. Only `enclosing_range-504` can produce the
     `enclosing_range` that `--attributed-refs` needs, so the wizard gates that
     question on it.
@@ -114,8 +98,7 @@ def scip_clang_info(bin_dir: Path | None = None) -> tuple[bool, str | None]:
 
 
 def out_dir_for(project_root: Path) -> Path:
-    """The project's `.cppgraph/` output dir (mirrors `reindex.sh:out_dir_for`,
-    minus the side effects — this is a pure path)."""
+    """The project's `.cppgraph/` output dir (a pure path; the pipeline creates it)."""
     return project_root / ".cppgraph"
 
 
@@ -132,34 +115,6 @@ def artifact_status(out_dir: Path, name: str) -> dict[str, bool]:
 def default_name(project_root: Path) -> str:
     """A sensible graph name: the project directory's basename."""
     return project_root.resolve().name or "project"
-
-
-def reindex_script() -> Path | None:
-    """The `scripts/reindex.sh` in this cppgraph checkout, or None if not found
-    (e.g. an unusual install layout — the wizard then just prints the command)."""
-    script = Path(__file__).resolve().parents[2] / "scripts" / "reindex.sh"
-    return script if script.is_file() else None
-
-
-def build_reindex_argv(script: Path, plan: IndexPlan) -> list[str]:
-    """The full `reindex.sh` command for a full build with `plan`'s scope.
-
-    Leading flags first (as reindex.sh parses them), then the positional args
-    `COMPDB [SRC_FILTER] [OUT_NAME] [PROJECT_ROOT]`. The filter is always passed
-    (empty string = whole tree) so the later positionals keep their slots.
-    """
-    argv = [str(script)]
-    if plan.attributed_refs:
-        argv.append("--attributed-refs")
-    if plan.no_tests:
-        argv.append("--no-tests")
-    argv += [str(plan.compdb), plan.src_filter, plan.name, str(plan.project_root)]
-    return argv
-
-
-def build_update_argv(script: Path, graph_db: Path, compdb: Path) -> list[str]:
-    """The `reindex.sh --update` command — reuses the graph's recorded scope."""
-    return [str(script), "--update", str(graph_db), str(compdb)]
 
 
 def _scoped_counts(entries: list[dict], src_filter: str) -> tuple[int, int]:
@@ -296,7 +251,7 @@ def onboarding_plan(
 
 def _gate_attribution(requested: bool, print_fn) -> bool:
     """Attribution needs a #504 binary; if requested without one, warn and drop it
-    (mirrors reindex.sh). Used by the non-interactive path."""
+    . Used by the non-interactive path."""
     if not requested:
         return False
     _present, variant = scip_clang_info()
@@ -316,23 +271,6 @@ def _gate_attribution(requested: bool, print_fn) -> bool:
 # back to their defaults, so a non-interactive invocation still produces a plan.
 
 
-def _ask(prompt: str, default: str, input_fn, print_fn) -> str:
-    suffix = f" [{default}]" if default else ""
-    try:
-        answer = input_fn(f"{prompt}{suffix}: ").strip()
-    except EOFError:
-        answer = ""
-    return answer or default
-
-
-def _ask_yes_no(prompt: str, default: bool, input_fn, print_fn) -> bool:
-    d = "Y/n" if default else "y/N"
-    raw = _ask(f"{prompt} ({d})", "", input_fn, print_fn).lower()
-    if not raw:
-        return default
-    return raw in ("y", "yes", "o", "oui")
-
-
 def run_init(
     *,
     compdb: str | None = None,
@@ -343,166 +281,220 @@ def run_init(
     no_tests: bool = False,
     attributed_refs: bool = False,
     non_interactive: bool = False,
+    from_scratch: bool = False,
+    prompter: Prompter | None = None,
     input_fn=input,
     print_fn=print,
 ) -> int:
-    """`cppgraph init`. Returns a process exit code.
+    """`cppgraph index` / `cppgraph init`. Returns a process exit code.
 
     Two ways in off one code path:
-    - **interactive** (default): ask the scope questions on stdin;
+    - **interactive** (default): ask the scope questions, showing the details needed
+      to choose (selectable menus when the TUI is available);
     - **non-interactive** (`non_interactive=True`, or implied by a `filter`): take
       the scope from `filter`/`no_tests`/`attributed_refs`, no prompts — the form
       an LLM drives after gathering answers in its own UI.
 
-    `run`: True = run the assembled command, False = print only, None = ask (and in
-    non-interactive mode, None means print only). `input_fn`/`print_fn` are injected
-    in tests to script the whole flow.
+    `run`: True = index now, False = print the plan only, None = ask (non-interactive
+    None means print only). A `prompter` may be injected (or `input_fn`/`print_fn` for
+    a scripted stdlib prompter) so the whole flow is testable.
     """
+    p = prompter or Prompter(input_fn, print_fn)
+
     # A provided --filter is a clear non-interactive intent.
     non_interactive = non_interactive or filter is not None
 
-    resolved = _resolve_targets(compdb, project_root, name, announce=True, print_fn=print_fn)
+    resolved = _resolve_targets(compdb, project_root, name, announce=True, print_fn=p.note)
     if resolved is None:
         return 1
     compdb_path, entries, project_root_path, graph_name = resolved
 
     # Show the breakdown so the scope choice is informed, not blind.
     summary: CompdbSummary = summarize_compdb(entries)
-    print_fn("")
-    print_fn(format_summary(summary))
-    print_fn("")
+    p.note("", format_summary(summary), "")
 
-    script = reindex_script()
     out_dir = out_dir_for(project_root_path)
     status = artifact_status(out_dir, graph_name)
 
+    out_scip = out_dir / f"{graph_name}.scip"
+    out_graph = out_dir / f"{graph_name}.graph.db"
+
     if non_interactive:
         if status["graph"]:
-            print_fn(
-                f"Note: rebuilding the existing graph "
-                f"({out_dir / f'{graph_name}.graph.db'}) with the given scope."
-            )
+            p.note(f"Note: rebuilding the existing graph ({out_graph}) with the given scope.")
         src_filter = filter or ""
         chosen_no_tests = bool(no_tests)
-        chosen_attributed = _gate_attribution(attributed_refs, print_fn)
-        if run is None:
-            run = False  # never auto-run a heavy job without an explicit --run
+        chosen_attributed = _gate_attribution(attributed_refs, p.note)
+        # Never recompute an existing (possibly hours-long) index unless asked; a
+        # missing index must be computed, and --from-scratch forces a recompute.
+        recompute_scip = from_scratch or not status["scip"]
+        rebuild_graph = True
     else:
-        # Resume: if a graph already exists, offer update vs rebuild.
+        rebuild_graph = True
+        # A graph already exists: reuse it, refresh it incrementally, or rebuild.
         if status["graph"]:
-            graph_db = out_dir / f"{graph_name}.graph.db"
-            print_fn(f"A graph already exists: {graph_db}")
-            choice = _ask(
-                "[u]pdate incrementally / [r]ebuild from scratch / [q]uit",
-                "u",
-                input_fn,
-                print_fn,
-            ).lower()
-            if choice.startswith("q"):
-                return 0
-            if choice.startswith("u"):
-                if script is None:
-                    print_fn("reindex.sh not found; run: cppgraph … (see docs)")
-                    return 1
-                cmd = build_update_argv(script, graph_db, compdb_path)
-                return _finish(cmd, run, input_fn, print_fn)
-            # else fall through to a full rebuild
-        elif status["scip"]:
-            print_fn(
-                f"Note: a partial index ({graph_name}.scip) already exists; reindex.sh "
-                "will reuse it when no native scip-clang is present, or refresh it otherwise."
+            p.note(f"A graph already exists: {out_graph}")
+            choice = p.select(
+                "What would you like to do?",
+                [
+                    ("update", "update incrementally (re-index only changed files)"),
+                    ("rebuild", "rebuild from scratch"),
+                    ("keep", "keep it as-is"),
+                    ("quit", "quit"),
+                ],
+                "update",
             )
-        # Scope questions, in order, each with the info to choose well.
-        src_filter = _ask_filter(entries, summary, input_fn, print_fn)
-        chosen_no_tests = _ask_no_tests(entries, src_filter, input_fn, print_fn)
-        chosen_attributed = _ask_attributed(input_fn, print_fn)
+            if choice in ("quit", "keep"):
+                if choice == "keep":
+                    p.note("Kept the existing graph unchanged.")
+                return 0
+            if choice == "update":
+                upd_run = run if run is not None else p.confirm("Run the update now?", True)
+                if not upd_run:
+                    p.note("", f"Plan: incremental update -> {out_graph}", "Not run.")
+                    return 0
+                from cppgraph.pipeline import incremental_update
 
-    plan = IndexPlan(
+                p.note("")
+                return incremental_update(
+                    graph_db=out_graph,
+                    compdb=compdb_path,
+                    project_root=project_root_path,
+                    print_fn=p.note,
+                )
+            # else fall through to a full rebuild
+        # Scope questions, in order, each with the info to choose well.
+        src_filter = _ask_filter(entries, summary, p)
+        chosen_no_tests = _ask_no_tests(entries, src_filter, p)
+        chosen_attributed = _ask_attributed(p)
+        # Reuse/recompute the index (the expensive artifact) with its details shown.
+        recompute_scip = _ask_recompute_scip(out_scip, from_scratch, p)
+
+    do_run = run
+    if do_run is None:
+        do_run = False if non_interactive else p.confirm("Index now?", True)
+
+    if not do_run:
+        scope = src_filter or "<whole tree>"
+        if chosen_no_tests:
+            scope += " (no tests)"
+        if chosen_attributed:
+            scope += " (attributed-refs)"
+        p.note("")
+        p.panel(
+            "Plan",
+            [
+                ("scope", scope),
+                ("scip", "recompute" if recompute_scip else "reuse existing"),
+                ("graph", f"{'rebuild' if rebuild_graph else 'reuse existing'} -> {out_graph}"),
+            ],
+        )
+        p.note("Not run. Re-run with --run to index.")
+        return 0
+
+    from cppgraph.pipeline import full_build
+
+    p.note("")
+    return full_build(
         compdb=compdb_path,
         project_root=project_root_path,
         name=graph_name,
         src_filter=src_filter,
         no_tests=chosen_no_tests,
         attributed_refs=chosen_attributed,
+        recompute_scip=recompute_scip,
+        rebuild_graph=rebuild_graph,
+        print_fn=p.note,
     )
 
-    if script is None:
-        print_fn(
-            "reindex.sh not found in this checkout; assemble the command from the "
-            "chosen scope manually (see QUICKSTART.md)."
-        )
-        return 1
-    cmd = build_reindex_argv(script, plan)
-    return _finish(cmd, run, input_fn, print_fn)
 
-
-def _ask_filter(entries, summary, input_fn, print_fn) -> str:
-    """Prompt for a subtree filter, previewing what each candidate keeps until the
-    user accepts one. Empty = whole tree."""
+def _ask_filter(entries, summary, p: Prompter) -> str:
+    """Choose a subtree filter, previewing what each candidate keeps. The concrete
+    subtrees from the breakdown are offered as selectable options; "other" takes a
+    free-text substring. Empty = whole tree."""
+    options = [("", f"whole tree ({summary.total} TU(s))")]
+    options += [
+        (subtree, f"{subtree} ({tus} TU(s), {tests} test(s))")
+        for subtree, tus, tests in summary.groups
+    ]
+    options.append(("\x00other", "other — type a path substring"))
     while True:
-        f = _ask("Subtree filter (path substring; empty = whole tree)", "", input_fn, print_fn)
+        choice = p.select("Scope to which sources?", options, "")
+        f = p.text("Path substring (empty = whole tree)", "") if choice == "\x00other" else choice
         tus, tests = _scoped_counts(entries, f)
+        if f and tus == 0:
+            p.note(f"  '{f}' matches nothing — try another substring.")
+            continue
         if f:
-            if tus == 0:
-                print_fn(f"  '{f}' matches nothing — try another substring.")
-                continue
-            print_fn(f"  '{f}' keeps {tus} of {summary.total} TU(s) ({tests} test(s)).")
+            p.note(f"  '{f}' keeps {tus} of {summary.total} TU(s) ({tests} test(s)).")
         else:
-            print_fn(f"  whole tree: {tus} TU(s), {tests} test(s).")
-        if _ask_yes_no("Use this scope?", True, input_fn, print_fn):
+            p.note(f"  whole tree: {tus} TU(s), {tests} test(s).")
+        if p.confirm("Use this scope?", True):
             return f
 
 
-def _ask_no_tests(entries, src_filter, input_fn, print_fn) -> bool:
+def _ask_no_tests(entries, src_filter, p: Prompter) -> bool:
     """Offer to drop tests, with the trade-off stated — never defaulted on."""
     tus, tests = _scoped_counts(entries, src_filter)
     if tests == 0:
         return False
     pct = round(100 * tests / tus) if tus else 0
-    print_fn("")
-    print_fn(
+    p.note(
+        "",
         f"Tests are {tests} of {tus} TU(s) ({pct}%). Excluding them speeds indexing "
         "by roughly that share, but the graph then can't answer 'which tests "
-        "exercise symbol X' (their call sites are gone)."
+        "exercise symbol X' (their call sites are gone).",
     )
-    return _ask_yes_no("Exclude tests?", False, input_fn, print_fn)
+    return p.confirm("Exclude tests?", False)
 
 
-def _ask_attributed(input_fn, print_fn) -> bool:
+def _ask_attributed(p: Prompter) -> bool:
     """Offer symbol-granularity attribution only when the local binary can produce
     it (#504); otherwise explain why it's unavailable and skip."""
     present, variant = scip_clang_info()
-    print_fn("")
+    p.note("")
     if variant == "enclosing_range-504":
-        print_fn(
+        p.note(
             "Your scip-clang is a #504 build, so symbol-granularity usage is "
             "available (--attributed-refs): 'where is this type used?' answers with "
             "the functions that use it, not just the files. Larger store (~+23%)."
         )
-        return _ask_yes_no("Record symbol-granularity usage?", False, input_fn, print_fn)
+        return p.confirm("Record symbol-granularity usage?", False)
     if not present:
-        print_fn(
-            "Note: no native scip-clang here — reindex.sh will reuse an existing "
-            ".scip if present. Symbol-granularity attribution needs a #504 build."
+        p.note(
+            "Note: no native scip-clang here — an existing .scip is reused if present. "
+            "Symbol-granularity attribution needs a #504 build."
         )
     else:
-        print_fn(
+        p.note(
             "Your scip-clang is stock (not #504), so symbol-granularity attribution "
             "is unavailable; the graph will use exact file-granularity usage."
         )
     return False
 
 
-def _finish(cmd: list[str], run: bool | None, input_fn, print_fn) -> int:
-    """Show the assembled command, then run it (or not) per `run`:
-    True = run, False = print only, None = ask."""
-    print_fn("")
-    print_fn("Command:")
-    print_fn("  " + " ".join(shlex.quote(c) for c in cmd))
-    if run is None:
-        run = _ask_yes_no("Run it now?", True, input_fn, print_fn)
-    if not run:
-        print_fn("Not run. Copy the command above to index when ready.")
-        return 0
-    print_fn("")
-    return subprocess.call(cmd)
+def _ask_recompute_scip(out_scip: Path, from_scratch: bool, p: Prompter) -> bool:
+    """Decide whether to (re)compute the `.scip` index. Absent -> must compute. Present
+    -> show what it is (tool, version, root, document count, age) and ask, so a
+    several-hour index is never discarded blindly."""
+    from cppgraph.scip_introspect import describe_scip
+
+    info = describe_scip(out_scip)
+    if not info.get("exists"):
+        return True
+    if "error" in info:
+        p.note("", f"An index exists at {out_scip} but could not be read: {info['error']}")
+    else:
+        p.panel(
+            "Existing index",
+            [
+                ("path", str(out_scip)),
+                ("tool", f"{info.get('tool_name') or 'unknown'} {info.get('tool_version') or '?'}"),
+                ("documents", str(info.get("document_count"))),
+                ("project root", info.get("project_root") or "?"),
+                ("generated", info.get("mtime_iso", "?")),
+            ],
+        )
+    # Default to reusing the existing index (recomputing can take hours); when the
+    # caller asked --from-scratch, default the other way.
+    return p.confirm("Recompute the index (.scip)?", from_scratch)

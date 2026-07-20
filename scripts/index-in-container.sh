@@ -3,7 +3,7 @@
 # Windows) by running it in an x86_64 container. ONLY the .scip is built here —
 # the graph is then built natively (this script prints the exact command).
 #
-# Same interface as reindex.sh's full build:
+# Same interface as scripts/index.sh's full build:
 #   scripts/index-in-container.sh COMPDB [SRC_FILTER] [OUT_NAME] [PROJECT_ROOT]
 #
 #   COMPDB        path to compile_commands.json
@@ -89,7 +89,7 @@ echo "==> Building the x86_64 indexer image ($IMAGE) — cached after first run"
   -t "$IMAGE" "$REPO_ROOT/docker/index" >&2
 
 # Optional source-subtree filter, done host-side with native python (keeps the
-# container to just scip-clang). Mirrors reindex.sh's filter.
+# container to just scip-clang). Mirrors the index pipeline's filter.
 USE_COMPDB="$COMPDB"
 if [ -n "$SRC_FILTER" ]; then
   USE_COMPDB="$OUT_DIR/$OUT_NAME.compdb.json"

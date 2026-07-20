@@ -13,10 +13,7 @@ import pytest
 
 from cppgraph.cli import main
 from cppgraph.init import (
-    IndexPlan,
     artifact_status,
-    build_reindex_argv,
-    build_update_argv,
     find_compdb,
     onboarding_plan,
     run_init,
@@ -101,47 +98,6 @@ def test_artifact_status_detects_stages(tmp_path: Path) -> None:
     assert st == {"compdb": False, "scip": True, "graph": False}
 
 
-def test_build_reindex_argv_orders_flags_then_positionals(tmp_path: Path) -> None:
-    plan = IndexPlan(
-        compdb=Path("/c/cc.json"),
-        project_root=Path("/c"),
-        name="proj",
-        src_filter="src/mongo",
-        no_tests=True,
-        attributed_refs=True,
-    )
-    argv = build_reindex_argv(Path("/s/reindex.sh"), plan)
-    assert argv == [
-        "/s/reindex.sh",
-        "--attributed-refs",
-        "--no-tests",
-        "/c/cc.json",
-        "src/mongo",
-        "proj",
-        "/c",
-    ]
-
-
-def test_build_reindex_argv_whole_tree_no_flags() -> None:
-    plan = IndexPlan(
-        compdb=Path("/c/cc.json"),
-        project_root=Path("/c"),
-        name="proj",
-        src_filter="",
-        no_tests=False,
-        attributed_refs=False,
-    )
-    argv = build_reindex_argv(Path("/s/reindex.sh"), plan)
-    assert argv == ["/s/reindex.sh", "/c/cc.json", "", "proj", "/c"]
-
-
-def test_build_update_argv() -> None:
-    argv = build_update_argv(
-        Path("/s/reindex.sh"), Path("/p/.cppgraph/proj.graph.db"), Path("/p/cc.json")
-    )
-    assert argv == ["/s/reindex.sh", "--update", "/p/.cppgraph/proj.graph.db", "/p/cc.json"]
-
-
 # --- interactive flow -------------------------------------------------------
 
 
@@ -168,10 +124,10 @@ def test_run_init_assembles_full_build_command(tmp_path: Path) -> None:
     assert rc == 0
     out = "\n".join(lines)
     assert "translation unit(s)" in out  # the summary was shown
-    assert "reindex.sh" in out
-    assert "proj" in out
-    assert "--no-tests" not in out  # declined
-    assert "--attributed-refs" not in out  # no #504 binary
+    assert "Plan:" in out
+    assert "whole tree" in out
+    assert "(no tests)" not in out  # declined
+    assert "(attributed-refs)" not in out  # no #504 binary
     assert "Not run" in out
 
 
@@ -192,7 +148,7 @@ def test_run_init_offers_update_when_graph_exists(tmp_path: Path) -> None:
     assert rc == 0
     out = "\n".join(lines)
     assert "already exists" in out
-    assert "--update" in out
+    assert "incremental update" in out
 
 
 def test_project_root_is_git_toplevel_not_build_dir(tmp_path: Path) -> None:
@@ -213,10 +169,10 @@ def test_project_root_is_git_toplevel_not_build_dir(tmp_path: Path) -> None:
         input_fn=_boom_input,
         print_fn=prnt,
     )
-    # The reindex.sh command must carry the repo root as PROJECT_ROOT, not build/.
-    cmd_line = next(line for line in lines if "reindex.sh" in line)
-    assert str(tmp_path.resolve()) in cmd_line
-    assert not cmd_line.rstrip().endswith("/build")
+    # The graph output path must sit under the repo root, not build/.
+    graph_line = next(line for line in lines if line.strip().startswith("graph:"))
+    assert str(tmp_path.resolve()) in graph_line
+    assert "/build/" not in graph_line
 
 
 def test_run_init_errors_without_compdb(tmp_path: Path, monkeypatch) -> None:
@@ -246,9 +202,9 @@ def test_run_init_non_interactive_assembles_command_without_prompting(tmp_path: 
     )
     assert rc == 0
     out = "\n".join(lines)
-    assert "--no-tests" in out
+    assert "(no tests)" in out
     assert "src/mongo" in out
-    assert "reindex.sh" in out
+    assert "Plan:" in out
 
 
 def test_run_init_non_interactive_gates_attribution(tmp_path: Path, monkeypatch) -> None:
@@ -268,7 +224,7 @@ def test_run_init_non_interactive_gates_attribution(tmp_path: Path, monkeypatch)
         input_fn=_boom_input,
         print_fn=prnt,
     )
-    assert "--attributed-refs" in "\n".join(lines)
+    assert "(attributed-refs)" in "\n".join(lines)
 
     # Without one (empty bin dir): dropped, with a warning.
     monkeypatch.setenv("CPPGRAPH_BIN_DIR", str(tmp_path / "empty"))
@@ -284,8 +240,8 @@ def test_run_init_non_interactive_gates_attribution(tmp_path: Path, monkeypatch)
         input_fn=_boom_input,
         print_fn=prnt,
     )
-    cmd_line = next(line for line in lines if "reindex.sh" in line)
-    assert "--attributed-refs" not in cmd_line  # dropped from the command
+    out = "\n".join(lines)
+    assert "(attributed-refs)" not in out  # dropped from the plan
     assert any("warning" in line.lower() for line in lines)
 
 

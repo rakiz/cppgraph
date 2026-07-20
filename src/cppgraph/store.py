@@ -155,7 +155,7 @@ def changed_files_since(
     git checkout / git is unavailable. Diffs the working tree (not just HEAD)
     against the commit, so uncommitted edits count too — this is exactly the
     changed-file set an incremental `cppgraph update` would consume, mirroring
-    `reindex.sh --update`.
+    `the index wizard`.
 
     `dirty_fingerprints` (from the graph's provenance) are the blob hashes of files
     that were uncommitted *when the graph was built* — indexed in that exact state.
@@ -299,7 +299,7 @@ def build_provenance(
     discarded, and captures the **source commit** — the anchor for a future
     incremental `cppgraph update`.
 
-    The commit is best-effort: `source_commit` (e.g. passed by `reindex.sh`,
+    The commit is best-effort: `source_commit` (e.g. passed by the index wizard,
     captured at *index* time — the accurate moment) wins; otherwise it's
     auto-detected via `git rev-parse HEAD` on `project_root` at build time,
     which is exact when index→build run back-to-back. If `project_root` isn't a
@@ -307,7 +307,7 @@ def build_provenance(
 
     `index_filter` / `index_excludes_tests` record the **index scope** — which
     subtree was indexed and whether test TUs were dropped. Stamped by the caller
-    (`reindex.sh` knows both), they make the graph self-describing (`status`
+    (the index wizard knows both), they make the graph self-describing (`status`
     shows the scope) and let an incremental `--update` reuse the exact same scope
     instead of guessing. `index_filter` is recorded even when empty (whole tree),
     so "whole tree" is explicit rather than indistinguishable from a legacy graph

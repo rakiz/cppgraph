@@ -20,6 +20,12 @@ dev = [
 mcp = [
     "mcp>=1.2",
 ]
+# The interactive setup/index wizards render selectable menus and info panels when
+# these are present; without them they fall back to plain numbered prompts.
+tui = [
+    "questionary>=2.0",
+    "rich>=13.0",
+]
 
 [project.scripts]
 cppgraph = "cppgraph.cli:main"

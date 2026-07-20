@@ -71,7 +71,7 @@ def summarize_compdb(
     entries: list[dict], *, filter: str | None = None, depth: int = 2, top: int = 20
 ) -> CompdbSummary:
     """Breakdown of a loaded compdb. `filter` (a path substring, the same kind
-    `reindex.sh` takes) previews how many TUs it would keep."""
+    the index wizard takes) previews how many TUs it would keep."""
     files = _files(entries)
     total = len(files)
     tests = sum(1 for f in files if is_test_file(f))

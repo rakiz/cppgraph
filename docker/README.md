@@ -14,5 +14,5 @@ self-contained (its own `Dockerfile` + `README.md`).
   installs `protoc` on the host. Only needed when `scip.proto` changes.
 
 Rule of thumb: `index/` gets you indexing *today* (emulated); `build-scip-clang/`
-gets you a *native* binary once, then index with `reindex.sh` and no container;
+gets you a *native* binary once, then index with `scripts/index.sh` and no container;
 `gen-bindings/` is a dev-only, one-off when the vendored schema moves.

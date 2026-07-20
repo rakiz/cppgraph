@@ -64,7 +64,7 @@ longer. Budget by core count, not a fixed number.
 > that emulated path.
 
 By default the binary lands in the per-machine data dir
-(`${XDG_DATA_HOME:-~/.local/share}/cppgraph/bin`) — exactly where `reindex.sh`
+(`${XDG_DATA_HOME:-~/.local/share}/cppgraph/bin`) — exactly where `scripts/index.sh`
 looks — so it's used for **native** indexing with no further wiring. It's a
 persistent location (not a cache), so this long build won't be wiped by a cache
 cleaner:

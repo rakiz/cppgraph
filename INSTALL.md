@@ -5,11 +5,9 @@ differ for other platforms are noted inline.
 
 ## 1. Python environment (required, every machine)
 
-**Shortcut:** `bash <(curl -fsSL https://raw.githubusercontent.com/rakiz/cppgraph/main/scripts/bootstrap.sh)`
-does everything in this section and §2–§3 (clone, venv + deps, scip-clang, MCP
-registration), gated by confirmations. Use the `bash <(curl …)` form (not
-`curl … | bash`) so the prompts work; `--repo <path>` installs from a local clone.
-The manual steps below are the same thing, broken out.
+**Shortcut:** clone the repo, then run `scripts/setup.sh` — it does this section
+and §2 (venv + deps, scip-clang, MCP registration) and then indexes your first
+project, all interactively. The steps below are the same thing, broken out.
 
 Clone into the per-machine tool dir — the same `${XDG_DATA_HOME:-~/.local/share}/cppgraph/`
 where §2 puts the `scip-clang` binary (`bin/`), so the whole tool sits in one
@@ -86,22 +84,20 @@ Verified version: **v0.4.0** from
 https://github.com/sourcegraph/scip-clang (mirrors to `scip-code` releases
 too — the GitHub API resolves either).
 
-**Where it comes from — `setup.sh` picks a source:**
+**Where it comes from — the setup wizard offers a source (selectable menu):**
 
-| `--scip-source` | what it does | when |
+| source | what it does | when |
 |---|---|---|
 | `download` | fetch the prebuilt release binary (no PR #504) | macOS arm64, Linux x86_64 |
 | `build` | compile it locally with `enclosing_range`/PR #504 (`docker/build-scip-clang/`, ~30-60 min, Docker, **Linux host only** — produces a Linux binary) | ARM-Linux, or anyone wanting #504 |
 | `emulate` | install no host binary; index through an x86 container | ARM-Linux without building, Intel Mac, Windows |
 
-Also settable via `CPPGRAPH_SCIP_SOURCE` (the flag wins). If you pass neither,
-`setup.sh` **prompts on a terminal**; otherwise it auto-picks — `download` where
-a prebuilt binary exists, else `emulate` — and never starts a long build
-unattended. (A `build` on macOS is rejected: the container emits a *Linux*
-binary, unusable on the host.)
+The menu lists only the sources valid on this host, each with its rough cost, plus
+an "abort" choice — nothing is installed without an explicit pick. (A `build` on
+macOS isn't offered: the container emits a *Linux* binary, unusable on the host.)
 
 **Pinned version + staleness.** scip-clang is pinned by **version only** in
-`versions.json` (`scip_clang`). `setup.sh` reads it and writes a provenance
+`versions.json` (`scip_clang`). The setup reads it and writes a provenance
 sidecar (`scip-clang.json`) next to the binary recording what it installed —
 including the **variant** (`stock` vs a patched build like `enclosing_range-504`
 from PR #504). `cppgraph status` flags **"update the binary"** / **"re-index"**
@@ -112,7 +108,7 @@ reports the variant for information rather than nagging. Whether a given graph h
 the richer symbol-granularity attribution is shown by its `usage_view`, not by a
 variant match — get it with a #504 index + `--attributed-refs`, or `enrich-refs`.
 
-Normally you don't do this by hand — `scripts/setup.sh` downloads the right
+Normally you don't do this by hand — the setup downloads the right
 asset with `curl` into that data dir. To fetch it manually (only `curl` needed,
 no `gh`), pick the asset for your platform and save it there:
 
@@ -164,12 +160,12 @@ scip-clang in an x86_64 container, then build the graph natively.
 > container path below is fine for a subsystem or a small/medium project; for a
 > real ARM-Linux indexing workflow, compile a native scip-clang once with
 > [`docker/build-scip-clang/`](docker/build-scip-clang) and index with
-> `reindex.sh` (no container). See that directory's README.
+> `scripts/index.sh` (no container). See that directory's README.
 
 ```bash
 # 1. produce the .scip in an x86_64 container (emulated on ARM via qemu). Uses
 #    docker or podman (auto-detected; CPPGRAPH_CONTAINER to force one). Same args
-#    as reindex.sh; writes <project>/.cppgraph/<name>.scip and prints the exact
+#    as scripts/index.sh; writes <project>/.cppgraph/<name>.scip and prints the exact
 #    build command to run next.
 scripts/index-in-container.sh /path/to/project/compile_commands.json src/ myproject
 
@@ -179,12 +175,12 @@ scripts/index-in-container.sh /path/to/project/compile_commands.json src/ myproj
   --out  /path/to/project/.cppgraph/myproject.graph.db
 ```
 
-`reindex.sh` also picks this up automatically: on a platform without a native
+The index wizard also picks this up automatically: on a platform without a native
 scip-clang, if a matching `<name>.scip` already sits in `<project>/.cppgraph/`
 (from the container step, or copied from another machine that indexed the same
-checkout), it **skips indexing and builds straight from it** — so the workflow is
-"generate the `.scip` once, then `reindex.sh` as usual". (Incremental `--update`
-still needs a native scip-clang.)
+checkout), it **reuses it and builds straight from it** — so the workflow is
+"generate the `.scip` once, then `scripts/index.sh` as usual". (An incremental
+update still needs a native scip-clang.)
 
 Requires **Docker or Podman** with `linux/amd64` emulation — the script
 auto-detects either (force one with `CPPGRAPH_CONTAINER=podman`). Podman is
@@ -281,45 +277,39 @@ scip-clang binary, the tool checkout + venv, and (default **no**) this project's
 `<project>/.cppgraph/`; the script only offers the current one — remove the rest
 per-project.
 
+The script ships with the installed tool, under the data dir — use that path (not a
+dev checkout):
+
 ```bash
-scripts/uninstall.sh            # interactive (recommended)
-scripts/uninstall.sh --dry-run  # show what would happen, change nothing
-scripts/uninstall.sh --yes      # non-interactive: MCP + binary + tool, keep data
-scripts/uninstall.sh --purge    # non-interactive: everything, incl. project data
+UNINST=~/.local/share/cppgraph/repo/scripts/uninstall.sh
+"$UNINST"            # interactive (recommended)
+"$UNINST" --dry-run  # show what would happen, change nothing
+"$UNINST" --yes      # non-interactive: MCP + binary + tool, keep data
+"$UNINST" --purge    # non-interactive: everything, incl. project data
 ```
 
 ## 4. Indexing a project (any C++ project with a compile_commands.json)
 
-**Guided path: `cppgraph init`.** From the project directory it locates the
-`compile_commands.json`, shows what's indexable, asks the scope questions
-(subtree / tests / attribution) in order — each with the info to choose well —
-then runs the pipeline below. Re-run it to resume/update. It's a thin front-end
-over `reindex.sh`; drop to the raw script when you want to script or fine-tune.
+**Guided path: `scripts/index.sh` (or `cppgraph index`).** From the project
+directory it locates the `compile_commands.json`, shows what's indexable, asks the
+scope questions (subtree / tests / attribution) in order — each with the info to
+choose well — then runs the compdb-filter → scip-clang → cppgraph-build pipeline.
+When a `.scip` or `.graph.db` already exists it shows its details and asks whether
+to reuse or recompute; re-run it to update or rebuild. cppgraph is **generic** — it
+works on any project that provides a `compile_commands.json` (see `AGENTS.md`), with
+no project-specific defaults baked in.
 
-`scripts/reindex.sh` wraps the whole compdb-filter → scip-clang →
-cppgraph-build pipeline in one command. It is **generic** — cppgraph works on
-any project that provides a `compile_commands.json` (see `AGENTS.md`); the
-script takes that path as its first argument, with no project-specific
-defaults baked in. This is also the script to hand to an LLM/agent if you
-want it to redo or adjust an indexing run, since it embeds the one
-non-obvious gotcha inline (see below) instead of relying on the agent to
-rediscover it.
-
-```bash
-scripts/reindex.sh COMPDB_PATH [SRC_FILTER] [OUT_NAME] [PROJECT_ROOT]
-```
-
-Example invocations (no project is baked into the tool or the script):
+For scripting or fine-tuning, drive it non-interactively:
 
 ```bash
 # A project's source subtree (filter to skip third_party/vendored code):
-scripts/reindex.sh /path/to/project/compile_commands.json src/ myproject
+cppgraph index /path/to/project/compile_commands.json -y --filter src/ --name myproject --run
 
 # One subsystem instead (fast, good for iterating):
-scripts/reindex.sh /path/to/project/compile_commands.json src/subsystem/ subsystem
+cppgraph index /path/to/project/compile_commands.json -y --filter src/subsystem/ --name subsystem --run
 
 # Everything in the compdb (no filter):
-scripts/reindex.sh /path/to/project/compile_commands.json
+cppgraph index /path/to/project/compile_commands.json -y --filter "" --run
 ```
 
 Outputs land in the target project's own `.cppgraph/<name>.{compdb.json,scip,graph.db}`
@@ -331,11 +321,10 @@ Reference timings and store sizes on a large C++ codebase (~6000 TUs): see
 `DESIGN.md` § Store. (On ARM via the emulated container, indexing is far slower
 and may not complete at all on a large codebase — see the callout in § 2.)
 
-**Gotcha** (already handled by the script, documented here so it isn't
-rediscovered on the next project): a build system's generated
-`compile_commands.json` is not guaranteed to format the `file` field
-uniformly — e.g. a Bazel-generated compdb can mix an absolute bazel-out path
-for most entries with a bare relative path for a handful of the same kind of
-location. A `SRC_FILTER` that requires a leading `/` would silently drop the
-bare-relative ones. `scripts/reindex.sh` does a plain substring match, with no
-anchoring, to stay robust to this on any project.
+**Gotcha** (already handled, documented here so it isn't rediscovered on the next
+project): a build system's generated `compile_commands.json` is not guaranteed to
+format the `file` field uniformly — e.g. a Bazel-generated compdb can mix an
+absolute bazel-out path for most entries with a bare relative path for a handful of
+the same kind of location. A filter that requires a leading `/` would silently drop
+the bare-relative ones. The filter is a plain substring match, with no anchoring, to
+stay robust to this on any project.

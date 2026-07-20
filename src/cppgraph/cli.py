@@ -127,7 +127,7 @@ def _resolve_graph(args: argparse.Namespace, parser: argparse.ArgumentParser) ->
         parser.error(
             "no --graph given and no .cppgraph/*.graph.db found from here. "
             "Pass --graph <store.db>, or run from inside an indexed project "
-            "(build one with scripts/reindex.sh)."
+            "(build one with scripts/index.sh)."
         )
     graph, _root = found
     return str(graph)
@@ -237,7 +237,7 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="the scip-clang variant that produced this index (e.g. 'stock' or "
         "'enclosing_range-504'); recorded as provenance so `cppgraph status` can "
-        "flag the graph as stale when the pinned indexer changes. reindex.sh "
+        "flag the graph as stale when the pinned indexer changes. the index wizard "
         "passes it from the binary's provenance sidecar.",
     )
     p_build.add_argument(
@@ -245,14 +245,14 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="the subtree substring the sources were filtered to before indexing "
         "(empty string = whole tree). Recorded as the graph's index scope so "
-        "`cppgraph status` shows it and an incremental update reuses it. reindex.sh "
+        "`cppgraph status` shows it and an incremental update reuses it. the index wizard "
         "passes the filter it applied.",
     )
     p_build.add_argument(
         "--index-no-tests",
         action="store_true",
         help="record that test TUs were excluded from the index (the scope "
-        "counterpart of reindex.sh --no-tests). Provenance only — the actual "
+        "counterpart of --no-tests). Provenance only — the actual "
         "filtering happens upstream when the compdb is built.",
     )
     p_build.add_argument(
@@ -302,11 +302,12 @@ def main(argv: list[str] | None = None) -> int:
     p_compdb.add_argument(
         "--filter",
         default=None,
-        help="preview how many TUs a path-substring filter (reindex.sh's 2nd arg) would keep",
+        help="preview how many TUs a path-substring filter (the index wizard's 2nd arg) would keep",
     )
 
     p_init = sub.add_parser(
         "init",
+        aliases=["index"],
         help="guided onboarding: find the compdb, show what's indexable, ask the "
         "scope questions (subtree / tests / attribution) in order, then index",
     )
@@ -348,10 +349,33 @@ def main(argv: list[str] | None = None) -> int:
         help="symbol-granularity usage (non-interactive scope; needs a #504 binary, else dropped)",
     )
     p_init.add_argument(
+        "--from-scratch",
+        action="store_true",
+        help="re-walk every stage, defaulting existing artifacts toward recompute "
+        "(still asks before discarding an index)",
+    )
+    p_init.add_argument(
         "--plan-json",
         action="store_true",
         help="emit the onboarding data (breakdown, questions, binary variant, "
         "artifacts) as JSON and exit — for an agent to render the questions itself",
+    )
+
+    p_setup = sub.add_parser(
+        "setup",
+        help="obtain the scip-clang indexer, register the MCP server, then index this "
+        "project (the interactive per-machine setup; run via scripts/setup.sh)",
+    )
+    p_setup.add_argument(
+        "--from-scratch",
+        action="store_true",
+        help="re-walk every setup stage, re-obtaining artifacts that already exist",
+    )
+    p_setup.add_argument(
+        "--no-index",
+        dest="chain_index",
+        action="store_false",
+        help="stop after tool setup; don't chain into the project index wizard",
     )
 
     p_update = sub.add_parser(
@@ -687,7 +711,7 @@ def main(argv: list[str] | None = None) -> int:
             attribute_references=args.attributed_refs,
         )
         # Record the tests state definitely whenever a scope is being recorded (a
-        # scope-aware caller like reindex.sh always passes --index-filter), so
+        # scope-aware caller like the index wizard always passes --index-filter), so
         # "tests included" is explicit rather than indistinguishable from a legacy
         # graph that stored no scope at all.
         scope_recorded = args.index_filter is not None or args.index_no_tests
@@ -730,7 +754,12 @@ def main(argv: list[str] | None = None) -> int:
         print(format_summary(summarize_compdb(entries, filter=args.filter)))
         return 0
 
-    if args.command == "init":
+    if args.command == "setup":
+        from cppgraph.setup_cmd import run_setup
+
+        return run_setup(from_scratch=args.from_scratch, chain_index=args.chain_index)
+
+    if args.command in ("init", "index"):
         from cppgraph.init import onboarding_plan, run_init
 
         if args.plan_json:
@@ -743,6 +772,8 @@ def main(argv: list[str] | None = None) -> int:
                 return 1
             print(json.dumps(onboarding_plan(*resolved), indent=2))
             return 0
+        from cppgraph.prompt import make_prompter
+
         return run_init(
             compdb=args.compdb,
             project_root=args.project_root,
@@ -752,6 +783,8 @@ def main(argv: list[str] | None = None) -> int:
             no_tests=args.no_tests,
             attributed_refs=args.attributed_refs,
             non_interactive=args.non_interactive,
+            from_scratch=args.from_scratch,
+            prompter=make_prompter(),
         )
 
     if args.command == "enrich-refs":
@@ -1062,7 +1095,7 @@ def main(argv: list[str] | None = None) -> int:
             )
         else:
             print("  recommendation: incremental update")
-            print(f"    next: scripts/reindex.sh --update {graph_path} <compile_commands.json>")
+            print(f"    next: scripts/index.sh {graph_path} <compile_commands.json>")
         return 1
 
     if args.command == "explain":

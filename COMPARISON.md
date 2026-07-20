@@ -128,7 +128,7 @@ So the real cppgraph-vs-Serena axis is the **query model**:
 
 The trade-off cppgraph pays for that: the graph is a snapshot and goes stale
 until refreshed (`cppgraph status --root` detects drift against the indexed
-commit and points at `reindex.sh --update`). Serena is always in sync with the
+commit and points at an incremental update). Serena is always in sync with the
 working tree.
 
 ## Token cost: cppgraph vs a grep-and-read loop

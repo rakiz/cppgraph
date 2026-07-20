@@ -233,7 +233,7 @@ def compute_scip_advice(
             advice["reindex_recommended"] = True
             advice["reindex_message"] = (
                 f"this graph was indexed with scip-clang {g[0]}, but the pinned version "
-                f"is {want_ver} — re-index (scripts/reindex.sh) to match."
+                f"is {want_ver} — re-index (scripts/index.sh) to match."
             )
     return advice
 
@@ -309,7 +309,7 @@ def _rebuild_now_message(graph_built_with: str | None, current: str | None, leve
             "existing .scip, no recompile) for correct results."
         )
     return head + (
-        "whose graph format changed — re-index it (scripts/reindex.sh) for correct "
+        "whose graph format changed — re-index it (scripts/index.sh) for correct "
         "and complete results."
     )
 

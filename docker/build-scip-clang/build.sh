@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Build scip-clang (v0.4.0 + enclosing_range) natively for THIS machine's CPU
 # architecture. By default the binary lands in the per-machine data dir where
-# reindex.sh looks for it (${XDG_DATA_HOME:-~/.local/share}/cppgraph/bin) — a
+# scripts/index.sh looks for it (${XDG_DATA_HOME:-~/.local/share}/cppgraph/bin) — a
 # persistent location, not a cache, so this 30-60 min build isn't wiped by a
 # cache cleaner. Pass a dir to output elsewhere. The build image is discarded.
 #

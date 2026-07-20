@@ -20,9 +20,11 @@ If someone pointed you (an AI coding agent) here with *"install this tool:
 https://github.com/rakiz/cppgraph"*, follow these steps exactly. They are
 deterministic; the scripts fail loudly with actionable messages.
 
-There are two phases. **Phase A (machine setup)** is one-time and light — run it
-end to end without stopping. **Phase B (index a project)** is per-project and has
-the heavy steps — those need the user's sign-off.
+There are two phases. **Phase A (machine setup)** is one-time: you clone the repo,
+the user runs `setup.sh` in their terminal. **Phase B (index a project)** is
+per-project and has the heavy steps — the user runs `index.sh` and answers the
+prompts. Your role is to clone, hand off the exact command, and give a realistic
+time estimate before any heavy step.
 
 > **RULE — heavy steps need explicit sign-off (do not skip).** The expensive
 > steps that use significant CPU are: generating a `compile_commands.json`,
@@ -35,8 +37,8 @@ the heavy steps — those need the user's sign-off.
 >   codebase — **minutes to hours**, CPU-bound. Reference points: ~20 min for
 >   ~6 000 TUs on a fast 14-core x86; but **~4 h for 6 482 TUs on an 8-core AWS
 >   Graviton2** (older ARM cores are several times slower *per core*, not just
->   fewer). So estimate by TU count **and** CPU, not TU count alone; `reindex.sh`
->   prints a per-machine range right before it starts.
+>   fewer). So estimate by TU count **and** CPU, not TU count alone; the index
+>   wizard prints a per-machine range right before it starts.
 > - **The scip-clang binary** is **light when downloaded** (a prebuilt binary,
 >   seconds) — the default on macOS arm64 / Linux x86_64. It is heavy **only**
 >   when compiled from source (ARM-Linux, or anyone wanting #504). Don't call the
@@ -49,113 +51,64 @@ the heavy steps — those need the user's sign-off.
 >
 > Then stop and wait — do not start until they choose, and never launch it in
 > the background. Tip: for a first try, suggest scoping to one subtree (a filter
-> like `src/foo/`) so it finishes in a couple of minutes. **All of Phase A is
-> light** (the one exception is compiling scip-clang on ARM-Linux, flagged
-> below) — run it directly, don't pause between its steps.
+> like `src/foo/`) so it finishes in a couple of minutes. The wizard runs in the
+> user's terminal, so they answer the prompts and see the progress themselves.
 
-### Phase A — set up the machine (once; light, run end to end)
+### Phase A — set up the machine (once)
 
-**One command does all of Phase A** — clone, venv + deps, scip-clang, MCP
-registration, each gated by a confirmation:
+**Your job is the strict minimum: clone the repo, then hand off.** Clone into the
+per-machine tool dir (**always this path** — not the user's project, and not a dev
+checkout; even "install from a local copy" means clone that copy *into* this path):
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/rakiz/cppgraph/main/scripts/bootstrap.sh)
+git clone https://github.com/rakiz/cppgraph "${XDG_DATA_HOME:-$HOME/.local/share}/cppgraph/repo"
+```
+Then tell the user to run **exactly this, verbatim** (the `!` prefix runs it in
+their session so they answer the prompts):
+
+```
+! ~/.local/share/cppgraph/repo/scripts/setup.sh
 ```
 
-Use `bash <(curl …)`, not `curl … | bash` (process substitution keeps the
-terminal for the prompts). It asks before installing and before choosing the
-scip-clang source (with each option's cost), and stops if you decline. Testing
-from a local clone as if it were remote: `bash <(cat scripts/bootstrap.sh) --repo
-"$PWD"` (or `CPPGRAPH_REPO="$PWD" bash scripts/bootstrap.sh`). An agent runs it
-non-interactively after asking you: `… bootstrap.sh --yes --scip-source <choice>`.
+`scripts/setup.sh` is the **sole** entry point — it creates the venv first. Never
+tell the user to run `cppgraph setup` directly, or `.venv/bin/cppgraph …`, or
+anything under a dev checkout: on a fresh machine none of that exists until
+`setup.sh` has run. Don't run it yourself either (it's interactive).
 
-The steps it runs, if you'd rather do them by hand:
+`setup.sh` needs [`uv`](https://docs.astral.sh/uv/). It creates the venv + deps,
+then runs the interactive `cppgraph setup`:
 
-1. **Check the platform.** A prebuilt `scip-clang` downloads on **macOS arm64**
-   and **Linux x86_64** (light). On **ARM-Linux (aarch64)** there is no prebuilt
-   binary — two routes, pick deliberately (this is the *one* Phase-A step that can
-   be heavy, so apply the RULE for the build route):
-   - **Compile scip-clang natively once** (`setup.sh --scip-source build`, PR
-     #504, ~30 min on 8 cores, Docker) → then index **natively**, at normal speed.
-     Recommended real workflow (also unlocks symbol-granularity usage).
-   - **Emulated x86_64 container** (Docker/Podman + amd64 emulation): no build,
-     but indexing runs *emulated* and is **much slower** (can be hours on a large
-     codebase) — fine only for a quick try or a small subtree. See
-     [INSTALL.md](INSTALL.md) "ARM-Linux / Windows: index via a container".
+- **Obtain scip-clang** — the user picks the source from a menu, each with its cost:
+  **download** (prebuilt, no #504, ~1 min — macOS arm64 / Linux x86_64), **build**
+  (#504 natively, ~30–60 min, Docker, Linux only — unlocks symbol-granularity
+  usage), or **emulate** (no host binary; indexing later runs in an x86 container,
+  much slower). An "abort" choice stops without installing. On **Windows**, work
+  inside **WSL2**; on an **Intel Mac**, only *emulate* applies.
+- **Register the MCP server** (once per machine; idempotent, project-aware).
+- **Hand off to the project index wizard** for the current project (Phase B).
 
-   On **Windows**, do everything inside **WSL2 (Ubuntu)**. On an **Intel Mac**
-   indexing is not supported — stop and tell the user (they can still use a graph
-   built elsewhere).
-2. **Clone and set up** (needs [`uv`](https://docs.astral.sh/uv/) and `curl`).
-   Clone into the per-machine tool dir — the same `~/.local/share/cppgraph/`
-   where `setup.sh` installs the `scip-clang` binary — so the whole tool lives in
-   one stable, persistent place. Use this exact path (do **not** clone into the
-   user's project, and don't leave it wherever you happen to be):
-   ```bash
-   git clone https://github.com/rakiz/cppgraph "${XDG_DATA_HOME:-$HOME/.local/share}/cppgraph/repo"
-   cd "${XDG_DATA_HOME:-$HOME/.local/share}/cppgraph/repo"
-   scripts/setup.sh              # venv + deps, then STOPS to ask the scip-clang source
-   ```
-   `setup.sh` sets up the venv/deps, then **stops with "ACTION NEEDED"** instead of
-   auto-installing the indexer binary — **the scip-clang source is the user's
-   choice, don't pick it for them.** Present the options it lists, each with its
-   rough cost, and ask:
-   - **download** — prebuilt binary, no PR #504 — **~1 min** (macOS arm64 /
-     Linux x86_64);
-   - **build** — compile PR #504 natively — **~30–60 min**, needs Docker (Linux
-     only; unlocks symbol-granularity usage);
-   - **emulate** — no host binary; indexing later runs in an x86 container, **much
-     slower**.
+Every stage checks what already exists and asks before (re)doing it — a self-built
+#504 binary or a multi-hour `.scip` is never clobbered silently.
 
-   On macOS arm64 only *download* or *emulate* apply (no native build) — say the
-   prebuilt binary is available and confirm before fetching. **Always include
-   "don't install (stop)" as an option** — the user may decline; if they do, leave
-   the tool half-set-up (venv only) and stop, don't force a source. Otherwise
-   either **run it for them** — `scripts/setup.sh --scip-source
-   <download|build|emulate>` — or, if they'd rather (e.g. a long build), tell them
-   to type exactly `scripts/setup.sh --scip-source <choice>` and to **tell you when
-   it finishes** so you continue the install. (`--scip-source auto` takes the
-   recommended default for CI.)
-3. **Register the MCP server** — once per machine, part of setup (idempotent; no
-   project args, it auto-discovers each project's `.cppgraph/` at launch, so run
-   it now, before any project is indexed):
-   ```bash
-   scripts/register-mcp.sh
-   ```
+### Phase B — index a project (per-project; the heavy step)
 
-**Then don't stop — carry on to Phase B.** After Phase A the tool is *installed*
-but can't answer anything yet: it has no graph. Do not leave the user here. In
-one message: (a) confirm setup is done, (b) **remind them what cppgraph is for
-and why they installed it** (they may have waited through a long build and lost
-the thread), and (c) propose Phase B for a specific project — then apply the RULE
-for its heavy steps.
+`setup.sh` runs this automatically the first time; afterwards, to index another
+project (or refresh a stale one), the user runs it directly:
 
-### Phase B — index a project (per-project; heavy, needs sign-off)
+```
+! ~/.local/share/cppgraph/repo/scripts/index.sh
+```
 
-4. **Index the project — always start with `cppgraph init`.** Run
-   `cppgraph init --plan-json` **first**, from the project directory: it
-   auto-locates an existing `compile_commands.json` (root / `build/` / up the
-   tree) and returns the breakdown + a `questions[]` array. **Do not inspect the
-   build system or offer to generate a compdb** unless `init` reports none (only
-   then generate one — see [AGENTS.md](AGENTS.md) → "Fallback" — after the user's
-   OK, since it may run a full build). Then drive it as a **strict question
-   contract — the user chooses every dimension, you decide nothing:** ask the user
-   *every* question in `questions[]` via your own UI — `filter` (offer the listed
-   options: whole tree + each subtree, plus a free substring), `no_tests` (present
-   the count/% and the trade-off: skipping loses "which tests exercise X"),
-   `attributed_refs` (only when `scip_clang.supports_attribution`). Never answer,
-   recommend-and-confirm, collapse into one yes/no, or skip a question. Then run
-   their answers:
-   ```bash
-   cppgraph init <compdb> -y --filter <sub> [--no-tests] [--attributed-refs] --run
-   ```
-   (`--print` to only show the command). Do **not** drive `reindex.sh` directly.
-   You may instead let the user run the interactive wizard themselves: they type
-   `! cppgraph init`. The chosen scope is recorded in the graph (`cppgraph status`
-   shows it) and reused by `reindex.sh --update`.
-5. **Tell the user to open a new Claude Code session _from their project
-   directory_** (that's how the server finds this project's graph), then ask
-   *"what calls X?"*, *"impact of changing Y?"*, *"show the dependency graph of Z"*.
+The wizard auto-locates the project's `compile_commands.json` (root / `build/` / up
+the tree; if it reports none, generate one — see [AGENTS.md](AGENTS.md) →
+"Fallback" — after the user's OK, since it may run a full build), shows the
+breakdown, asks the scope questions as selectable menus (subtree / tests /
+attribution), and — when a `.scip` or `.graph.db` already exists — shows its
+details and asks reuse-vs-recompute. It records the chosen scope in the graph and
+reuses it on incremental updates. **You hand the user the command; they answer the
+prompts.** Then tell them to **open a new Claude Code session _from their project
+directory_** (that's how the server finds this project's graph) and ask *"what
+calls X?"*, *"impact of changing Y?"*, *"show the dependency graph of Z"*.
 
 Humans: the same flow, step by step, is in [QUICKSTART.md](QUICKSTART.md).
 
@@ -192,7 +145,7 @@ Notes:
   (`enclosing_range`) — you compile (`docker/build-scip-clang/`).
 - **Stage 4 is the variable one.** Measured extremes: ~20 min on a fast 14-core
   x86 for ~6 000 TUs; **~4 h for 6 482 TUs on an 8-core AWS Graviton2**
-  (`m6g.2xlarge` — older Neoverse-N1 cores are slow at this). `reindex.sh` prints
+  (`m6g.2xlarge` — older Neoverse-N1 cores are slow at this). the index wizard prints
   a per-machine estimate right before it starts. Fewer/older cores → proportionally
   longer; scope to a subtree (stage 3) to cut it down.
 - **`enclosing_range` (#504) is a choice at indexing**, with consequences: it

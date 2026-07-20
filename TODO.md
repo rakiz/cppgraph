@@ -6,26 +6,21 @@ isn't versioned yet, so it's a snapshot, not a log). Design detail is in
 
 ## Packaging / open-source
 
-- **`cppgraph init` wizard — extend the resume support.** The wizard ships
-  (`src/cppgraph/init.py`): it finds the compdb, shows the breakdown, asks the
-  scope questions in order (subtree / tests / attribution, the last gated on a
-  #504 binary), and runs `reindex.sh`. It already detects an existing
-  `<name>.graph.db` and offers update-vs-rebuild. Still open:
-  - **Mid-pipeline resume.** When `<name>.scip` exists but `<name>.graph.db`
-    doesn't (indexing done, build interrupted), offer to resume at the build step
-    via `cppgraph build --scip … --out …` directly, instead of re-running
-    scip-clang. Today it only notes the partial index; reindex.sh reuses a `.scip`
-    only when no native binary is present.
-  - **Step-back.** Let the user redo the previous stage (re-filter, re-index) from
-    the resume prompt, not just accept the inferred next step.
-- **Align `reindex.sh --update` with the dirty fingerprints.** `status` (CLI +
-  MCP) now reads `meta.dirty_fingerprints` via `changed_files_since` so a graph
+- **`cppgraph index` wizard — step-back.** The wizard (`src/cppgraph/init.py`,
+  driving `src/cppgraph/pipeline.py`) finds the compdb, shows the breakdown, asks
+  the scope questions (subtree / tests / attribution, the last gated on a #504
+  binary), and — via disk detection — reuses or recomputes each artifact: an
+  existing `.scip` is introspected (`describe_scip`) and offered reuse-vs-recompute,
+  an existing `.graph.db` offers update / rebuild / keep. Still open: **step-back** —
+  let the user redo an earlier stage (re-filter, re-index) from a later prompt,
+  rather than only moving forward.
+- **Align `pipeline.incremental_update` with the dirty fingerprints.** `status`
+  (CLI + MCP) reads `meta.dirty_fingerprints` via `changed_files_since` so a graph
   built from a dirty tree isn't falsely reported stale (and a revert *is* caught).
-  But `reindex.sh --update` computes its changed set with its own `git diff` in
-  shell (reindex.sh ~232-238), unaware of the fingerprints — so an explicit update
-  re-indexes dirty-at-build files it needn't, and wouldn't notice a revert. Feed
-  the fingerprints into that shell diff (or have it call the Python
-  `changed_files_since`) so the report and the actual update agree.
+  But `pipeline.incremental_update` computes its changed set with its own `git diff`
+  (`_git_diff_names`), unaware of the fingerprints — so an explicit update
+  re-indexes dirty-at-build files it needn't, and wouldn't notice a revert. Have it
+  call `changed_files_since` so the report and the actual update agree.
 - **Release blocker (0.1.0): re-measure the token numbers.** `README.md` and
   `COMPARISON.md` quote token counts that predate `DEFAULT_LIMIT = 40`
   (`mcp_server.py:56`). Re-run the measurement on the mongo graph (workstation)
@@ -58,8 +53,8 @@ Open:
 - **Wire the `download` path for ARM-Linux once upstream publishes it.** If
   scip-clang ships a `scip-clang-aarch64-linux` asset (see the arm64-linux issue
   draft in `docker/build-scip-clang/`), add the `Linux/aarch64` case in
-  `setup.sh` (a commented one-liner is already there) so `--scip-source download`
-  works on ARM-Linux — the stock binary (no #504); build stays the #504 route.
+  `setup_cmd.py` `platform_sources()` so the *download* option appears on
+  ARM-Linux — the stock binary (no #504); build stays the #504 route.
 
 ## scip-clang `enclosing_range` (PR #504)
 
@@ -69,8 +64,9 @@ usage view). Open:
 - **Report the crash upstream** (sourcegraph/scip-clang PR #504): the missing
   same-file guard is a bug in the PR itself. Draft ready in
   `docker/build-scip-clang/PR504-COMMENT.draft.md`; post it on the PR.
-- **Auto-enrich after a #504 re-index?** `reindex.sh --attributed-refs` is an
-  explicit opt-in today; decide whether a #504 re-index should enrich by default.
+- **Auto-enrich after a #504 re-index?** attribution (`--attributed-refs` / the
+  wizard's attribution question) is an explicit opt-in today; decide whether a #504
+  re-index should enrich by default.
 - **Attributed reference edges** as first-class graph edges (traversable
   symbol→symbol, distinct `kind`) for `impact`/`path`, beyond the usage view.
 

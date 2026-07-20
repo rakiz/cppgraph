@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 #
-# Uninstall cppgraph — the mirror of setup.sh + register-mcp.sh.
+# Uninstall cppgraph — the mirror of setup.sh.
 #
 # Asks, per item, what to remove (nothing is deleted without a yes):
 #   1. the MCP registration ('cppgraph', user scope) — `claude mcp remove`;

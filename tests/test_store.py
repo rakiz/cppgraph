@@ -654,7 +654,7 @@ def test_update_recomputes_meta_counts_and_provenance(tmp_path: Path) -> None:
 def test_update_preserves_recorded_index_scope(tmp_path: Path) -> None:
     """An incremental update stamps only the keys it provides (source_commit, ...),
     so the scope recorded at build time survives — the graph stays self-describing
-    and `reindex.sh --update` can keep reading it."""
+    and an incremental update can keep reading it."""
     db = tmp_path / "graph.db"
     original = Graph()
     original.add_edge("calls", "a().", "b().", file="foo.cpp", line=5)

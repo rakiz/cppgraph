@@ -755,7 +755,7 @@ def status_report(
         drift["changed_fraction"] = verdict.get("changed_fraction")
         drift["recommend"] = verdict["recommend"]  # "update" | "rebuild"
         drift["next"] = (
-            "run scripts/reindex.sh --update to refresh the graph"
+            "run scripts/index.sh to refresh the graph"
             if verdict["recommend"] == "update"
             else "drift too large for incremental — re-index the whole target and rebuild"
         )
@@ -785,7 +785,7 @@ def make_export(
 
 _NO_GRAPH = {
     "error": "no cppgraph index found for the current project. Build one with "
-    "scripts/reindex.sh (it writes <project>/.cppgraph/…), then reopen this "
+    "scripts/index.sh (it writes <project>/.cppgraph/…), then reopen this "
     "Claude Code session from the project directory."
 }
 
@@ -793,7 +793,7 @@ _NO_GRAPH = {
 class _ReloadingStore:
     """A `GraphStore` handle that reopens when the `.graph.db` changes on disk.
 
-    The MCP server is long-lived, but a `reindex.sh`/`cppgraph init` run overwrites
+    The MCP server is long-lived, but a the index wizard/`cppgraph init` run overwrites
     the graph file underneath it. Without reloading, every query (and `status`)
     would keep answering from the stale graph held open at launch until Claude Code
     restarts — the "status says 18k nodes, the rebuild made 15k" confusion. `get()`
