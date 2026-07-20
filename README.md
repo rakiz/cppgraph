@@ -67,11 +67,11 @@ UI), then run the script non-interactively with those choices as flags.**
 
 ### Phase B — index a project (per-project; the heavy step)
 
-**You drive Phase B; the user types none of these commands.** They are yours to
-run — don't print `--plan-json` or the `index.sh … -y …` line to the user or ask
-them to run it. To the user, Phase B is: you offer to index the project, they answer
-one or two plain questions (which part of the code? include tests?), you run it and
-report progress, then they open a new Claude Code session.
+**You drive Phase B; the user only picks from choices you offer — never typing a
+scope, path, or flag, and never seeing these commands.** The conversation: (a) a
+yes/no — "Index this project now? (~estimate)"; if yes, (b) a selectable scope
+choice (whole tree / a subtree) + a yes/no on tests; then (c) you run it and report
+progress; (d) when done, they open a new Claude Code session.
 
 1. **Get the scope options:** run `~/.local/share/cppgraph/repo/scripts/index.sh
    --plan-json` (a bare `cppgraph` isn't on PATH) from the project dir; it
@@ -79,8 +79,10 @@ report progress, then they open a new Claude Code session.
    [AGENTS.md](AGENTS.md) → "Fallback", after the user's OK. It returns the compdb
    breakdown, the questions (subtree / tests / attribution), and `artifacts` (whether
    a `.scip`/`.graph.db` already exists).
-2. **Ask the user** each question, surfacing the real options. If `artifacts` shows
-   the project is already indexed, ask whether to **keep** it (default) or rebuild.
+2. **Offer the choices** — a single-select of whole tree + each subtree (with TU
+   counts) and a yes/no on tests; never ask the user to type a subdirectory or flag.
+   If `artifacts` shows the project is already indexed, ask whether to **keep** it
+   (default) or rebuild.
 3. **Run it with their answers** (non-interactive, so `!` works):
    ```
    ! ~/.local/share/cppgraph/repo/scripts/index.sh <compdb> -y --filter <sub> [--no-tests] [--attributed-refs] --run

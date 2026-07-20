@@ -92,13 +92,21 @@ So you cannot hand the user a bare interactive wizard and expect them to answer 
 through you. Instead: **ask the scope in your own question UI, then run the index
 non-interactively with those answers as flags.**
 
-**You drive Phase B; the user does not type any of these commands.** The
-`--plan-json` call and the `index.sh … -y …` command below are *yours* to run — do
-not print them to the user as steps to perform or explain. To the user, Phase B is
-just: (a) you offer to index the project so they can query it, (b) they answer one
-or two plain questions (which part of the code? include tests?), (c) you run it and
-report progress, (d) when it's done you tell them to open a new Claude Code session
-from the project directory. Keep the flags and JSON out of the conversation.
+**You drive Phase B; the user only picks from choices you offer — they never type a
+scope, a path, or a flag, and never see `--plan-json` / `index.sh …`.** The shape of
+the conversation:
+
+- **First, a yes/no:** "Index this project now? (~<estimate>)" — proceed or skip,
+  nothing else. If they skip, stop.
+- **Then offer the scope as selectable choices** built from the plan (below): a
+  single-select of **whole tree** + **each subtree** from `filter.options` (with
+  their TU counts), and a yes/no **exclude tests?**. They pick from the list — do
+  **not** say "tell me a subdirectory" or "say 'whole repo'", and never ask them to
+  type a filter or a flag.
+- **Then you run it**, report progress, and when done tell them to open a new Claude
+  Code session from the project directory.
+
+Keep the commands and JSON out of the conversation entirely.
 
 1. **Get the options:** run `cppgraph index --plan-json` from the project directory
    (use the installed binary: `~/.local/share/cppgraph/repo/.venv/bin/cppgraph`, or
@@ -109,9 +117,10 @@ from the project directory. Keep the flags and JSON out of the conversation.
    concrete `options`. **Do not inspect the build system or offer to generate a
    compdb** unless `--plan-json` reports none (only then, see the fallback below,
    after the user's OK — it may run a full build).
-2. **Ask the user every question** in `questions[]`, via your question UI, surfacing
-   the real options. `filter`: the listed subtrees + whole tree + a free substring.
-   `no_tests`: the count/% and the trade-off. `attributed_refs`: only when
+2. **Ask the user each question as a selectable choice** (not free text). `filter`:
+   a single-select of whole tree + each subtree from `options` (an "other — type a
+   substring" entry is fine as a last item, but the pick-list is the default).
+   `no_tests`: a yes/no with the count/% trade-off. `attributed_refs`: only when
    `scip_clang.supports_attribution` is true. Decide nothing yourself.
    **Also check `artifacts`:** if `graph` or `scip` is already `true`, this project
    is already indexed — tell the user, and ask whether to **keep** it (default) or
