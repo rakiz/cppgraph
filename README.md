@@ -67,14 +67,17 @@ UI), then run the script non-interactively with those choices as flags.**
 1. **Get the scope options:** `cppgraph index --plan-json` (from the project dir; it
    auto-locates the `compile_commands.json` — if it reports none, generate one, see
    [AGENTS.md](AGENTS.md) → "Fallback", after the user's OK). It returns the compdb
-   breakdown + the questions (subtree / tests / attribution).
-2. **Ask the user** each of those, surfacing the real options.
+   breakdown, the questions (subtree / tests / attribution), and `artifacts` (whether
+   a `.scip`/`.graph.db` already exists).
+2. **Ask the user** each question, surfacing the real options. If `artifacts` shows
+   the project is already indexed, ask whether to **keep** it (default) or rebuild.
 3. **Run it with their answers** (non-interactive, so `!` works):
    ```
    ! ~/.local/share/cppgraph/repo/scripts/index.sh <compdb> -y --filter <sub> [--no-tests] [--attributed-refs] --run
    ```
-   An existing `.scip`/`.graph.db` is reused, never overwritten, unless recompute is
-   requested; the chosen scope is recorded and reused by later updates. (A human in a
+   **Non-destructive by default:** an existing `.scip`/`.graph.db` is kept, not
+   overwritten — only what's missing is built. Add `--from-scratch` only if the user
+   asked to rebuild. The chosen scope is recorded and reused by later updates. (A human in a
    real terminal can instead run `scripts/index.sh` with no flags for the interactive
    wizard.) Then tell the user to **open a new Claude Code session _from their project
    directory_** (that's how the server finds this project's graph) and ask *"what

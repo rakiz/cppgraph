@@ -207,6 +207,52 @@ def test_run_init_non_interactive_assembles_command_without_prompting(tmp_path: 
     assert "Plan:" in out
 
 
+def test_non_interactive_keeps_existing_graph_by_default(tmp_path: Path) -> None:
+    """A -y run must NOT rebuild (overwrite) an existing graph — the safety that the
+    agent path relies on. It reuses; only --from-scratch redoes."""
+    compdb = _write_compdb(tmp_path / "compile_commands.json")
+    cpg = tmp_path / ".cppgraph"
+    cpg.mkdir()
+    (cpg / "proj.scip").write_text("")
+    (cpg / "proj.graph.db").write_text("")
+    lines, prnt = _capturing_print()
+    run_init(
+        compdb=str(compdb),
+        project_root=str(tmp_path),
+        name="proj",
+        run=False,
+        filter="",  # non-interactive
+        input_fn=_boom_input,
+        print_fn=prnt,
+    )
+    out = "\n".join(lines)
+    assert "keeping it" in out
+    assert "scip: reuse existing" in out
+    assert "graph: reuse existing" in out
+
+
+def test_non_interactive_from_scratch_rebuilds(tmp_path: Path) -> None:
+    compdb = _write_compdb(tmp_path / "compile_commands.json")
+    cpg = tmp_path / ".cppgraph"
+    cpg.mkdir()
+    (cpg / "proj.scip").write_text("")
+    (cpg / "proj.graph.db").write_text("")
+    lines, prnt = _capturing_print()
+    run_init(
+        compdb=str(compdb),
+        project_root=str(tmp_path),
+        name="proj",
+        run=False,
+        filter="",
+        from_scratch=True,
+        input_fn=_boom_input,
+        print_fn=prnt,
+    )
+    out = "\n".join(lines)
+    assert "scip: recompute" in out
+    assert "graph: rebuild" in out
+
+
 def test_run_init_non_interactive_gates_attribution(tmp_path: Path, monkeypatch) -> None:
     compdb = _write_compdb(tmp_path / "compile_commands.json")
 
@@ -266,6 +312,29 @@ def test_onboarding_plan_shape(tmp_path: Path) -> None:
     filter_values = [o["value"] for o in plan["questions"][0]["options"]]
     assert "" in filter_values  # whole tree
     assert "db" in filter_values  # a subtree from the breakdown
+
+
+def test_onboarding_plan_offers_reuse_when_indexed(tmp_path: Path) -> None:
+    """When a project is already indexed, the plan leads with a reuse-vs-recompute
+    question carrying the existing artifacts' details — so the agent presents the
+    choice instead of silently reusing or clobbering."""
+    from cppgraph.compdb import load_compdb
+    from cppgraph.proto import scip_pb2
+
+    compdb = _write_compdb(tmp_path / "compile_commands.json")
+    cpg = tmp_path / ".cppgraph"
+    cpg.mkdir()
+    idx = scip_pb2.Index(
+        metadata=scip_pb2.Metadata(tool_info=scip_pb2.ToolInfo(name="scip-clang", version="0.4.0")),
+        documents=[scip_pb2.Document(relative_path="a.cpp")],
+    )
+    (cpg / "proj.scip").write_bytes(idx.SerializeToString())
+
+    plan = onboarding_plan(compdb, load_compdb(str(compdb)), tmp_path, "proj")
+    assert plan["questions"][0]["key"] == "reuse"
+    assert [o["value"] for o in plan["questions"][0]["options"]] == ["reuse", "recompute"]
+    assert plan["existing"]["scip"]["tool_version"] == "0.4.0"
+    assert "scip-clang" in plan["questions"][0]["info"]
 
 
 def test_init_plan_json_via_cli(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

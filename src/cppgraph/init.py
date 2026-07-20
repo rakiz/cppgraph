@@ -173,6 +173,66 @@ def _resolve_targets(
     return compdb_path, entries, project_root_path, graph_name
 
 
+def existing_artifacts(out_dir: Path, name: str) -> dict:
+    """Details of the already-present `.scip` / `.graph.db` (or None each), so a
+    reuse-vs-recompute choice can show where the data came from."""
+    from cppgraph.scip_introspect import describe_scip
+
+    scip_info = describe_scip(out_dir / f"{name}.scip")
+    scip = scip_info if scip_info.get("exists") else None
+
+    graph = None
+    graph_path = out_dir / f"{name}.graph.db"
+    if graph_path.is_file():
+        graph = {"path": str(graph_path)}
+        try:
+            from cppgraph.store import GraphStore
+
+            store = GraphStore(graph_path)
+            try:
+                m = store.meta()
+            finally:
+                store.close()
+            for k in (
+                "source_commit",
+                "built_at",
+                "index_filter",
+                "index_tests",
+                "index_tool_version",
+                "index_tool_variant",
+            ):
+                if m.get(k):
+                    graph[k] = m[k]
+        except Exception as exc:  # a corrupt/old store must not break the plan
+            graph["error"] = f"{type(exc).__name__}: {exc}"
+    return {"scip": scip, "graph": graph}
+
+
+def _existing_summary(existing: dict) -> str:
+    """One-line human description of the existing artifacts, for the reuse question."""
+    parts: list[str] = []
+    scip = existing.get("scip")
+    if scip:
+        tool = f"{scip.get('tool_name') or '?'} {scip.get('tool_version') or ''}".strip()
+        parts.append(
+            f"index: {tool}, {scip.get('document_count', '?')} doc(s), "
+            f"generated {scip.get('mtime_iso', '?')}"
+        )
+    graph = existing.get("graph")
+    if graph:
+        bits = []
+        if graph.get("index_filter") is not None:
+            bits.append(f"scope '{graph['index_filter'] or '<whole tree>'}'")
+        if graph.get("index_tests"):
+            bits.append(f"tests {graph['index_tests']}")
+        if graph.get("source_commit"):
+            bits.append(f"commit {graph['source_commit'][:12]}")
+        if graph.get("built_at"):
+            bits.append(f"built {graph['built_at']}")
+        parts.append("graph: " + (", ".join(bits) if bits else "present"))
+    return "; ".join(parts) or "already indexed"
+
+
 def onboarding_plan(
     compdb_path: Path, entries: list[dict], project_root_path: Path, graph_name: str
 ) -> dict:
@@ -184,9 +244,31 @@ def onboarding_plan(
     summary = summarize_compdb(entries)
     present, variant = scip_clang_info()
     supports_attribution = variant == "enclosing_range-504"
-    status = artifact_status(out_dir_for(project_root_path), graph_name)
+    out_dir = out_dir_for(project_root_path)
+    status = artifact_status(out_dir, graph_name)
+    existing = existing_artifacts(out_dir, graph_name)
     total = summary.total
     tests_pct = round(100 * summary.tests / total) if total else 0
+
+    # When the project is already indexed, the FIRST question is reuse-vs-recompute,
+    # carrying the details of what's on disk so the agent can show "where it came
+    # from" before the user decides — never silently reuse or clobber.
+    questions: list[dict] = []
+    if status["scip"] or status["graph"]:
+        questions.append(
+            {
+                "key": "reuse",
+                "type": "choice",
+                "prompt": "This project is already indexed — use the existing data or recompute?",
+                "default": "reuse",
+                "info": _existing_summary(existing),
+                "options": [
+                    {"value": "reuse", "label": "use the existing index/graph (no flag)"},
+                    {"value": "recompute", "label": "recompute from scratch (--from-scratch)"},
+                ],
+            }
+        )
+
     return {
         "compdb": str(compdb_path),
         "project_root": str(project_root_path),
@@ -204,7 +286,9 @@ def onboarding_plan(
             "supports_attribution": supports_attribution,
         },
         "artifacts": status,
-        "questions": [
+        "existing": existing,
+        "questions": questions
+        + [
             {
                 "key": "filter",
                 "type": "string",
@@ -320,15 +404,20 @@ def run_init(
     out_graph = out_dir / f"{graph_name}.graph.db"
 
     if non_interactive:
-        if status["graph"]:
-            p.note(f"Note: rebuilding the existing graph ({out_graph}) with the given scope.")
         src_filter = filter or ""
         chosen_no_tests = bool(no_tests)
         chosen_attributed = _gate_attribution(attributed_refs, p.note)
-        # Never recompute an existing (possibly hours-long) index unless asked; a
-        # missing index must be computed, and --from-scratch forces a recompute.
+        # Non-destructive by default: reuse an existing index/graph, build only what
+        # is missing. Only --from-scratch (an explicit choice) re-does — so a
+        # non-interactive run can never silently discard a `.scip` (hours to rebuild)
+        # or an already-built graph.
         recompute_scip = from_scratch or not status["scip"]
-        rebuild_graph = True
+        rebuild_graph = from_scratch or not status["graph"]
+        if status["graph"] and not rebuild_graph:
+            p.note(
+                f"An indexed graph already exists: {out_graph} — keeping it. Pass "
+                "--from-scratch to rebuild, or `cppgraph update` to refresh changed files."
+            )
     else:
         rebuild_graph = True
         # A graph already exists: reuse it, refresh it incrementally, or rebuild.

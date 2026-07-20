@@ -103,12 +103,16 @@ non-interactively with those answers as flags.**
    the real options. `filter`: the listed subtrees + whole tree + a free substring.
    `no_tests`: the count/% and the trade-off. `attributed_refs`: only when
    `scip_clang.supports_attribution` is true. Decide nothing yourself.
+   **Also check `artifacts`:** if `graph` or `scip` is already `true`, this project
+   is already indexed — tell the user, and ask whether to **keep** it (default) or
+   **rebuild**. Only pass `--from-scratch` if they choose rebuild.
 3. **Run it with their answers** (non-interactive, so `!` works):
    ```
    ! ~/.local/share/cppgraph/repo/scripts/index.sh <compdb> -y --filter <sub> [--no-tests] [--attributed-refs] --run
    ```
-   An existing `.scip`/`.graph.db` is reused (never overwritten) unless a recompute
-   is requested; the chosen scope is recorded in the graph and reused by later
+   **Non-destructive by default:** an existing `.scip`/`.graph.db` is **kept**, not
+   overwritten — the run only builds what's missing. Add `--from-scratch` only when
+   the user asked to rebuild. The chosen scope is recorded and reused by later
    updates. Give a time estimate first — indexing is the long step.
 
 Never run the bare interactive `cppgraph index` (or `scripts/index.sh` with no
