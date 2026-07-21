@@ -44,6 +44,15 @@ when you want to measure at scale; keep such paths out of the shipped code.)
   error (a stock binary and a #504 build must both index without crashing).
   Regenerate the binding only to start reading a *new* field, never to avoid a
   crash.
+- **scip-clang runs NATIVELY on macOS arm64 and Linux x86_64 — indexing there
+  needs NO Docker.** Docker enters only for (a) PR #504 (`--attributed-refs`,
+  symbol-granularity refs — a *Linux-only build*), or (b) hosts with no native
+  binary (Intel Mac, ARM-Linux, Windows) via `emulate`. Do **not** tell a user
+  macOS can't index without Docker, and do **not** generalize "#504 build is
+  Linux-only" into "scip-clang is Linux-only" — they are different claims. When
+  unsure of a host's options, run `setup.sh --list-sources` (it prints them); on
+  macOS arm64 it lists `download` = the native binary. Re-indexing a stale
+  project on macOS arm64 uses that native binary directly — no container.
 - Tests with `pytest` under `tests/`. Prefer small fixtures (a tiny checked-in
   or synthetic `.scip`) over depending on a full external index.
 - CLI entry: `cppgraph` (see `src/cppgraph/cli.py`); MCP server `cppgraph-mcp`.
@@ -181,8 +190,9 @@ when it's stale (it reflects the build graph at generation time).
      `! ~/.local/share/cppgraph/repo/scripts/setup.sh --list-sources` (pure bash, no
      venv needed): it prints this machine's OS/arch and the sources that actually
      apply (e.g. no `download` on ARM-Linux). **Ask the user to pick from exactly
-     those** — each has a cost: download ~1 min, build (#504) ~30–60 min Docker,
-     emulate (slower indexing). Offering a source the tool didn't list will fail.
+     those** — each has a cost: download ~1 min (native, no Docker), build (#504)
+     ~25–60 min Docker (Linux-only), emulate (slower indexing, container).
+     Offering a source the tool didn't list will fail.
   3. Run `setup.sh` with their choice as a flag (this is what lets `!` work):
      ```
      ! ~/.local/share/cppgraph/repo/scripts/setup.sh --scip-source <download|build|emulate>

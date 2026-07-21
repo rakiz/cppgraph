@@ -133,9 +133,12 @@ runs the C++ front-end once per translation unit, so it scales with cores/CPU).
 Then you're ready to query (see the gains below).
 
 Notes:
-- **Stage 1 is once per machine**; copy is only available on macOS arm64 /
-  Linux x86_64 (a stock binary, no PR #504). Everywhere else — and to get PR #504
-  (`enclosing_range`) — you compile (`docker/build-scip-clang/`).
+- **Stage 1 is once per machine.** On **macOS arm64** and **Linux x86_64** the
+  prebuilt binary downloads and indexes **natively — no Docker**. Docker is only
+  for PR #504 (`enclosing_range` → `--attributed-refs`, a Linux-only *build*) or
+  for hosts with no native binary (Intel Mac, ARM-Linux, Windows) via `emulate`.
+  So macOS arm64 indexes fine without Docker; it just lacks #504 symbol-
+  granularity refs. "#504 build is Linux-only" ≠ "scip-clang needs Docker on macOS".
 - **Stage 4 is the variable one.** Measured extremes: ~20 min on a fast 14-core
   x86 for ~6 000 TUs; **~4 h for 6 482 TUs on an 8-core AWS Graviton2**
   (`m6g.2xlarge` — older Neoverse-N1 cores are slow at this); **~1 h 42 for

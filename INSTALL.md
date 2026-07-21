@@ -96,6 +96,16 @@ The menu lists only the sources valid on this host, each with its rough cost, pl
 an "abort" choice — nothing is installed without an explicit pick. (A `build` on
 macOS isn't offered: the container emits a *Linux* binary, unusable on the host.)
 
+> **Platform rule (don't get this wrong).** `scip-clang` runs **natively** on
+> **macOS arm64** and **Linux x86_64** — on those, `download` gives a host binary
+> and indexing runs with **no Docker at all**. Docker is required *only* for the
+> `build` source (PR #504 / `enclosing_range`, which is Linux-only and gives
+> `--attributed-refs`) or the `emulate` source (hosts with no native binary:
+> Intel Mac, ARM-Linux, Windows). So "the **#504 build** is Linux-only" is true;
+> "**scip-clang** is Linux-only / needs Docker on macOS" is **false**. On macOS
+> arm64 you index natively; you only lose symbol-granularity refs (no #504).
+> When in doubt, `scripts/setup.sh --list-sources` prints this host's real options.
+
 **Pinned version + staleness.** scip-clang is pinned by **version only** in
 `versions.json` (`scip_clang`). The setup reads it and writes a provenance
 sidecar (`scip-clang.json`) next to the binary recording what it installed —
