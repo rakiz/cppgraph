@@ -42,6 +42,15 @@ design detail is in `DESIGN.md`, shipped features in `CHANGELOG.md`.
   add the extra `.graph.db` cost so the user can weigh it. Measure the real delta first
   (same graph with vs without `--attributed-refs`); don't hardcode a guess.
 - **Contributing notes, CI (lint + pytest), publish.** Not a 0.1.0 blocker.
+- **Make the repo discoverable to LLMs (distribution).** LLMs asked to compare
+  code-intelligence tools describe cppgraph from the *name* only — the page isn't
+  crawled/indexed, and the homonym `6502/cppgraph` outranks it for the bare term
+  "cppgraph", so they hallucinate it as a generic graph data structure. Get inbound
+  links so `rakiz/cppgraph` gets crawled and ranks on "cppgraph mcp" / "cppgraph
+  claude code": submit to the MCP registry (best-targeted, most durable), optionally
+  a short write-up / Show HN. Refer to it with a descriptor everywhere it's linked
+  ("cppgraph — compiler-exact C++ code-intelligence MCP server"), never bare
+  "cppgraph". Gated on making the repo publicly visible / cutting 0.1.0.
 
 ## Attic
 

@@ -3,8 +3,9 @@
 Compiler-exact C++ code intelligence for AI agents. It answers the questions your
 assistant otherwise guesses at with grep — **who calls this function, what it
 calls, who references this type, the class hierarchy, the change impact / blast
-radius, the call path between two symbols** — from a pre-indexed graph, served
-over MCP (Claude Code, …) and a CLI.
+radius, the call path between two symbols** — exposed as **MCP tools your agent calls
+directly** (`who_calls`, `what_it_calls`, `find_references`, `impact_of`, `path`,
+`base_classes` / `subclasses`), backed by a pre-indexed graph, plus a CLI.
 
 Built from a **compiler front-end index** (SCIP via `scip-clang`), not a syntactic
 AST: every symbol has a stable, unique identity (USR / mangled name), so edges are
@@ -197,6 +198,11 @@ The trade-off is a one-time index (minutes), amortized over every later query.
 Full spectrum, noise ratios, and the token-lean defaults:
 **[COMPARISON.md](COMPARISON.md)** (reproduce with `scripts/measure_tokens.py --suite`).
 
+Same idea versus an LSP-driven agent (e.g. Serena): the questions are the same,
+but cppgraph is a pre-indexed graph the agent queries in one call, not a live
+language server it has to drive file-by-file — which is what keeps it token-lean
+and complete on large C++. Numbers: [COMPARISON.md](COMPARISON.md).
+
 ## Documentation
 
 | Doc | What's in it |
@@ -215,14 +221,14 @@ Full spectrum, noise ratios, and the token-lean defaults:
 - Being a linter or a refactoring engine. This is about *understanding structure*
   (who calls what, impact/blast-radius, inheritance) for humans and LLMs.
 
-## Visualize
+## Visualize a neighbourhood
 
-`cppgraph export <symbol> --depth 2 --out graph.json` (run from the indexed
-project — graph auto-discovered, `<symbol>` a plain name or exact SCIP string)
-writes a bounded neighbourhood in a [graphify](https://github.com/Graphify-Labs/graphify)-compatible
-`graph.json`. Open it in the bundled viewer (`viz/cppgraph-viz.html`, our own
-code + a vendored copy of vis-network, fully offline) — or, since the container
-format is shared, in graphify itself. Details: [viz/README.md](viz/README.md).
+Secondary to the query tools: `cppgraph export <symbol> --depth 2 --out graph.json`
+(run from the indexed project — graph auto-discovered, `<symbol>` a plain name or
+exact SCIP string), or the `visualize` MCP tool, writes a bounded neighbourhood and
+opens it in a self-contained, offline viewer (`viz/cppgraph-viz.html`). The
+`graph.json` is [graphify](https://github.com/Graphify-Labs/graphify)-compatible.
+Details: [viz/README.md](viz/README.md).
 
 ## Where is this type used?
 
