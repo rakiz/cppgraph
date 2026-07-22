@@ -1,18 +1,23 @@
 # cppgraph
 
-A **semantically accurate** code-graph tool for C++ (and any project with a
-`compile_commands.json`). It builds a call/reference/inheritance graph from a
-compiler-grade index — not from a syntactic AST — so symbol identity is exact
-and edges are disambiguated (no name collisions, resolves overloads, virtual
-dispatch, and pointer/reference method calls).
+Compiler-exact C++ code intelligence for AI agents. It answers the questions your
+assistant otherwise guesses at with grep — **who calls this function, what it
+calls, who references this type, the class hierarchy, the change impact / blast
+radius, the call path between two symbols** — from a pre-indexed graph, served
+over MCP (Claude Code, …) and a CLI.
 
-> **Why this exists.** Tree-sitter-based graph tools identify symbols *by name*.
-> That both **over-captures** (merges distinct symbols that share a name into one
-> node) and **under-captures** (drops calls it cannot bind syntactically:
-> overloads, `ptr->method()`, free functions, templates, virtual dispatch).
-> `cppgraph` uses a compiler front-end index (SCIP via `scip-clang`) where every
-> symbol has a stable, unique identity (USR / mangled name), so the graph is the
-> one the compiler actually sees.
+Built from a **compiler front-end index** (SCIP via `scip-clang`), not a syntactic
+AST: every symbol has a stable, unique identity (USR / mangled name), so edges are
+exact — overloads, `ptr->method()`, free functions, templates, and virtual dispatch
+all resolved, with no name-collision merges.
+
+> **Why it matters for C++.** By-name graph tools (tree-sitter) and LSP-based
+> agents (e.g. Serena) degrade on large C++ — templates, macros, overloads — so the
+> agent silently **falls back to grep**, which merges distinct same-named symbols,
+> counts comments/decls as calls, and misses `ptr->method()` / virtual dispatch.
+> cppgraph is the graph the compiler actually sees — see
+> [COMPARISON.md](COMPARISON.md) for measured numbers (grep-and-read vs cppgraph,
+> and vs graphify / Serena).
 
 ## Install with your AI agent
 
