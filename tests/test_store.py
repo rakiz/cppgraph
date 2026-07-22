@@ -727,3 +727,46 @@ def test_indexed_file_count(tmp_path: Path) -> None:
     graph.add_edge("calls", METHOD, OTHER, file="b.cpp", line=2)
     store = _store(tmp_path, graph)
     assert store.indexed_file_count() == 2
+
+
+def _multi(tmp_path: Path) -> GraphStore:
+    """Three distinct symbols: two share the `Foo#` qualifier, one is `Bar#`."""
+    graph = Graph()
+    graph.add_node(METHOD, display_name="makeResumeToken")
+    graph.add_node(CALLER, display_name="caller")
+    graph.add_node(OTHER, display_name="other")
+    return _store(tmp_path, graph)
+
+
+def test_resolve_exact_symbol_is_used_as_is(tmp_path: Path) -> None:
+    assert _multi(tmp_path).resolve(METHOD) == (METHOD, [])
+
+
+def test_resolve_unique_name(tmp_path: Path) -> None:
+    resolved, candidates = _multi(tmp_path).resolve("makeResumeToken")
+    assert resolved == METHOD
+    assert candidates == []
+
+
+def test_resolve_normalizes_double_colon_to_hash(tmp_path: Path) -> None:
+    resolved, candidates = _multi(tmp_path).resolve("Foo::makeResumeToken")
+    assert resolved == METHOD
+    assert candidates == []
+
+
+def test_resolve_ambiguous_lists_candidates_without_guessing(tmp_path: Path) -> None:
+    resolved, candidates = _multi(tmp_path).resolve("Foo")  # matches METHOD and CALLER
+    assert resolved is None
+    assert {n.symbol for n in candidates} == {METHOD, CALLER}
+
+
+def test_resolve_no_match_is_empty(tmp_path: Path) -> None:
+    assert _multi(tmp_path).resolve("does_not_exist") == (None, [])
+
+
+def test_resolve_falls_back_to_fuzzy(tmp_path: Path) -> None:
+    """A case/separator miss still resolves: the exact substring fails, then the
+    case/separator-insensitive fuzzy match lands on the one symbol."""
+    resolved, candidates = _multi(tmp_path).resolve("makeresumetoken")
+    assert resolved == METHOD
+    assert candidates == []

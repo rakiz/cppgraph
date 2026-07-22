@@ -1,32 +1,15 @@
 # TODO
 
-Only open items live here. This is the current state of open work (the project
-isn't versioned yet, so it's a snapshot, not a log). Design detail is in
-`DESIGN.md`; shipped-feature summary in `CHANGELOG.md`.
+The active list — open work we intend to do. Parked "someday / just in case"
+ideas live in the **Attic** at the bottom: kept for reference, not part of the
+active list. The project isn't versioned yet, so this is a snapshot, not a log;
+design detail is in `DESIGN.md`, shipped features in `CHANGELOG.md`.
 
-## Packaging / open-source
+## Release (0.1.0)
 
-- **`cppgraph index` wizard — step-back.** The wizard (`src/cppgraph/init.py`,
-  driving `src/cppgraph/pipeline.py`) finds the compdb, shows the breakdown, asks
-  the scope questions (subtree / tests / attribution, the last gated on a #504
-  binary), and — via disk detection — reuses or recomputes each artifact: an
-  existing `.scip` is introspected (`describe_scip`) and offered reuse-vs-recompute,
-  an existing `.graph.db` offers update / rebuild / keep. Still open: **step-back** —
-  let the user redo an earlier stage (re-filter, re-index) from a later prompt,
-  rather than only moving forward.
-- **Align `pipeline.incremental_update` with the dirty fingerprints.** `status`
-  (CLI + MCP) reads `meta.dirty_fingerprints` via `changed_files_since` so a graph
-  built from a dirty tree isn't falsely reported stale (and a revert *is* caught).
-  But `pipeline.incremental_update` computes its changed set with its own `git diff`
-  (`_git_diff_names`), unaware of the fingerprints — so an explicit update
-  re-indexes dirty-at-build files it needn't, and wouldn't notice a revert. Have it
-  call `changed_files_since` so the report and the actual update agree.
-- **Release blocker (0.1.0): re-measure the token numbers.** `README.md` and
-  `COMPARISON.md` quote token counts that predate `DEFAULT_LIMIT = 40`
-  (`mcp_server.py:56`). Re-run the measurement on the mongo graph (workstation)
-  and update both docs before tagging, so the published figures match what the
-  tool actually emits.
-- Contributing notes, CI (lint + pytest), publish.
+- **Re-measure the token numbers.** `README.md` and `COMPARISON.md` quote token
+  counts; re-run `scripts/measure_tokens.py --suite` on the mongo graph and update
+  both docs before tagging, so the published figures match what the tool emits.
 - **Cut the actual releases.** The plumbing is in place — `scripts/setup.sh`
   installs by tag (`--version`/`--nightly`/`--branch`), `current_version` derives
   from `git describe`, and `cppgraph status` reads `versions.json` for the
@@ -35,91 +18,67 @@ isn't versioned yet, so it's a snapshot, not a log). Design detail is in
   `releases` entry (`rebuild` level `none`/`store`/`reindex` — what the release
   invalidates in the index stack — plus one-line `notes`, `url`). The advice only
   becomes meaningful once at least one tag exists.
-- **Version for non-git installs.** `current_version` falls back to the static
-  `pyproject`/`__version__` when the source isn't a git checkout (tarball/PyPI).
+
+## Other (not release-gating)
+
+- **Align `pipeline.incremental_update` with the dirty fingerprints.** `status`
+  (CLI + MCP) reads `meta.dirty_fingerprints` via `changed_files_since` so a graph
+  built from a dirty tree isn't falsely reported stale (and a revert *is* caught).
+  But `pipeline.incremental_update` computes its changed set with its own `git diff`
+  (`_git_diff_names`), unaware of the fingerprints — so an explicit update
+  re-indexes dirty-at-build files it needn't, and wouldn't notice a revert. Have it
+  call `changed_files_since` so the report and the actual update agree.
+- **Resolve a `file:line` to a symbol in the query tools.** The tools take a symbol
+  or a plain name (unique resolves, ambiguous lists candidates) but not a `file:line`.
+  Add it so "who calls the function at `foo.cpp:120`?" works without a name — needs a
+  store lookup by definition location (`symbols.file_id`/`line`).
+- **Attributed references as first-class `uses` edges.** `impact_of`/`path` traverse
+  `calls`/`inherits` only, so a *type* has no reachable callers — "what breaks if I
+  change this struct?" isn't answerable transitively; the answer lives in
+  `find_references` (usage view), which isn't traversable. Promote the #504 attributed
+  references (`refs.enclosing_id`, function → used symbol) into real traversable edges
+  (a distinct `kind`) so `impact_of`/`path` cover type-change blast radius. Needs a
+  #504 graph; the data already exists but this adds ~one edge per attributed reference
+  (millions on mongo → larger store), so it's opt-in.
+- **Show the storage cost of the symbol-granularity upgrade in `status`.** `status`
+  already prints the file→symbol upgrade hint (index with a #504 binary / `enrich-refs`);
+  add the extra `.graph.db` cost so the user can weigh it. Measure the real delta first
+  (same graph with vs without `--attributed-refs`); don't hardcode a guess.
+- **Contributing notes, CI (lint + pytest), publish.** Not a 0.1.0 blocker.
+
+## Attic
+
+Kept for reference; most may never happen. Promote one back up if it becomes real.
+
+- **`cppgraph index` wizard — step-back.** The wizard (`src/cppgraph/init.py`) can
+  restart from the top (`--from-scratch`) but only moves forward within a run. Open:
+  let the user step back to redo an earlier stage (re-filter, re-index) from a later
+  prompt.
+- **Version for non-git installs.** `current_version` derives from `git describe`;
+  a non-git install (tarball/PyPI) falls back to the static `pyproject`/`__version__`.
   If we ever publish that way, wire a build-time version from the tag
-  (`hatch-vcs`/`setuptools-scm`) so those installs report the truth too.
-
-## Native scip-clang build container
-
-`docker/build-scip-clang/` compiles scip-clang from source (with the #504
-`enclosing_range` patch) for the host arch — built and timed on ARM64 already.
-Open:
-
-- **Decide the distribution stance.** Building #504 ourselves means owning the
-  build for every arch that needs it — a native binary per host, built once
-  locally. Fine as build-and-use-locally; revisit if it grows into a hosted
-  matrix.
-- **Wire the `download` path for ARM-Linux once upstream publishes it.** If
-  scip-clang ships a `scip-clang-aarch64-linux` asset (see the arm64-linux issue
-  draft in `docker/build-scip-clang/`), add the `Linux/aarch64` case in
-  `setup_cmd.py` `platform_sources()` so the *download* option appears on
-  ARM-Linux — the stock binary (no #504); build stays the #504 route.
-
-## scip-clang `enclosing_range` (PR #504)
-
-The field is consumed (exact caller attribution + the opt-in symbol-granularity
-usage view). Open:
-
-- **Report the crash upstream** (sourcegraph/scip-clang PR #504): the missing
-  same-file guard is a bug in the PR itself. Draft ready in
-  `docker/build-scip-clang/PR504-COMMENT.draft.md`; post it on the PR.
-- **Auto-enrich after a #504 re-index?** attribution (`--attributed-refs` / the
-  wizard's attribution question) is an explicit opt-in today; decide whether a #504
-  re-index should enrich by default.
-- **Attributed reference edges** as first-class graph edges (traversable
-  symbol→symbol, distinct `kind`) for `impact`/`path`, beyond the usage view.
-
-## Build speed (pure-Python wins, then maybe native)
-
-Measured on mongo (`/usr/bin/time` + `py-spy`, Graviton2 8 vCPU): `enrich-refs`
-runs in **~3.5 min wall, 99% CPU single-thread, 8.8 GB RSS**. The protobuf parse
-is **not** the cost — the `protobuf` runtime already uses the **upb (C) backend**,
-so parsing is compiled and near-invisible in the profile. The time is entirely
-**pure-Python object churn**, in two places:
-- `build_graph` construction (~51%): `add_reference` / `add_node` / `add_edge` /
-  `_occurrence_start_line` / `_attribute_containment` — millions of objects.
-- the `enrich_references` update loop (~39%): iterating 7.2M refs, two `dict.get`
-  + `list.append` per ref.
-- `executemany` (~0%): already solved by the composite index (28d3222).
-
-The algorithm is already right (the containment sweep is O((n+m)·log)); the cost
-is intrinsic to per-object allocation + refcounting + hashing in the interpreter.
-
-**Tier 1 — pure Python, no toolchain (partly done).**
-- *Done:* `__slots__` on `Node`/`Edge`/`Reference` (no per-instance `__dict__`)
-  and `gc.disable()` during the bulk build (no pointless cycle scans). Keeps the
-  pip-installable, no-compiler property. Re-measure the gain on the next build.
-- *Open:* columnar storage — replace object-per-element with **parallel typed
-  arrays** (`array`/`numpy`: `symbol_ids`, `file_ids`, `lines`) for refs/edges, so
-  there is no per-element object at all. Bigger win, moderate refactor (adapt the
-  consumers that iterate `Reference`/`Edge`). Optionally stream occurrence → row
-  straight to SQLite without materializing `graph.references` in full.
-- *Open:* parallelize by document (`multiprocessing`) — it is single-thread at
-  99% on 8 cores; documents are independent until the merge.
-
-**Tier 2 — native, only if Tier 1 is not enough.** A **native `build_graph`**
-(Rust via PyO3, or C++/Cython on the hot loops) attacking the construction +
-update loops — *not* a protobuf backend change (already C via upb). Explicit
-tension: it moves cppgraph from **pure Python (`pip install`, no toolchain)** to a
-compiled extension (per-platform build or distributed wheels) — the build
-dependency we deliberately avoid elsewhere — plus a second language and a binding
-to maintain. For a graph built **once** and queried many times, ~3.5 min
-amortized over its lifetime may simply be acceptable. Decide, don't drift into it.
-
-## Synthetic factory-registry edges (reconnect plan→exec across dispatch)
-
-`path` today only *hints* that a missing static chain may cross a runtime
-boundary; it can't rebuild the edge. In codebases like MongoDB the plan→exec
-flow hops through a factory table keyed by a string
-(`REGISTER_DOCUMENT_SOURCE("$match", DocumentSourceMatch::createFromBson)`) then
-through virtual dispatch, so there is no static edge from `buildPipeline` to
-`DocumentSourceMatch::doGetNext` even though they're linked at runtime.
-
-To close it: parse the registration macros to learn `"$match" → createFromBson`
-and inject a synthetic edge into the graph, so end-to-end paths resolve.
-
-Blocked on / costs: the registration macros are codebase-specific (each project
-has its own), so this needs per-codebase pattern support, and a synthetic edge
-departs from the graph's otherwise exact, heuristic-free model — decide how to
-mark such edges (e.g. a distinct `kind`) before adding them.
+  (`hatch-vcs`/`setuptools-scm`). Parked until we support a non-git install.
+- **Upstream: get #504 merged and a Linux ARM binary published.** Advocate
+  sourcegraph/scip-clang to include the `enclosing_range` patch (PR #504) and ship an
+  `aarch64-linux` asset. That removes the local compile step (the real install-cost
+  lever) and, once the asset exists, wire the `Linux/aarch64` `download` case in
+  `setup_cmd.py` `platform_sources()` (stock binary, no #504). Don't forget the
+  `download` wiring if they publish.
+- **Auto-enrich after a #504 re-index.** Attribution (`--attributed-refs`) is an
+  explicit opt-in; decide whether a re-index with a #504 binary should enrich by
+  default.
+- **Build speed (pure-Python wins, then maybe native).** The graph build is ~3.5 min
+  wall, single-thread, ~8.8 GB RSS on mongo — pure-Python object churn (`build_graph`
+  ~51%, `enrich_references` loop ~39%), not protobuf (already the upb C backend).
+  Tier 1 (no toolchain): `__slots__` + `gc.disable()` done; open — columnar typed
+  arrays instead of object-per-element, and multiprocessing by document. Tier 2:
+  native `build_graph` (Rust/PyO3 or Cython) on the hot loops, at the cost of the
+  pip-install/no-toolchain property. Lower priority than the scip-clang download/
+  compile path; a graph built once and queried many times may make ~3.5 min acceptable.
+- **Synthetic factory-registry edges (reconnect plan→exec across dispatch).** In mongo,
+  plan→exec hops through a string-keyed factory table
+  (`REGISTER_DOCUMENT_SOURCE("$match", …)`) then virtual dispatch, so there's no static
+  edge — `path` can only hint. Parsing the registration macros to inject synthetic
+  edges would close it, but the macros are codebase-specific and a synthetic edge
+  departs from the exact, heuristic-free model (against the tool's exactness goal);
+  it would need a distinct `kind` and an explicit decision before adding.

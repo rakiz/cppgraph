@@ -94,7 +94,9 @@ graph) and ask, in plain language:
 - *"Show the dependency graph of `Bar`."* → opens a diagram in your browser.
 
 Claude picks the right tool (`find`, `who_calls`, `impact_of`, `find_references`,
-`path`, `visualize`, `status`, …).
+`path`, `visualize`, `status`, …). On connect, cppgraph steers Claude to prefer
+these tools over grep for code in the indexed scope; the tools take a plain name
+directly (`SomeClass::someMethod`), so no exact SCIP string is needed.
 
 The lookup is forgiving, so a rough name still lands: `find` matches multiple
 words in any order and, if nothing hits exactly, falls back

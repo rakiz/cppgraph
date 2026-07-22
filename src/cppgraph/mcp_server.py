@@ -287,6 +287,32 @@ def find_symbols(
     return result
 
 
+def _resolve(store: GraphStore, symbol: str) -> tuple[str | None, dict[str, Any] | None]:
+    """The MCP wrapper over `GraphStore.resolve` (shared with the CLI): map a name
+    or exact SCIP string to one symbol for a tool to act on.
+
+    Returns `(exact_symbol, None)` when it resolves, else `(None, payload)` where
+    `payload` is the tool's JSON reply — an `ambiguous` candidate list when several
+    match (the caller re-picks; it never guesses), or an error when none do.
+    """
+    resolved, candidates = store.resolve(symbol)
+    if resolved is not None:
+        return resolved, None
+    if not candidates:
+        return None, {"error": _UNKNOWN.format(symbol=symbol)}
+    shown = candidates[:DEFAULT_LIMIT]
+    return None, {
+        "ambiguous": symbol,
+        "total": len(candidates),
+        "truncated": len(candidates) > len(shown),
+        "candidates": [_node_dict(n, full_symbols=True) for n in shown],
+        "hint": (
+            f"{len(candidates)} symbols match {symbol!r}; re-call with the exact "
+            "`symbol` from candidates (or use `find` to narrow a broad name)."
+        ),
+    }
+
+
 def callers(
     store: GraphStore,
     symbol: str,
@@ -298,8 +324,9 @@ def callers(
 
     Test callers (and destructor teardown sites) are dropped by default
     (`exclude_tests`); pass `full_symbols=True` for the raw SCIP strings."""
-    if not store.has_symbol(symbol):
-        return {"error": _UNKNOWN.format(symbol=symbol)}
+    symbol, _alt = _resolve(store, symbol)
+    if _alt is not None:
+        return _alt
     edges = store.callers_of(symbol)
     if exclude_tests:
         edges = _drop_test_edges(store, edges, on="src")
@@ -328,8 +355,9 @@ def callees(
     ubiquitous helpers (`operator==`, `tassert`/`uassert`, `makeStatus`,
     `source_location`, …) are dropped so the domain edges stand out; the count of
     hidden edges is reported as `trivial_hidden`."""
-    if not store.has_symbol(symbol):
-        return {"error": _UNKNOWN.format(symbol=symbol)}
+    symbol, _alt = _resolve(store, symbol)
+    if _alt is not None:
+        return _alt
     edges = store.callees_of(symbol)
     if exclude_tests:
         edges = _drop_test_edges(store, edges, on="dst")
@@ -359,8 +387,9 @@ def bases(
     Each base is returned with its own definition site (an inheritance edge has
     no meaningful line).
     """
-    if not store.has_symbol(symbol):
-        return {"error": _UNKNOWN.format(symbol=symbol)}
+    symbol, _alt = _resolve(store, symbol)
+    if _alt is not None:
+        return _alt
     nodes = store.bases_of(symbol)
     shown, truncated = _capped(nodes, limit)
     result = {
@@ -386,8 +415,9 @@ def subtypes(
 ) -> dict[str, Any]:
     """Direct subclasses of `symbol` (one `inherits` hop backward), each with
     its own definition site."""
-    if not store.has_symbol(symbol):
-        return {"error": _UNKNOWN.format(symbol=symbol)}
+    symbol, _alt = _resolve(store, symbol)
+    if _alt is not None:
+        return _alt
     nodes = store.subtypes_of(symbol)
     shown, truncated = _capped(nodes, limit)
     result = {
@@ -430,8 +460,9 @@ def references(
     `available` is False (not an error) when the graph was built with
     `--no-references`, so the caller knows to rebuild.
     """
-    if not store.has_symbol(symbol):
-        return {"error": _UNKNOWN.format(symbol=symbol)}
+    symbol, _alt = _resolve(store, symbol)
+    if _alt is not None:
+        return _alt
     refs = store.references_of(symbol)
     if not refs and store.meta().get("has_references") != "true":
         return {
@@ -485,10 +516,12 @@ def call_path(store: GraphStore, src: str, dst: str) -> dict[str, Any]:
 
     A bounded answer by construction (one shortest path), so it isn't capped.
     """
-    if not store.has_symbol(src):
-        return {"error": _UNKNOWN.format(symbol=src)}
-    if not store.has_symbol(dst):
-        return {"error": _UNKNOWN.format(symbol=dst)}
+    src, _alt = _resolve(store, src)
+    if _alt is not None:
+        return _alt
+    dst, _alt = _resolve(store, dst)
+    if _alt is not None:
+        return _alt
     chain = store.shortest_call_path(src, dst)
     if chain is None:
         return {
@@ -530,8 +563,9 @@ def impact(
     (with their definition site); capped like the other fan-out tools. Symbols
     defined in test files are dropped by default (`exclude_tests`).
     """
-    if not store.has_symbol(symbol):
-        return {"error": _UNKNOWN.format(symbol=symbol)}
+    symbol, _alt = _resolve(store, symbol)
+    if _alt is not None:
+        return _alt
 
     # A type has no call-graph callers: `kind="calls"` on one would return a bare
     # `total: 0` that reads as "nothing depends on this", which is misleading —
@@ -827,6 +861,55 @@ class _ReloadingStore:
         return self._store
 
 
+def _server_instructions(store: GraphStore | None) -> str:
+    """The `initialize` instructions string a client injects into system context.
+
+    Steers a connecting model to prefer the graph tools over text search *for code
+    within the indexed scope*, while explicitly keeping plain read/grep correct
+    everywhere else (and for paging a file already located). The real scope is
+    baked in from graph meta at startup, so the model needn't call `status` first.
+    """
+    if store is None:
+        return (
+            "cppgraph is connected but no indexed graph was found from the launch "
+            "directory. Its tools will report that until a project here is indexed; "
+            "until then, use your normal read/search tools."
+        )
+    m = store.meta()
+    bits: list[str] = []
+    if m.get("index_filter"):
+        bits.append(f"path filter `{m['index_filter']}`")
+    if m.get("index_tests") in ("included", "excluded"):
+        bits.append(f"tests {m['index_tests']}")
+    commit = (m.get("source_commit") or "")[:8]
+    if commit:
+        bits.append(f"built @ {commit}" + (" (dirty)" if m.get("source_dirty") == "true" else ""))
+    scope = ("Indexed: " + "; ".join(bits) + ".") if bits else "Run `status` for the indexed scope."
+    return (
+        "cppgraph serves a precomputed, compiler-exact graph of this repo's indexed "
+        f"C++ code. {scope}\n\n"
+        "For code WITHIN that scope, prefer these tools over text search "
+        "(grep/ripgrep/sed):\n"
+        "- locate a symbol by name -> `find` (symbol-aware: no hits in comments, "
+        "strings, or unrelated code; dedups overloads; returns signatures).\n"
+        "- read a symbol's definition -> `explain_symbol` (include_source=true) "
+        "rather than grepping or opening the file.\n"
+        "- relationships (callers, callees, call paths, impact, class hierarchy) -> "
+        "`who_calls`/`what_it_calls`/`path`/`impact_of`/`base_classes`/`subclasses`. "
+        "Text search cannot resolve overloads or virtual dispatch, or tell a "
+        "declaration from a use, so its answers here are noisy and often wrong.\n\n"
+        "Keep using your normal read/search tools for: files outside the indexed "
+        "scope, non-indexed languages, comments, string literals, generated/build "
+        "files — and for reading a known line range of a file you have already "
+        "located (cppgraph's edge is locating and relating, not paging).\n\n"
+        "The graph is a snapshot; if code may have changed since it was built, "
+        "`status` reports drift. The scope line above is fixed at connect time — if "
+        "the project is re-indexed mid-session, ask the user to reload this MCP "
+        "server (e.g. Claude Code: `/mcp`) to refresh it; query results themselves "
+        "already reflect the current graph on disk."
+    )
+
+
 def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
     """A FastMCP server for one project's graph (opened once, reused per call).
 
@@ -839,7 +922,7 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
     from mcp.server.fastmcp import FastMCP
 
     stores = _ReloadingStore(graph_path)
-    mcp = FastMCP("cppgraph")
+    mcp = FastMCP("cppgraph", instructions=_server_instructions(stores.get()))
 
     def _call(fn: Any, *args: Any, **kwargs: Any) -> dict[str, Any]:
         """Run a pure `(store, …) -> dict` query, or return the no-graph notice."""
@@ -850,8 +933,10 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
 
     @mcp.tool()
     def find(query: str, limit: int = DEFAULT_LIMIT, hide_trivial: bool = False) -> dict[str, Any]:
-        """Find C++ symbols by name. Start here: other tools need the exact SCIP
-        symbol string this returns, not a human name. A multi-word query is an
+        """Use this instead of grep/ripgrep to locate a code symbol by name.
+        Find C++ symbols by name. The other tools also accept a plain name (a
+        unique one resolves automatically), but `find` is how you disambiguate
+        when several symbols share a name and inspect signatures/overloads. A multi-word query is an
         order-free AND (every word must appear); overloads sharing a qualified
         name group under one result, each with a source-derived `signature` so
         the arms are distinguishable. If nothing matches exactly, `find` relaxes
@@ -870,8 +955,9 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         full_symbols: bool = False,
         exclude_tests: bool = True,
     ) -> dict[str, Any]:
-        """Direct callers of a symbol (one call hop). `symbol` is an exact SCIP
-        string from `find`. Each caller is returned by human `name` + `file:line`
+        """Direct callers of a symbol (one call hop). `symbol` is a name or an
+        exact SCIP string — a unique name resolves automatically, an ambiguous one
+        returns candidates. Each caller is returned by human `name` + `file:line`
         (compact); set `full_symbols=True` for the raw SCIP strings. Test callers
         are dropped by default — pass `exclude_tests=False` to include them.
         `limit` caps the list (default 40): lower it to spend fewer tokens when a
@@ -888,8 +974,9 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         exclude_tests: bool = True,
         hide_trivial: bool = False,
     ) -> dict[str, Any]:
-        """Direct callees of a symbol (one call hop). `symbol` is an exact SCIP
-        string from `find`. Compact `name` + `file:line` by default
+        """Direct callees of a symbol (one call hop). `symbol` is a name or an
+        exact SCIP string — a unique name resolves automatically, an ambiguous one
+        returns candidates. Compact `name` + `file:line` by default
         (`full_symbols=True` for raw SCIP); callees in test files dropped unless
         `exclude_tests=False`. Set `hide_trivial=True` to drop ubiquitous helpers
         (operators, tassert/uassert, makeStatus, source_location, …) so the
@@ -915,9 +1002,10 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
     def base_classes(
         symbol: str, limit: int = DEFAULT_LIMIT, full_symbols: bool = False
     ) -> dict[str, Any]:
-        """Direct base classes a type inherits from (`symbol` is an exact SCIP
-        type string from `find`, ending in `#`). Compact `name` + `file:line` by
-        default; `full_symbols=True` for raw SCIP strings. `limit` caps the list.
+        """Direct base classes a type inherits from (`symbol` is a name or an exact
+        SCIP type string, ending in `#`; a unique name resolves automatically).
+        Compact `name` + `file:line` by default; `full_symbols=True` for raw SCIP
+        strings. `limit` caps the list.
         An empty result carries a `note` (the type may be a root, or a holder
         with no base) rather than a bare `0`."""
         return _call(bases, symbol, limit=limit, full_symbols=full_symbols)
@@ -962,8 +1050,9 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
 
     @mcp.tool()
     def path(src: str, dst: str) -> dict[str, Any]:
-        """Shortest chain of `calls` edges from `src` to `dst` (exact SCIP
-        strings), as an ordered node list with `hops`. Returns `found=false` with
+        """Shortest chain of `calls` edges from `src` to `dst` (names or exact
+        SCIP strings; a unique name resolves automatically), as an ordered node
+        list with `hops`. Returns `found=false` with
         a `hint` when there's no *static* path — which may mean the flow crosses
         runtime dispatch (a virtual call / a registered factory), not that the two
         are unrelated."""
@@ -1005,7 +1094,8 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         exclude_tests: bool = True,
         hide_trivial: bool = False,
     ) -> dict[str, Any]:
-        """Definition site + caller/callee summary for `symbol`. Returns
+        """Use this instead of grep/sed/opening the file to read a symbol's
+        definition. Definition site + caller/callee summary for `symbol`. Returns
         `file:line` coordinates by default; set `include_source=True` to also get
         the definition's source snippet **inline** (cppgraph reads it for you — no
         separate file read needed), `context` lines around the definition. `limit`

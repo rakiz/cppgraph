@@ -298,7 +298,13 @@ designing the builder so this isn't a later rewrite:
   take — and the LLM never has to guess or repeat — a filesystem path. Tools:
   `find`, `who_calls`, `what_it_calls`, `base_classes`, `subclasses`,
   `find_references`, `path`, `impact_of` (`kind` = calls|inherits),
-  `explain_symbol`, `status`. The intended loop: `status` tells the LLM whether the graph is
+  `explain_symbol`, `status`, `visualize`. Each symbol-taking tool accepts a plain
+  name as well as an exact SCIP string, through the shared `GraphStore.resolve`
+  (also behind the CLI): a unique name resolves, `Class::method` maps to
+  `Class#method`, an ambiguous name returns candidates, and no symbol is guessed.
+  On connect, the `initialize` `instructions` steer the model to these tools for
+  in-scope code and to plain read/grep elsewhere, carrying the graph's scope and a
+  `status` freshness pointer. The intended loop: `status` tells the LLM whether the graph is
   current (else an incremental update); then `impact_of`/`who_calls`/`path`/
   `explain_symbol` answer "what does this change affect?" with compiler-exact
   edges — no grep guessing, no loading files into context.

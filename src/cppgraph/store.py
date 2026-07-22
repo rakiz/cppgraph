@@ -737,6 +737,40 @@ class GraphStore:
         ).fetchall()
         return [Node(symbol=r[0], display_name=r[1] or "", file=r[2], line=r[3]) for r in rows]
 
+    def resolve(self, query: str) -> tuple[str | None, list[Node]]:
+        """Resolve a caller-supplied `query` to one exact symbol — the shared
+        name->symbol step behind both the CLI and the MCP tools (so they stay
+        equivalent).
+
+        An exact symbol string is returned as-is. Otherwise `query` is a name: a
+        plain substring match, then — if that misses — `Class::method` normalized
+        to SCIP's `Class#method`, then a case/separator-insensitive fuzzy match.
+        The three outcomes are encoded in the return:
+
+        - `(symbol, [])`     — exact hit, or a name matching exactly one symbol;
+        - `(None, [n1, n2])` — ambiguous: the distinct candidate nodes to pick from;
+        - `(None, [])`       — no match.
+
+        It never picks one of several candidates: a wrong guess would be a
+        confidently-wrong answer, the failure mode cppgraph exists to avoid.
+        """
+        if self.has_symbol(query):
+            return query, []
+        matches = self.find(query)
+        if not matches and "::" in query:
+            matches = self.find(query.replace("::", "#"))
+        if not matches:
+            matches = self.find(query, fuzzy=True)
+        distinct: list[Node] = []
+        seen: set[str] = set()
+        for n in matches:
+            if n.symbol not in seen:
+                seen.add(n.symbol)
+                distinct.append(n)
+        if len(distinct) == 1:
+            return distinct[0].symbol, []
+        return None, distinct
+
     def callers_of(self, symbol: str) -> list[Edge]:
         dst_id = self._symbol_id(symbol)
         if dst_id is None:

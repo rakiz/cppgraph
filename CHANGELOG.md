@@ -47,6 +47,19 @@ token-lean output.
 ### MCP server
 - `cppgraph-mcp` exposes the full query surface as token-budgeted tools; one
   global registration serves every indexed project via auto-discovery.
+- **Agent guidance on connect**: the `initialize` response carries an
+  `instructions` block that points a connected model at the graph tools for code
+  in the indexed scope — with the scope and a `status` freshness pointer baked in
+  — and at its normal read/grep everywhere else (out-of-scope files, comments,
+  string literals, non-indexed languages, and paging a file it has already
+  located). `find` and `explain_symbol` lead their descriptions with the same
+  text-search contrast.
+- **Names, not just SCIP strings**: every symbol-taking tool (`who_calls`,
+  `what_it_calls`, `impact_of`, `explain_symbol`, `path`, `base_classes`,
+  `subclasses`, `find_references`) accepts a plain name through the shared
+  `GraphStore.resolve` (also behind the CLI) — a unique name resolves, an
+  ambiguous one returns candidates, `Class::method` maps to `Class#method`, and
+  no symbol is ever guessed.
 - **Token-lean by default**: readable `name` + `file:line` instead of raw SCIP
   strings, test noise dropped by default, and source snippets returned inline on
   request (no separate file read).

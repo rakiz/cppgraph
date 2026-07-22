@@ -678,3 +678,34 @@ def test_find_overload_signature_from_source(tmp_path: Path) -> None:
     sigs = {s["signature"] for s in entry["signatures"]}
     assert "(const Document& doc)" in sigs
     assert "(const BSONObj& obj, bool strict)" in sigs
+
+
+def test_resolve_unique_name(store: GraphStore) -> None:
+    """A relational tool accepts a bare name that resolves to exactly one symbol,
+    so no separate `find` round-trip is needed."""
+    by_name = mcp_server.callers(store, "makeResumeToken")
+    by_symbol = mcp_server.callers(store, FOO)
+    assert by_name["symbol"] == FOO == by_symbol["symbol"]
+    assert by_name["total"] == by_symbol["total"] == 1
+
+
+def test_resolve_normalizes_colons(store: GraphStore) -> None:
+    """`Class::method` (C++ syntax) is normalized to SCIP's `Class#method`."""
+    r = mcp_server.callers(store, "Foo::makeResumeToken")
+    assert r["symbol"] == FOO
+    assert r["total"] == 1
+
+
+def test_resolve_ambiguous_returns_candidates_not_a_guess(store: GraphStore) -> None:
+    """An ambiguous name returns the candidate list instead of guessing a symbol
+    (a wrong guess would be a confidently-wrong answer)."""
+    r = mcp_server.callers(store, "Foo")  # substring of FOO, CALLER and MID
+    assert r.get("ambiguous") == "Foo"
+    assert r["total"] == 3
+    assert {c["symbol"] for c in r["candidates"]} == {FOO, CALLER, MID}
+    assert "callers" not in r  # it did not proceed on a guessed symbol
+
+
+def test_resolve_unknown_name_errors(store: GraphStore) -> None:
+    r = mcp_server.callers(store, "does_not_exist")
+    assert "error" in r

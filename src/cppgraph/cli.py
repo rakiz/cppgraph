@@ -140,33 +140,31 @@ def _resolve_symbol(
     *,
     what: str = "symbol",
 ) -> str:
-    """Accept a plain name, not just the exact SCIP symbol string. If `query` is
-    already an exact symbol, use it; otherwise resolve via `find` — one match is
-    used directly (noted on a TTY), several are listed so the caller can pick the
-    exact one, none is an error. Lets `callers foo` work like `find` + `callers`."""
-    if store.has_symbol(query):
-        return query
-    matches = store.find(query)
-    if not matches:
+    """Accept a plain name, not just the exact SCIP symbol string, via the shared
+    `GraphStore.resolve` (same behaviour as the MCP tools). One match is used
+    directly (noted on a TTY), several are listed so the caller can pick the exact
+    one, none is an error. Lets `callers foo` work like `find` + `callers`."""
+    resolved, candidates = store.resolve(query)
+    if resolved is not None:
+        if resolved != query and sys.stderr.isatty():
+            print(f"[cppgraph] resolved {query!r} -> {resolved}", file=sys.stderr)
+        return resolved
+    if not candidates:
         parser.error(f"unknown {what}: {query} (use `cppgraph find` to look it up)")
-    if len(matches) == 1:
-        sym = matches[0].symbol
-        if sys.stderr.isatty():
-            print(f"[cppgraph] resolved {query!r} -> {sym}", file=sys.stderr)
-        return sym
     print(
-        f"[cppgraph] {query!r} is ambiguous ({len(matches)} matches) — pass the exact SCIP symbol:",
+        f"[cppgraph] {query!r} is ambiguous ({len(candidates)} matches) — "
+        "pass the exact SCIP symbol:",
         file=sys.stderr,
     )
-    for node in matches[:10]:
+    for node in candidates[:10]:
         loc = (
             f"{node.file}:{node.line + 1}"
             if node.file is not None and node.line is not None
             else "?"
         )
         print(f"    {node.symbol}  ({node.display_name or '?'} @ {loc})", file=sys.stderr)
-    if len(matches) > 10:
-        print(f"    ... and {len(matches) - 10} more", file=sys.stderr)
+    if len(candidates) > 10:
+        print(f"    ... and {len(candidates) - 10} more", file=sys.stderr)
     parser.error(f"ambiguous {what}: {query}")
 
 

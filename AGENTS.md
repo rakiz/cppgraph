@@ -59,8 +59,10 @@ when you want to measure at scale; keep such paths out of the shipped code.)
   Query commands (`find`, `callers`, `callees`, `path`, `impact`, `status`, …)
   **auto-discover the graph** from the cwd's `.cppgraph/` — run from inside the
   indexed project and `--graph` is optional — and **accept a plain name** (not
-  only the exact SCIP string), resolving it via `find`; an ambiguous name lists
-  candidates. Same discovery walk as the MCP server (`store.discover_graph`).
+  only the exact SCIP string) via the shared `GraphStore.resolve` (a unique name
+  resolves, `Class::method` maps to `Class#method`, an ambiguous name lists
+  candidates, none is guessed). The MCP tools resolve names through the same
+  `GraphStore.resolve`; same graph discovery too (`store.discover_graph`).
 - **Keep the CLI and MCP surfaces equivalent.** A query behaviour goes on *both*,
   driven by the same pure functions (`cppgraph.filters`,
   `cppgraph.cli.build_export_json`) — never fork the logic into one surface only.
@@ -148,6 +150,13 @@ flags) through `!` — it gets EOF and stops. (A human at a real terminal *can* 
 `scripts/index.sh` with no flags for the interactive wizard; that's for them, not
 you.) When the graph is stale enough to matter — read `cppgraph status` (or the MCP
 `status` tool: commits behind, changed files) — tell the user, and re-run step 3.
+
+After a re-index **inside an open session**, the MCP server's query results are
+already current (the store reloads when the `.graph.db` changes on disk), but its
+`initialize` `instructions` — including the baked scope line — are fixed at connect
+time. If the *scope* changed (a different subtree/tests), tell the user to reload
+the server (Claude Code: `/mcp` → reconnect) or start a new session so the
+instructions regenerate.
 
 ### Fallback: no compile_commands.json (only when `--plan-json` reports none)
 
