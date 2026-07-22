@@ -7,9 +7,6 @@ design detail is in `DESIGN.md`, shipped features in `CHANGELOG.md`.
 
 ## Release (0.1.0)
 
-- **Re-measure the token numbers.** `README.md` and `COMPARISON.md` quote token
-  counts; re-run `scripts/measure_tokens.py --suite` on the mongo graph and update
-  both docs before tagging, so the published figures match what the tool emits.
 - **Cut the actual releases.** The plumbing is in place — `scripts/setup.sh`
   installs by tag (`--version`/`--nightly`/`--branch`), `current_version` derives
   from `git describe`, and `cppgraph status` reads `versions.json` for the
