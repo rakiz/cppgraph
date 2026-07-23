@@ -51,6 +51,14 @@ design detail is in `DESIGN.md`, shipped features in `CHANGELOG.md`.
   a short write-up / Show HN. Refer to it with a descriptor everywhere it's linked
   ("cppgraph — compiler-exact C++ code-intelligence MCP server"), never bare
   "cppgraph". Gated on making the repo publicly visible / cutting 0.1.0.
+- **Ship a `SKILL.md` (agent steering + distribution).** A short Claude Code skill
+  that steers the agent to the cppgraph tools (`who_calls`, `impact_of`,
+  `find_references`, …) over grep for in-scope C++, plus the install pointer. Two
+  payoffs: it activates *before* an MCP connection (complementing the MCP
+  `instructions` field, which only steers on connect) and it's a distribution
+  artifact — third-party skill collections (e.g. MassGen bundles a Serena skill)
+  are an inbound-link/adoption channel that feeds the discoverability item. Keep it
+  short; the value is reach and pre-connect activation, not new capability.
 
 ## Attic
 
