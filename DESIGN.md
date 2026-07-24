@@ -37,6 +37,41 @@ actually carries (file vs symbol-granularity usage) is surfaced by
 `has_attributed_refs` / the usage view. See `updates.py` and
 `docker/build-scip-clang/`.
 
+### Why SCIP is the right foundation — and where its edge is
+
+SCIP is a lossy serialization of clang's AST: a deliberately minimal,
+cross-language format (Go, TS, Rust, Ruby, C++…). That loss is real but lands
+almost entirely on data *peripheral* to cppgraph's mission (reliable
+call/dependency facts for an LLM). Everything the mission needs is present and
+exact — `calls`/`inherits`/`implements`/`uses` edges, definition locations,
+references, and (with #504) exact enclosing-range attribution. The gaps we found
+auditing the schema are all off to the side: **visibility** (public/protected/
+private — no SCIP field at all; the format models privacy as *local symbols*, a
+name-scope notion that doesn't map C++'s compile-time access rule), **`kind`**
+(emitted `UnspecifiedKind`, but derivable from the descriptor suffix, which we
+already do), and doc/signature/read-write-access (empty or unverified,
+nice-to-have). None touch the core graph.
+
+The key point for build-vs-buy: **because we already patch scip-clang (#504),
+the SCIP *format*'s limits are not hard limits.** scip-clang is itself a clang
+LibTooling program — anything clang knows, a patched build can emit — and our
+`.proto` is ours, so an extra field degrades gracefully on a stock binary
+exactly as #504's enclosing ranges do. So the alternative to SCIP is never
+"tree-sitter/ctags" (syntactic, not compiler-exact — breaks the founding
+premise) nor "abandon scip-clang for libclang" (that *is* re-implementing
+scip-clang); it is "patch scip-clang further". The visibility gap — the worst
+case, a format gap rather than an emission gap — would move from *impossible* to
+*a field to add in our fork*, at the cost of divergence from upstream SCIP.
+
+That frames a standing decision, not a settled one: stay **schema-compatible
+with upstream SCIP** (limited to their fields, advocate additions) versus treat
+**our proto as our own** (unbounded up to what clang knows, at the cost of
+maintaining a producer+schema fork). We already have one foot in the second camp
+with #504. The line where SCIP would stop being enough is a mission pivot toward
+rich semantic analysis (visibility-aware API surface, everything at type
+granularity, CFG-based complexity) — and even then the move is "patch scip-clang
+further", not "replace it".
+
 ## Graph model
 
 Nodes = symbols, identified by SCIP symbol string (stable across TUs).
@@ -362,6 +397,40 @@ designing the builder so this isn't a later rewrite:
     over it. Errors (unknown symbol) come back as an `{"error": …}` dict
     pointing at `find`, not an exception.
 - Export: optional graphify-compatible `graph.json` purely for visualization.
+
+### Tools return facts, not judgments
+
+Every tool returns a fact verifiable in the graph, never a verdict. `fan_in=42`
+is a fact the LLM can trust and reason from directly; `is_dead=true` is a
+judgment the LLM has to re-verify — vtable dispatch, exported API, template
+instantiation elsewhere, entry points all break it — and that re-verification
+costs the very tokens the tool exists to save. An unreliable answer is worse
+than no tool: it turns one call into ten `who_calls` checks.
+
+So the rule holds for names and outputs alike: state the *measured fact*, not
+the *conclusion the reader might draw from it*. `line_span` (an exact body
+extent), not `most_complex` (a proxy the reader may disagree with);
+`no_incoming_calls` (a graph fact), not `dead_code` (a claim about the world).
+The LLM draws the conclusion; the tool supplies the ground truth. This is what
+makes a cppgraph answer cheaper than the manual investigation it replaces —
+and it applies to every future tool, not just the ones shipped today.
+
+**Corollary — an approximation must declare its direction, and never license an
+omission.** "Fact, not judgment" is one axis; reachability adds a second. A
+static call graph is an *under*-approximation of runtime reachability — it
+misses virtual dispatch, function pointers, factories (which is why `path`
+already hints when a flow may cross runtime dispatch). So a reachability result
+is exact about what it *includes* and incomplete about the *total*, and that
+incompleteness is safe in one direction and dangerous in the other. A tool whose
+error over-reports (a dead-code *candidate* list — some listed symbols are
+actually live) is safe: the reader verifies each addition. A tool whose error
+under-reports is only safe when framed as a lower bound ("at least these are
+reachable" — attack surface), never as a set the reader may act on by *removing*
+the rest. Concretely: a static graph can say "these tests reach your change"
+(a subset worth running), never "you may skip the others" (the skipped test may
+reach the change through a virtual call the graph can't see). When a tool returns
+an approximation it states its direction (lower/upper bound); it is never worded
+so that an omission reads as a guarantee of absence.
 
 ### Project root is a query-time parameter, never stored
 
