@@ -18,6 +18,31 @@ design detail is in `DESIGN.md`, shipped features in `CHANGELOG.md`.
 
 ## Other (not release-gating)
 
+- **BUG: declaration sites counted as callers, then mis-attributed to an arbitrary
+  neighbor.** Found in real use: `who_calls(extractShardKeyFromDoc)` returned
+  `getKeyPatternFields` (`shard_key_pattern.h:195`) as a caller — but `.h:195` is
+  `extractShardKeyFromDoc`'s own *declaration*, and `getKeyPatternFields` is an unrelated
+  inline member 90+ lines up. Two compounding defects in `build_graph`: (a) a pure member
+  **declaration** (no body) isn't marked `DEFINITION`/`FORWARD_DEFINITION`, so it slips the
+  `call_sites` filter and is counted as a call *to that method*; (b) with no body interval
+  containing it, the `bisect` fallback attributes it to the nearest-preceding callable
+  definition — an arbitrary neighbor with a misleading name. Two costs, the second severe:
+  a phantom caller destroys trust (sent the user to `grep`), and it **corrupts the dead-code
+  signal** — `emplaceMissing…` showed "1 caller" with 0 real callers, the exact question
+  being asked. Fix: (1) exclude declaration occurrences from call sites (classify them as
+  `declaration`, not `calls`); (2) never attribute a site to a symbol whose interval doesn't
+  contain it — on a #504 graph fall back to the enclosing type/file, not `bisect`-nearest
+  (keep `bisect` only for genuinely interval-less stock graphs, as the documented
+  approximation it is); (3) expose an explicit `caller_count` (incl. `0`). **Blocks
+  `no_incoming_calls`** — that feature is untrustworthy until this is fixed.
+- **Full signature with default arguments in `explain_symbol`.** From real use: the crux of
+  an investigation was that `extractElementsBasedOnTemplate(…, bool useNullIfMissing = false)`
+  has a defaulted param the caller omits — invisible today. `explain_symbol` gives
+  callers/callees but not the signature, so the user had to read the `.h`. cppgraph already
+  derives a source-derived `signature` for `find`'s overload disambiguation; extend it to
+  carry default values and surface it in `explain_symbol` (needs `--root`, factual — read
+  from source). Note: this shows the default *exists*; knowing whether a given call *relies*
+  on it needs per-call arity — see the scip-clang section.
 - **Align `pipeline.incremental_update` with the dirty fingerprints.** `status`
   (CLI + MCP) reads `meta.dirty_fingerprints` via `changed_files_since` so a graph
   built from a dirty tree isn't falsely reported stale (and a revert *is* caught).
@@ -64,7 +89,9 @@ design detail is in `DESIGN.md`, shipped features in `CHANGELOG.md`.
   entry points all have no static caller yet are live — so the tool states the fact
   and the LLM judges. Cheap (`Counter` complement over `Edge.dst`). Pairs naturally
   with an `exclude` of known entry points (`setup`/`loop`/`main`) surfaced as a hint,
-  never a filter that hides.
+  never a filter that hides. **Gated on the declaration-attribution bug above** — a
+  phantom caller from a mis-attributed declaration site turns a real 0 into a false 1,
+  which is exactly the answer this tool must get right.
 - **`strongly_connected_components` — call-graph cycles.** The exact primitive behind
   "circular deps": SCC membership on the `calls` subgraph (Tarjan), not a "bad
   architecture" verdict — mutual recursion is often legitimate. Returns the components
@@ -189,7 +216,11 @@ design detail is in `DESIGN.md`, shipped features in `CHANGELOG.md`.
   to read code I reach for `Read`; a word, `grep`") — so the skill must target the
   *reflex* tasks, not only graph questions: use `outline` instead of `Read` for a
   file's/class's structure, a scoped `find` instead of `grep`, `explain_symbol` instead
-  of opening the header.
+  of opening the header. Correct one specific misconception seen in real use: agents
+  think `find_references`/`who_calls` need a two-step "resolve the SCIP symbol, then
+  query" and fall back to `grep` for a one-shot `file:line` list — but these tools
+  **already take a unique human name in a single call** (shared `resolve`). Say so
+  explicitly so the one-call path is used.
 
 ## scip-clang (upstream)
 
@@ -230,6 +261,13 @@ items are confirmed.
 - **`documentation` / `signature_documentation` — empty today** (like `display_name`, 0%
   on the mongo index). If populated with doc comments / declared signatures, they would
   enrich `explain_symbol` (signature/doc without reading source).
+- **Effective call arity per call site — not modeled.** A call occurrence carries the
+  callee symbol and location but not how many arguments the call expression actually passes.
+  clang's AST knows it; SCIP drops it. Without it the graph can't tell "called with 2 args"
+  from "with 3" — so it can't detect a call that omits a defaulted parameter (the real
+  question behind the `explain_symbol` default-args item). Would need a scip-clang patch to
+  emit per-call arity (or a source re-parse of each call site, expensive). → would unblock
+  "which calls rely on a default?" analysis.
 
 - **Member visibility (public/protected/private) — a *format* gap, not an emission
   one.** clang knows it (AST `AccessSpecifier`), but SCIP has no field for it and models
