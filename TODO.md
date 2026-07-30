@@ -243,9 +243,17 @@ items are confirmed.
   #504 so a stock binary carries it and the local compile step goes away. → unblocks (stock,
   no patch) ref attribution, `line_span`, `global_init_references`.
 - **No `aarch64-linux` release asset.** scip-clang publishes no Linux ARM binary, forcing a
-  local compile there. Once #504 lands and an `aarch64-linux` asset exists, wire the
-  `Linux/aarch64` `download` case in `setup_cmd.py` `platform_sources()` (stock binary, no
-  #504). → unblocks a no-toolchain install on Linux ARM.
+  local compile there. Verified on v0.4.0 (Feb 2026): the release ships only
+  `x86_64-linux`, `dev-x86_64-linux`, `arm64-darwin` — their only ARM runner is macOS. The
+  `release.yml` `build-and-upload-artifacts` matrix has 3 jobs, all
+  `ubuntu-24.04-…-amd64` or `macos-14`; adding Linux ARM is one matrix entry pointing at an
+  arm64 runner (`ubuntu-24.04-arm` hosted, or a graph-team arm64 runner). The real cost is
+  the runner, not the YAML — the LLVM/Clang-from-source + LTO build needs a large ARM box.
+  The upload step already globs `./*-release-artifacts/*` (platform-agnostic), so a new
+  artifact is picked up with no further change. Filed upstream:
+  [sourcegraph/scip-clang#542](https://github.com/sourcegraph/scip-clang/issues/542). Once the
+  asset exists, wire the `Linux/aarch64` `download` case in `setup_cmd.py`
+  `platform_sources()` (stock binary, no #504). → unblocks a no-toolchain install on Linux ARM.
 - **`SymbolInformation.kind` — not emitted (comes back `UnspecifiedKind`).** The builder
   header notes it, which is why we derive node kind (callable/type/term) from the SCIP
   descriptor suffix. If scip-clang filled it, we could drop that derivation and make
