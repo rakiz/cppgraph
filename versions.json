@@ -9,8 +9,8 @@
   "releases": [
     {
       "version": "0.1.0",
-      "rebuild": "reindex",
-      "notes": "First release.",
+      "rebuild": "none",
+      "notes": "First release. No store/schema change — safe to update in place.",
       "url": "https://github.com/rakiz/cppgraph/releases/tag/v0.1.0"
     }
   ]
