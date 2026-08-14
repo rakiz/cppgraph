@@ -18,23 +18,15 @@ design detail is in `DESIGN.md`, shipped features in `CHANGELOG.md`.
 
 ## Other (not release-gating)
 
-- **BUG: declaration sites counted as callers, then mis-attributed to an arbitrary
-  neighbor.** Found in real use: `who_calls(extractShardKeyFromDoc)` returned
-  `getKeyPatternFields` (`shard_key_pattern.h:195`) as a caller — but `.h:195` is
-  `extractShardKeyFromDoc`'s own *declaration*, and `getKeyPatternFields` is an unrelated
-  inline member 90+ lines up. Two compounding defects in `build_graph`: (a) a pure member
-  **declaration** (no body) isn't marked `DEFINITION`/`FORWARD_DEFINITION`, so it slips the
-  `call_sites` filter and is counted as a call *to that method*; (b) with no body interval
-  containing it, the `bisect` fallback attributes it to the nearest-preceding callable
-  definition — an arbitrary neighbor with a misleading name. Two costs, the second severe:
-  a phantom caller destroys trust (sent the user to `grep`), and it **corrupts the dead-code
-  signal** — `emplaceMissing…` showed "1 caller" with 0 real callers, the exact question
-  being asked. Fix: (1) exclude declaration occurrences from call sites (classify them as
-  `declaration`, not `calls`); (2) never attribute a site to a symbol whose interval doesn't
-  contain it — on a #504 graph fall back to the enclosing type/file, not `bisect`-nearest
-  (keep `bisect` only for genuinely interval-less stock graphs, as the documented
-  approximation it is); (3) expose an explicit `caller_count` (incl. `0`). **Blocks
-  `no_incoming_calls`** — that feature is untrustworthy until this is fixed.
+- **Follow-up to the declaration-site phantom-caller bug (fixed for #504 graphs):**
+  `who_calls(extractShardKeyFromDoc)` used to return `getKeyPatternFields` as a caller
+  because a bodyless member declaration (role 0, no `DEFINITION`/`FORWARD_DEFINITION`)
+  fell back to `bisect`-nearest-preceding. `build_graph` now drops such a call site
+  instead of guessing, but only when the document has `callable_intervals` (#504) — a
+  stock graph still has no way to tell a declaration from a real call at the same shape
+  (documented, accepted limitation, see `DESIGN.md`). Remaining item: expose an explicit
+  `caller_count` (incl. `0`) for `no_incoming_calls`; that tool would also need to gate on
+  graph type, since "0 callers" is only trustworthy on a #504 graph.
 - **Full signature with default arguments in `explain_symbol`.** From real use: the crux of
   an investigation was that `extractElementsBasedOnTemplate(…, bool useNullIfMissing = false)`
   has a defaulted param the caller omits — invisible today. `explain_symbol` gives
@@ -43,13 +35,59 @@ design detail is in `DESIGN.md`, shipped features in `CHANGELOG.md`.
   carry default values and surface it in `explain_symbol` (needs `--root`, factual — read
   from source). Note: this shows the default *exists*; knowing whether a given call *relies*
   on it needs per-call arity — see the scip-clang section.
+- **BUG: the refresh path has no runnable entry point, and `status` prints a broken
+  command.** From real use: a user read "keeping it — pass `--from-scratch` to rebuild, or
+  `cppgraph update` to refresh changed files" (`init.py:419`), found no `cppgraph` binary
+  and no update script, and fell back to a full `--from-scratch` re-index. The verdict
+  layer is already coherent — `staleness_verdict` (`store.py:225`) emits exactly
+  `"update"` or `"rebuild"` on a measured threshold (`REBUILD_FILE_FRACTION` = 0.25),
+  it's tested (`test_store.py:703,720`) and printed by both surfaces — but nothing
+  *executes* that verdict, so four sources give four different answers to one question:
+  (a) `init.py:419` names `cppgraph update`, which exists but requires `--graph` **and** a
+  partial `.scip` the user cannot produce; (b) `cli.py:1125` prints
+  `scripts/index.sh <graph.db> <compdb>`, which is **wrong** — `index.sh` forwards to
+  `cppgraph index`, whose first positional is the *compdb* (`cli.py:313`), so the graph
+  store gets read as a compilation database; it is the signature of the old
+  `reindex.sh --update GRAPH_DB COMPDB`, deleted in `fcbb7f4`, never updated since;
+  (c) `mcp_server.py:792` says "run scripts/index.sh"; (d) `QUICKSTART.md:129` says re-run
+  the wizard — both interactive-only, and per `AGENTS.md` a `! …` run gets EOF. Fix, in
+  order: (1) the fingerprint alignment below — while `status` and `update` disagree on
+  what "changed" means, promoting `update` makes the disagreement user-visible, so that
+  item is a **prerequisite**, not a follow-up; (2) make `--graph`/`--scip` **optional** on
+  `update` — with no args it discovers the graph from the cwd exactly as every query
+  command already does (`_resolve_graph`), diffs, re-indexes the changed TUs and applies;
+  with args, today's low-level behaviour is untouched. Explicitly **not** a rename: an
+  `apply-update` split would churn `DESIGN.md:299,323`, `CHANGELOG.md:34` and
+  `test_cli.py:379` for zero gain, and optional `--graph` is already the convention;
+  (3) point all four sources at that one command, deriving the wording from the existing
+  verdict rather than restating advice per file; (4) `--plan-json`'s `reuse` question
+  offers only `reuse`/`recompute` (`init.py:256-270`) while the interactive wizard offers
+  update/rebuild/keep (`init.py:426-435`) — add `update` so the agent path and the human
+  path decide from the same options. Keep `--from-scratch` as the `index` flag, but let
+  `rebuild` be the user-facing word, aligned with the verdict. Progress reporting is a
+  separate item (below) — bundling it would gate a coherence fix on unmeasured UX work.
 - **Align `pipeline.incremental_update` with the dirty fingerprints.** `status`
   (CLI + MCP) reads `meta.dirty_fingerprints` via `changed_files_since` so a graph
   built from a dirty tree isn't falsely reported stale (and a revert *is* caught).
   But `pipeline.incremental_update` computes its changed set with its own `git diff`
   (`_git_diff_names`), unaware of the fingerprints — so an explicit update
   re-indexes dirty-at-build files it needn't, and wouldn't notice a revert. Have it
-  call `changed_files_since` so the report and the actual update agree.
+  call `changed_files_since` so the report and the actual update agree. **Prerequisite
+  for the entry-point item above** — one definition of "changed", or the tool
+  recommends an update whose scope contradicts the report that recommended it.
+- **Indexing progress: consume scip-clang's per-TU report instead of suppressing it.**
+  Same user, same session: a full re-index runs for an unknown duration with no signal.
+  `run_scip_clang` passes `--no-progress-report` (`pipeline.py:132`), inherited from the
+  deleted `reindex.sh` with no recorded rationale. Checked against the installed binary:
+  the flag *"suppress[es] progress information reported after a TU is indexed"* — so the
+  output is **one plain line per TU**, not an ANSI bar. The reason to suppress it is
+  therefore volume, not format: on the reported run that is ~5,955 lines into an agent's
+  context. Both needs are satisfiable at once because the denominator is already known —
+  `filter_compdb` returns `kept` (`pipeline.py:63`) — so drop the flag and *consume* the
+  stream, re-emitting it at a controlled cadence: a live `N/total` (+ elapsed, derived
+  ETA) on a TTY, one line every few percent or every N seconds under a pipe. That is a
+  real progress indicator for the human without flooding the LLM path, and it needs no
+  parsing beyond counting lines. Do it after the entry-point item, not with it.
 - **Resolve a `file:line` to a symbol in the query tools.** The tools take a symbol
   or a plain name (unique resolves, ambiguous lists candidates) but not a `file:line`.
   Add it so "who calls the function at `foo.cpp:120`?" works without a name — needs a
@@ -66,6 +104,27 @@ design detail is in `DESIGN.md`, shipped features in `CHANGELOG.md`.
   already prints the file→symbol upgrade hint (index with a #504 binary / `enrich-refs`);
   add the extra `.graph.db` cost so the user can weigh it. Measure the real delta first
   (same graph with vs without `--attributed-refs`); don't hardcode a guess.
+- **Surface `transport` (`cli`|`mcp`) in `status`.** From real use: a report claimed
+  `cppgraph_status` had confirmed freshness in the orchestrator session, but a Task
+  subagent's own claim of having called `status` couldn't be verified after the fact —
+  nothing in the output says which surface produced it. `status_report` (shared by
+  `cli.py` and `mcp_server.py`) already reports `graph_meta`/`drift`/the graph path; add
+  a literal `"transport": "cli"` set by `cli.py` and `"transport": "mcp"` set by the MCP
+  `status` tool, so a copy-pasted status block settles the question instead of resting on
+  an agent's say-so. One literal per surface, no new logic.
+- **Document the CLI fallback for MCP-less (sub)agents in `AGENTS.md`.** From real use:
+  a Task subagent without `cppgraph_*` tools in its context read `.cppgraph/*.graph.db`
+  directly with a raw SQLite client to check the indexed commit; another fell back to the
+  dev venv. Both are workable, but undocumented — and the first crosses into a schema
+  that isn't a public contract (`DESIGN.md` § `schema_version` exists precisely so this
+  format can change). `cli.py` already has full parity with the MCP tools (`status`,
+  `find`, `callers`, `callees`, `bases`, `subtypes`, `refs`, `path`, `impact`, `explain`,
+  `export`, `view` — same underlying functions, per `AGENTS.md`'s "keep the CLI and MCP
+  surfaces equivalent" rule), and auto-discovers `.cppgraph/` from the cwd like the MCP
+  tools do — the
+  gap is purely that nothing tells an agent without MCP to reach for it. Add a short
+  paragraph to `AGENTS.md`'s cppgraph section: if `cppgraph_*` isn't in your context, use
+  `cppgraph <cmd>` directly; never open `.graph.db` with sqlite.
 - **`hotspots` — global ranking by fan-in / fan-out / edge count.** Per-symbol
   tools (`who_calls`/`what_it_calls`) can't answer "top N most-called / most-calling
   symbols across the project" — today that needs manual SQL or N parallel calls.
@@ -221,6 +280,63 @@ design detail is in `DESIGN.md`, shipped features in `CHANGELOG.md`.
   query" and fall back to `grep` for a one-shot `file:line` list — but these tools
   **already take a unique human name in a single call** (shared `resolve`). Say so
   explicitly so the one-call path is used.
+- **Hook-based triggering: `SubagentStart`, `PreToolUse`, `SessionStart`.** The only
+  steering channel today is the MCP `instructions` string (`mcp_server.py:_server_instructions`),
+  delivered once at `initialize` — so it is weakly attended and, critically, **not inherited
+  by subagents**. That is a coverage hole by construction: the recommended navigation path
+  (an `Explore` agent) starts with no cppgraph steering and reaches for grep. Three hooks,
+  by leverage: (1) `SubagentStart` — replay the steering + indexed scope, closing the hole;
+  (2) `PreToolUse` on `Grep` / `Bash(rg|grep)` — when the pattern looks like a C++ identifier
+  and the target path is inside the indexed scope, return advisory `additionalContext`
+  naming the tool that answers exactly (`find`/`who_calls`). This fires at the moment of the
+  wrong decision, which a session-header instruction cannot. Keep it **advisory**, never
+  `deny`: grep over comments, string literals and non-indexed files stays correct;
+  (3) `SessionStart` — emit the scope + freshness line instead of waiting for the agent to
+  think of calling `status`. Complements the `SKILL.md` item above (skill descriptions are
+  permanently in context; hooks are positional).
+- **Package as a Claude Code plugin (`.claude-plugin/`).** Install today is a two-phase
+  README ritual where the agent interviews the user and `setup.sh` runs `claude mcp add`.
+  A plugin manifest + `marketplace.json` carries the MCP server declaration, the skill,
+  slash commands and the hooks above in one `/plugin marketplace add` — removing all the
+  wiring from the install. The compute (obtain scip-clang, index a project) stays a script:
+  a plugin cannot do it. Add a `/cppgraph-index` command so the no-graph path
+  (`_NO_GRAPH`, which today only reports "not indexed here") has an exit.
+- **Per-answer staleness instead of global drift.** Drift is reported only by `status`,
+  which an agent rarely calls unprompted — so answers about files edited since the index
+  look authoritative. Mark files touched in-session (a `PostToolUse` hook on `Edit`/`Write`,
+  or the existing dirty fingerprints) and annotate any result citing one. Precision of the
+  answer *as delivered*, not of the store. Pairs with single-TU incremental reindex on demand
+  (`pipeline.incremental_update` already has the machinery — see the alignment item above).
+- **Answer-accuracy benchmark, tier 1: oracle + static metrics.** `COMPARISON.md` §"Token
+  cost" *measures* tokens but only *argues* accuracy and completeness (noise %, `†` = does
+  not fit a context). Put all three axes on the same evidentiary footing. Needs ground truth,
+  and cppgraph cannot be its own oracle. Primary oracle: a hand-curated set (20–30 symbols)
+  covering the hard cases — overloads, `ptr->method()`, virtual dispatch, templates, macros,
+  cross-TU homonyms. Automatable safety net: an independent LLVM callgraph
+  (`-emit-llvm -O0` + `opt -passes=print-callgraph`), which is backend-derived and so shares
+  no code with scip-clang — valid for **direct calls only** (virtual calls become indirect
+  and vanish), hence a lower bound that catches recall *regressions* in CI without human
+  work. Serena/clangd is not an oracle but its disagreements cheaply generate candidates for
+  the curated set. **The experiment that unifies the three axes: give both arms the same
+  token budget (one real context, ~200k) and measure what they return** — precision
+  (grep's declarations/comments/homonyms become a number), recall under budget (grep's
+  truncation becomes measured rather than inferred), and tokens ingested to reach it. Turns
+  the current `†` into a result: at equal budget grep plateaus at X% recall, cppgraph at Y%,
+  for Z× fewer tokens. No LLM in this tier — extend `scripts/measure_tokens.py`, keep it
+  deterministic and CI-able. Assume the outcome will expose **our** gaps (unindexed TUs, the
+  aarch64 gap, what `--attributed-refs` changes); the table must not read 100/100.
+- **Answer-accuracy benchmark, tier 2: agentic, multi-model.** Depends on the oracle from
+  tier 1. Run a real agent on the same questions in two configurations (with / without
+  cppgraph) across models, and score the **final answer**, not the tool output — that is the
+  claim we actually make. It doubles as the triggering metric: an agent that has cppgraph
+  and greps anyway shows up in the results, replacing the current intuition that the tools
+  are sometimes skipped. Report as dated files (`benchmarks/results/YYYY-MM-DD-*.md`) with a
+  reproducible runner rather than growing `COMPARISON.md`.
+- **Multi-host steering adapters.** Generate one steering ruleset into the per-host formats
+  (`AGENTS.md`, `.cursor/rules/`, `.windsurf/rules/`, `.clinerules/`,
+  `.github/copilot-instructions.md`) from a single source, with a drift check in CI so the
+  copies cannot diverge. Only worth the maintenance if non-Claude hosts become a goal —
+  the pitch is Claude Code-only today. Lowest priority of this group.
 
 ## scip-clang (upstream)
 
