@@ -173,29 +173,25 @@ active list. Design detail is in `DESIGN.md`, shipped features in
   not to A — so only direct init-expression reads surface, correctly excluding lazily-run
   reads; (b) the tool gates on the data like ref attribution / `line_span` do — present on
   a #504 graph, unavailable on a stock one (report unavailable rather than a partial answer).
-- **Path-prefix filtering on the query tools (`exclude_paths`/`include_paths`).**
-  A generalization of `exclude_tests` (already a filter primitive driving both the MCP
-  tools and the CLI): filter results by `Node.file` prefix so a query returns project
-  code, not vendored deps. Real friction: filtering `.pio/libdeps/` noise (ArduinoJson,
-  Adafruit, PubSubClient) by hand — "who calls `convertValue` in *my* code?", ambiguity
-  candidates not polluted by library overloads next to the project's, and `hotspots`
-  not dominated by vendored symbols (`operator==` at 80 fan-in measures the deps, not
-  the project). Applies to everything tagged by file (`who_calls`, `what_it_calls`,
-  `find_references`, `impact_of`, `hotspots`, `find`); a `Node.file`-prefix predicate
-  in `cppgraph.filters`, shared with `boundary_violations`/`api_surface` (same "belongs
-  to a path prefix" notion) — build it once, feed both surfaces. The project-scope
-  default is not a convenience but an **adoption precondition**: real usage shows the
-  noise actively discourages the tools — `find "Block"` → 188 hits (mostly `spirv_cross`),
-  `build/vcpkg_installed/` swamping results — so an unscoped default pushes the agent
-  back to `Read`/`grep`. Two levels, like `exclude_tests` (a param *and* a default):
-  (1) per-query `exclude_paths`/`include_paths` — firm, do this; (2) a project-scope
-  default that excludes vendored/external code everywhere so "my code, not libs" is free
-  — open question on how cppgraph knows what's external: leaning toward deriving it
-  factually from `compile_commands.json`, whose `arguments` we don't read today
-  (`compdb.py` reads only `file`). The `-I` include paths there delineate vendored
+- **Project-scope default for path-prefix filtering.** Per-query `exclude_paths`/
+  `include_paths` are done (a `Node.file`-prefix predicate in `cppgraph.filters`,
+  `matches_path_prefix`/`filter_by_path`, wired into `who_calls`, `what_it_calls`,
+  `find_references`, `impact_of`, `hotspots`, `find` on both the CLI
+  (`--include-path`/`--exclude-path`) and MCP). Still open: a project-scope
+  *default* that excludes vendored/external code everywhere so "my code, not
+  libs" is free, without the caller having to pass `--exclude-path` by hand —
+  not a convenience but an **adoption precondition**: real usage shows the
+  noise actively discourages the tools — `find "Block"` → 188 hits (mostly
+  `spirv_cross`), `build/vcpkg_installed/` swamping results — so an unscoped
+  default pushes the agent back to `Read`/`grep`. Open question on how cppgraph
+  knows what's external: leaning toward deriving it factually from
+  `compile_commands.json`, whose `arguments` we don't read today (`compdb.py`
+  reads only `file`). The `-I` include paths there delineate vendored
   (`.pio/libdeps`, `vcpkg_installed`) from project sources factually — a stronger
   grounding than root-containment alone, no name heuristic (`.pio`/`third_party`/
-  `vendor`). Decide the default when we build it.
+  `vendor`). Decide the default when we build it. (Also still applies to
+  `boundary_violations`/`api_surface`, which don't exist yet — same "belongs to
+  a path prefix" notion, feed off the same primitive when they're built.)
 - **Contributing notes, CI (lint + pytest), publish.** Not a 0.1.0 blocker.
 - **Make the repo discoverable to LLMs (distribution).** LLMs asked to compare
   code-intelligence tools describe cppgraph from the *name* only — the page isn't

@@ -36,8 +36,10 @@ from typing import TYPE_CHECKING, Any
 from cppgraph.cli import SOURCE_EXTS, build_export_json, read_source_snippet
 from cppgraph.export import is_test_file
 from cppgraph.filters import drop_test_edges as _drop_test_edges
+from cppgraph.filters import filter_by_path as _filter_by_path
 from cppgraph.filters import is_noise_symbol as _is_noise_symbol
 from cppgraph.filters import is_trivial_callee as _is_trivial_callee
+from cppgraph.filters import matches_path_prefix as _matches_path_prefix
 from cppgraph.filters import qualified_name as _qualified_name
 from cppgraph.filters import short_label as _short_label
 from cppgraph.store import (
@@ -195,6 +197,8 @@ def find_symbols(
     limit: int = DEFAULT_LIMIT,
     hide_trivial: bool = False,
     root: str | None = None,
+    include_paths: list[str] | None = None,
+    exclude_paths: list[str] | None = None,
 ) -> dict[str, Any]:
     """Symbols whose SCIP string or display name contains `query`.
 
@@ -202,7 +206,9 @@ def find_symbols(
     so an LLM resolves a human name here first, then feeds the exact string on.
     With `hide_trivial=True`, compiler-generated / boilerplate hits (unnamed-type
     lambdas, operators, `*assert`/`makeStatus`, …) are dropped and counted as
-    `trivial_hidden`, so a broad query isn't buried in noise.
+    `trivial_hidden`, so a broad query isn't buried in noise. `include_paths`/
+    `exclude_paths` filter matches by their definition file's path prefix (e.g.
+    scope out vendored deps).
 
     On an exact-zero result, `find` relaxes once and flags the response
     `relaxed`: first case/separator-insensitively (the `change_stream` vs
@@ -234,6 +240,12 @@ def find_symbols(
         kept = [n for n in matches if not _is_noise_symbol(n.symbol)]
         trivial_hidden = len(matches) - len(kept)
         matches = kept
+    if include_paths or exclude_paths:
+        matches = [
+            n
+            for n in matches
+            if _matches_path_prefix(n.file, include=include_paths, exclude=exclude_paths)
+        ]
 
     # Group overloads: signatures sharing a qualified name (distinct SCIP hashes
     # for the same `Class::method`) collapse into one entry, so querying doesn't
@@ -284,6 +296,9 @@ def find_symbols(
         )
     if hide_trivial:
         result["trivial_hidden"] = trivial_hidden
+    if include_paths or exclude_paths:
+        result["include_paths"] = include_paths
+        result["exclude_paths"] = exclude_paths
     return result
 
 
@@ -319,23 +334,32 @@ def callers(
     limit: int = DEFAULT_LIMIT,
     full_symbols: bool = False,
     exclude_tests: bool = True,
+    include_paths: list[str] | None = None,
+    exclude_paths: list[str] | None = None,
 ) -> dict[str, Any]:
     """Direct callers of `symbol` (one `calls` hop). Error dict if unknown.
 
     Test callers (and destructor teardown sites) are dropped by default
-    (`exclude_tests`); pass `full_symbols=True` for the raw SCIP strings."""
+    (`exclude_tests`); `include_paths`/`exclude_paths` further filter callers by
+    their definition file's path prefix (e.g. scope out vendored deps); pass
+    `full_symbols=True` for the raw SCIP strings."""
     symbol, _alt = _resolve(store, symbol)
     if _alt is not None:
         return _alt
     edges = store.callers_of(symbol)
     if exclude_tests:
         edges = _drop_test_edges(store, edges, on="src")
+    edges = _filter_by_path(
+        store, edges, on="src", include_paths=include_paths, exclude_paths=exclude_paths
+    )
     shown, truncated = _capped(edges, limit)
     return {
         "symbol": symbol,
         "total": len(edges),
         "truncated": truncated,
         "excluded_tests": exclude_tests,
+        "include_paths": include_paths,
+        "exclude_paths": exclude_paths,
         "callers": [_edge_dict(e, e.src, store, full_symbols) for e in shown],
     }
 
@@ -347,20 +371,27 @@ def callees(
     full_symbols: bool = False,
     exclude_tests: bool = True,
     hide_trivial: bool = False,
+    include_paths: list[str] | None = None,
+    exclude_paths: list[str] | None = None,
 ) -> dict[str, Any]:
     """Direct callees of `symbol` (one `calls` hop). Error dict if unknown.
 
-    Callees defined in test files are dropped by default (`exclude_tests`); pass
-    `full_symbols=True` for the raw SCIP strings. With `hide_trivial=True`,
-    ubiquitous helpers (`operator==`, `tassert`/`uassert`, `makeStatus`,
-    `source_location`, …) are dropped so the domain edges stand out; the count of
-    hidden edges is reported as `trivial_hidden`."""
+    Callees defined in test files are dropped by default (`exclude_tests`);
+    `include_paths`/`exclude_paths` further filter callees by their definition
+    file's path prefix (e.g. scope out vendored deps); pass `full_symbols=True`
+    for the raw SCIP strings. With `hide_trivial=True`, ubiquitous helpers
+    (`operator==`, `tassert`/`uassert`, `makeStatus`, `source_location`, …) are
+    dropped so the domain edges stand out; the count of hidden edges is
+    reported as `trivial_hidden`."""
     symbol, _alt = _resolve(store, symbol)
     if _alt is not None:
         return _alt
     edges = store.callees_of(symbol)
     if exclude_tests:
         edges = _drop_test_edges(store, edges, on="dst")
+    edges = _filter_by_path(
+        store, edges, on="dst", include_paths=include_paths, exclude_paths=exclude_paths
+    )
     trivial_hidden = 0
     if hide_trivial:
         kept = [e for e in edges if not _is_trivial_callee(e.dst)]
@@ -372,6 +403,8 @@ def callees(
         "total": len(edges),
         "truncated": truncated,
         "excluded_tests": exclude_tests,
+        "include_paths": include_paths,
+        "exclude_paths": exclude_paths,
         "callees": [_edge_dict(e, e.dst, store, full_symbols) for e in shown],
     }
     if hide_trivial:
@@ -446,6 +479,8 @@ def references(
     context: int = 0,
     limit: int = DEFAULT_LIMIT,
     exclude_tests: bool = True,
+    include_paths: list[str] | None = None,
+    exclude_paths: list[str] | None = None,
 ) -> dict[str, Any]:
     """Exact use sites of `symbol` (the `--references` location index).
 
@@ -454,11 +489,13 @@ def references(
     When the graph was built with attributed references (`--attributed-refs`, a
     #504 binary), each use also carries `used_by`: the definition that uses it,
     so the answer names the *functions*, not just the locations. Test-file uses
-    are dropped by default (`exclude_tests`). Coordinates only by default; with
-    `include_source=True` *and* a `root`, sites are grouped by file and each file
-    carries one merged snippet (overlapping `± context` windows are collapsed).
-    `available` is False (not an error) when the graph was built with
-    `--no-references`, so the caller knows to rebuild.
+    are dropped by default (`exclude_tests`); `include_paths`/`exclude_paths`
+    further filter uses by their file's path prefix (e.g. scope out vendored
+    deps). Coordinates only by default; with `include_source=True` *and* a
+    `root`, sites are grouped by file and each file carries one merged snippet
+    (overlapping `± context` windows are collapsed). `available` is False (not
+    an error) when the graph was built with `--no-references`, so the caller
+    knows to rebuild.
     """
     symbol, _alt = _resolve(store, symbol)
     if _alt is not None:
@@ -472,6 +509,12 @@ def references(
         }
     if exclude_tests:
         refs = [r for r in refs if not is_test_file(r.file)]
+    if include_paths or exclude_paths:
+        refs = [
+            r
+            for r in refs
+            if _matches_path_prefix(r.file, include=include_paths, exclude=exclude_paths)
+        ]
     shown, truncated = _capped(refs, limit)
 
     with_src = include_source and root is not None
@@ -507,6 +550,8 @@ def references(
         "total": len(refs),
         "truncated": truncated,
         "excluded_tests": exclude_tests,
+        "include_paths": include_paths,
+        "exclude_paths": exclude_paths,
         "uses": items,
     }
 
@@ -554,6 +599,8 @@ def impact(
     kind: str = "calls",
     full_symbols: bool = False,
     exclude_tests: bool = True,
+    include_paths: list[str] | None = None,
+    exclude_paths: list[str] | None = None,
 ) -> dict[str, Any]:
     """Reverse blast-radius: everything that transitively reaches `symbol`.
 
@@ -561,7 +608,9 @@ def impact(
     function?"); `kind="inherits"` = all transitive subclasses of a base type.
     `depth` bounds the backward hops (None = unbounded). Results are symbols
     (with their definition site); capped like the other fan-out tools. Symbols
-    defined in test files are dropped by default (`exclude_tests`).
+    defined in test files are dropped by default (`exclude_tests`);
+    `include_paths`/`exclude_paths` further filter by definition-file path
+    prefix (e.g. scope out vendored deps).
     """
     symbol, _alt = _resolve(store, symbol)
     if _alt is not None:
@@ -596,6 +645,14 @@ def impact(
     nodes = [(sym, store.get_node(sym)) for sym in affected]
     if exclude_tests:
         nodes = [(sym, n) for sym, n in nodes if n is None or not is_test_file(n.file)]
+    if include_paths or exclude_paths:
+        nodes = [
+            (sym, n)
+            for sym, n in nodes
+            if _matches_path_prefix(
+                n.file if n is not None else None, include=include_paths, exclude=exclude_paths
+            )
+        ]
     shown, truncated = _capped(nodes, limit)
     out: list[dict[str, Any]] = [
         _node_dict(n, full_symbols)
@@ -610,6 +667,8 @@ def impact(
         "total": len(nodes),
         "truncated": truncated,
         "excluded_tests": exclude_tests,
+        "include_paths": include_paths,
+        "exclude_paths": exclude_paths,
         "reached_by": out,
     }
 
@@ -620,6 +679,8 @@ def hotspot_ranking(
     kind: str = "fan_in",
     exclude_tests: bool = False,
     full_symbols: bool = False,
+    include_paths: list[str] | None = None,
+    exclude_paths: list[str] | None = None,
 ) -> dict[str, Any]:
     """Global ranking of symbols by call-edge volume — "what's most-called /
     most-calling across the whole project?", the question `who_calls`/
@@ -629,11 +690,19 @@ def hotspot_ranking(
     `"fan_out"` by outgoing edges (most-calling); `"edges"` sums both per
     symbol. `exclude_tests` drops an edge if either endpoint symbol is itself
     defined in a test file (its own definition site, like `find_references`'
-    test filtering — not the call site).
+    test filtering — not the call site). `include_paths`/`exclude_paths`
+    further drop an edge unless both endpoints' definition files pass the path
+    prefix filter (same symmetric shape as `exclude_tests`).
     `limit` caps the list (default 40): lower it to spend fewer tokens, raise
     it when `truncated` is true — `total` always reports the full ranked count.
     """
-    ranked, total = store.hotspots(limit=limit, kind=kind, exclude_tests=exclude_tests)
+    ranked, total = store.hotspots(
+        limit=limit,
+        kind=kind,
+        exclude_tests=exclude_tests,
+        include_paths=include_paths,
+        exclude_paths=exclude_paths,
+    )
     truncated = total > len(ranked)
     items: list[dict[str, Any]] = []
     for symbol, count in ranked:
@@ -652,6 +721,8 @@ def hotspot_ranking(
         "total": total,
         "truncated": truncated,
         "excluded_tests": exclude_tests,
+        "include_paths": include_paths,
+        "exclude_paths": exclude_paths,
         "hotspots": items,
     }
 
@@ -974,7 +1045,13 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         return fn(s, *args, **kwargs)
 
     @mcp.tool()
-    def find(query: str, limit: int = DEFAULT_LIMIT, hide_trivial: bool = False) -> dict[str, Any]:
+    def find(
+        query: str,
+        limit: int = DEFAULT_LIMIT,
+        hide_trivial: bool = False,
+        include_paths: list[str] | None = None,
+        exclude_paths: list[str] | None = None,
+    ) -> dict[str, Any]:
         """Use this instead of grep/ripgrep to locate a code symbol by name.
         Find C++ symbols by name. The other tools also accept a plain name (a
         unique one resolves automatically), but `find` is how you disambiguate
@@ -986,9 +1063,19 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         then, for a `Class#method` guess, the bare leaf name) and flags the
         response `relaxed`. Set `hide_trivial=True` to drop compiler-generated /
         boilerplate hits (lambdas, operators, `*assert`, `makeStatus`, …) —
-        `trivial_hidden` reports how many were cut. `limit` caps the list
+        `trivial_hidden` reports how many were cut. `include_paths`/
+        `exclude_paths` filter matches by their definition file's path prefix
+        (e.g. scope out vendored deps). `limit` caps the list
         (default 40): lower it to spend fewer tokens, raise it when `truncated`."""
-        return _call(find_symbols, query, limit=limit, hide_trivial=hide_trivial, root=root)
+        return _call(
+            find_symbols,
+            query,
+            limit=limit,
+            hide_trivial=hide_trivial,
+            root=root,
+            include_paths=include_paths,
+            exclude_paths=exclude_paths,
+        )
 
     @mcp.tool()
     def who_calls(
@@ -996,16 +1083,26 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         limit: int = DEFAULT_LIMIT,
         full_symbols: bool = False,
         exclude_tests: bool = True,
+        include_paths: list[str] | None = None,
+        exclude_paths: list[str] | None = None,
     ) -> dict[str, Any]:
         """Direct callers of a symbol (one call hop). `symbol` is a name or an
         exact SCIP string — a unique name resolves automatically, an ambiguous one
         returns candidates. Each caller is returned by human `name` + `file:line`
         (compact); set `full_symbols=True` for the raw SCIP strings. Test callers
         are dropped by default — pass `exclude_tests=False` to include them.
+        `include_paths`/`exclude_paths` further filter callers by their
+        definition file's path prefix (e.g. scope out vendored deps).
         `limit` caps the list (default 40): lower it to spend fewer tokens when a
         few callers are enough, raise it when `truncated` is true."""
         return _call(
-            callers, symbol, limit=limit, full_symbols=full_symbols, exclude_tests=exclude_tests
+            callers,
+            symbol,
+            limit=limit,
+            full_symbols=full_symbols,
+            exclude_tests=exclude_tests,
+            include_paths=include_paths,
+            exclude_paths=exclude_paths,
         )
 
     @mcp.tool()
@@ -1015,6 +1112,8 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         full_symbols: bool = False,
         exclude_tests: bool = True,
         hide_trivial: bool = False,
+        include_paths: list[str] | None = None,
+        exclude_paths: list[str] | None = None,
     ) -> dict[str, Any]:
         """Direct callees of a symbol (one call hop). `symbol` is a name or an
         exact SCIP string — a unique name resolves automatically, an ambiguous one
@@ -1023,6 +1122,8 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         `exclude_tests=False`. Set `hide_trivial=True` to drop ubiquitous helpers
         (operators, tassert/uassert, makeStatus, source_location, …) so the
         domain edges stand out — `trivial_hidden` reports how many were cut.
+        `include_paths`/`exclude_paths` further filter callees by their
+        definition file's path prefix (e.g. scope out vendored deps).
         `limit` caps the list (default 40): lower it to spend fewer tokens when a
         few callees are enough, raise it when `truncated` is true.
 
@@ -1038,6 +1139,8 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
             full_symbols=full_symbols,
             exclude_tests=exclude_tests,
             hide_trivial=hide_trivial,
+            include_paths=include_paths,
+            exclude_paths=exclude_paths,
         )
 
     @mcp.tool()
@@ -1070,6 +1173,8 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         context: int = 0,
         limit: int = DEFAULT_LIMIT,
         exclude_tests: bool = True,
+        include_paths: list[str] | None = None,
+        exclude_paths: list[str] | None = None,
     ) -> dict[str, Any]:
         """Exact use sites of a symbol ("where is this type/symbol used?") — the
         dependency the call graph can't show (a struct has no callers). Returns
@@ -1077,7 +1182,9 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         **inline** (cppgraph reads it for you — no separate file read needed),
         grouped by file with overlapping windows merged (no duplicated lines).
         `context` sets the lines shown around each site. Test-file uses are
-        dropped by default — pass `exclude_tests=False` to include them. `limit`
+        dropped by default — pass `exclude_tests=False` to include them.
+        `include_paths`/`exclude_paths` further filter uses by their file's path
+        prefix (e.g. scope out vendored deps). `limit`
         caps the list. If the graph was built with `--no-references`, `available`
         is false (rebuild with references to enable this)."""
         return _call(
@@ -1088,6 +1195,8 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
             context=context,
             limit=limit,
             exclude_tests=exclude_tests,
+            include_paths=include_paths,
+            exclude_paths=exclude_paths,
         )
 
     @mcp.tool()
@@ -1108,13 +1217,17 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         kind: str = "calls",
         full_symbols: bool = False,
         exclude_tests: bool = True,
+        include_paths: list[str] | None = None,
+        exclude_paths: list[str] | None = None,
     ) -> dict[str, Any]:
         """Reverse blast-radius: everything that transitively reaches `symbol`.
         kind="calls" (default) = transitive callers ("what could break if I
         change this function?"); kind="inherits" = every transitive subclass of
         a base type. `depth` bounds the hops. Compact `name` + `file:line` by
         default (`full_symbols=True` for raw SCIP); symbols in test files dropped
-        unless `exclude_tests=False`. `limit` caps the list (default 40): lower it
+        unless `exclude_tests=False`. `include_paths`/`exclude_paths` further
+        filter by definition-file path prefix (e.g. scope out vendored deps).
+        `limit` caps the list (default 40): lower it
         to spend fewer tokens, raise it when `truncated`."""
         return _call(
             impact,
@@ -1124,6 +1237,8 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
             kind=kind,
             full_symbols=full_symbols,
             exclude_tests=exclude_tests,
+            include_paths=include_paths,
+            exclude_paths=exclude_paths,
         )
 
     @mcp.tool()
@@ -1132,6 +1247,8 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         kind: str = "fan_in",
         exclude_tests: bool = False,
         full_symbols: bool = False,
+        include_paths: list[str] | None = None,
+        exclude_paths: list[str] | None = None,
     ) -> dict[str, Any]:
         """Global ranking by call-edge volume — "top N most-called / most-calling
         symbols in the project", the question `who_calls`/`what_it_calls` can't
@@ -1139,7 +1256,9 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         (incoming `calls` edges); kind="fan_out" = most-calling (outgoing);
         kind="edges" = both summed. Compact `name` + `file:line` by default
         (`full_symbols=True` for raw SCIP); pass `exclude_tests=True` to drop
-        edges whose call site is in a test file. `limit` caps the list (default
+        edges whose call site is in a test file. `include_paths`/`exclude_paths`
+        further filter by definition-file path prefix (e.g. scope out vendored
+        deps). `limit` caps the list (default
         40): lower it to spend fewer tokens, raise it when `truncated`."""
         return _call(
             hotspot_ranking,
@@ -1147,6 +1266,8 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
             kind=kind,
             exclude_tests=exclude_tests,
             full_symbols=full_symbols,
+            include_paths=include_paths,
+            exclude_paths=exclude_paths,
         )
 
     @mcp.tool()

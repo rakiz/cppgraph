@@ -13,6 +13,15 @@ on-disk store also carries its own `schema_version` for forward-compatibility.
   On the CLI and as an MCP tool, both backed by the same `GraphStore.hotspots`.
   Bounded output (`limit` + a `total` count), `exclude_tests` supported like other
   query tools.
+- **`include_paths`/`exclude_paths`**: per-query `Node.file`-prefix filtering
+  (simple prefix match, no glob/regex) on `find`, `who_calls`, `what_it_calls`,
+  `find_references`, `impact_of`, and `hotspots` — on both the CLI
+  (`--include-path`/`--exclude-path`, repeatable) and the MCP tools, driven by
+  the shared `cppgraph.filters.matches_path_prefix`/`filter_by_path`. Scopes a
+  query to "my code, not vendored deps" (e.g. `--exclude-path vendor/`).
+  `hotspots` applies the filter in SQL (a `cpg_path_ok` function registered
+  alongside the existing `cpg_is_test_file`), keeping its whole-graph
+  aggregation off the Python side.
 
 ### Fixed
 

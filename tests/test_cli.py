@@ -164,6 +164,84 @@ def test_callers_limit_caps_and_reports_remainder(
     assert "and 1 more" in out
 
 
+def test_callers_exclude_path_drops_vendored_caller(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    graph = Graph()
+    graph.add_edge(
+        "calls",
+        "cxx . . $ mongo/Foo#projCaller(p1).",
+        "cxx . . $ mongo/Foo#target(t1).",
+        file="foo.cpp",
+        line=1,
+    )
+    graph.add_edge(
+        "calls",
+        "cxx . . $ mongo/Foo#vendorCaller(v1).",
+        "cxx . . $ mongo/Foo#target(t1).",
+        file="foo.cpp",
+        line=2,
+    )
+    graph.add_node("cxx . . $ mongo/Foo#projCaller(p1).").file = "src/myproject/foo.cpp"
+    graph.add_node("cxx . . $ mongo/Foo#vendorCaller(v1).").file = "vendor/somelib/foo.cpp"
+    path = tmp_path / "pf.db"
+    write_sqlite(graph, path)
+    exit_code = main(
+        [
+            "callers",
+            "--graph",
+            str(path),
+            "--exclude-path",
+            "vendor/",
+            "cxx . . $ mongo/Foo#target(t1).",
+        ]
+    )
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "1 caller(s)" in out
+    assert "projCaller" in out
+    assert "vendorCaller" not in out
+
+
+def test_callers_include_path_keeps_only_project_caller(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    graph = Graph()
+    graph.add_edge(
+        "calls",
+        "cxx . . $ mongo/Foo#projCaller(p1).",
+        "cxx . . $ mongo/Foo#target(t1).",
+        file="foo.cpp",
+        line=1,
+    )
+    graph.add_edge(
+        "calls",
+        "cxx . . $ mongo/Foo#vendorCaller(v1).",
+        "cxx . . $ mongo/Foo#target(t1).",
+        file="foo.cpp",
+        line=2,
+    )
+    graph.add_node("cxx . . $ mongo/Foo#projCaller(p1).").file = "src/myproject/foo.cpp"
+    graph.add_node("cxx . . $ mongo/Foo#vendorCaller(v1).").file = "vendor/somelib/foo.cpp"
+    path = tmp_path / "pf2.db"
+    write_sqlite(graph, path)
+    exit_code = main(
+        [
+            "callers",
+            "--graph",
+            str(path),
+            "--include-path",
+            "src/myproject/",
+            "cxx . . $ mongo/Foo#target(t1).",
+        ]
+    )
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "1 caller(s)" in out
+    assert "projCaller" in out
+    assert "vendorCaller" not in out
+
+
 def _callers(graph: Path, capsys: pytest.CaptureFixture[str], *extra: str) -> str:
     exit_code = main(["callers", "--graph", str(graph), *extra, "cxx . . $ mongo/Foo#hub(h1)."])
     out = capsys.readouterr().out
@@ -742,6 +820,27 @@ def test_hotspots_exclude_tests_drops_edges_touching_a_test_defined_symbol(
     assert "top 1 of 1 symbol(s)" in out
     lines = [line for line in out.splitlines() if line.startswith("  ")]
     assert lines[0].split()[0] == "1"  # only prod_caller's edge counted
+
+
+def test_hotspots_exclude_path_drops_edges_touching_a_vendored_symbol(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Path-prefix parity test, mirroring the exclude-tests test above: the same
+    SQL-side filtering shape (`cpg_path_ok`), symmetric on both endpoints."""
+    graph = Graph()
+    graph.add_edge("calls", "proj_caller", "target", file="src/myproject/foo.cpp", line=1)
+    graph.add_edge("calls", "vendor_caller", "target", file="src/myproject/foo.cpp", line=2)
+    graph.nodes["proj_caller"].file = "src/myproject/foo.cpp"
+    graph.nodes["vendor_caller"].file = "vendor/somelib/foo.cpp"
+    graph.nodes["target"].file = "src/myproject/foo.cpp"
+    path = tmp_path / "pf_hotspots.db"
+    write_sqlite(graph, path)
+    exit_code = main(["hotspots", "--graph", str(path), "--exclude-path", "vendor/"])
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "top 1 of 1 symbol(s)" in out
+    lines = [line for line in out.splitlines() if line.startswith("  ")]
+    assert lines[0].split()[0] == "1"  # only proj_caller's edge counted
 
 
 @pytest.fixture

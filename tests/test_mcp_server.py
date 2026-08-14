@@ -171,6 +171,32 @@ def test_callers_derives_label_without_display_name(tmp_path: Path) -> None:
     assert "symbol" not in item
 
 
+def test_callers_exclude_paths_drops_vendored_caller(tmp_path: Path) -> None:
+    prod = "cxx . . $ mongo/Foo#prodCaller(a4)."
+    vendored = "cxx . . $ mongo/Foo#vendorCaller(a5)."
+    graph = Graph()
+    graph.nodes[FOO] = Node(symbol=FOO, display_name="makeResumeToken", file="foo.cpp", line=234)
+    graph.nodes[prod] = Node(
+        symbol=prod, display_name="prodCaller", file="src/myproject/foo.cpp", line=9
+    )
+    graph.nodes[vendored] = Node(
+        symbol=vendored, display_name="vendorCaller", file="vendor/somelib/foo.cpp", line=3
+    )
+    graph.add_edge("calls", prod, FOO, file="foo.cpp", line=11)
+    graph.add_edge("calls", vendored, FOO, file="foo.cpp", line=5)
+    path = tmp_path / "t.db"
+    write_sqlite(graph, path)
+    st = GraphStore(path)
+
+    result = mcp_server.callers(st, FOO, exclude_paths=["vendor/"])
+    assert {c["name"] for c in result["callers"]} == {"prodCaller"}
+    assert result["exclude_paths"] == ["vendor/"]
+
+    result = mcp_server.callers(st, FOO, include_paths=["src/myproject/"])
+    assert {c["name"] for c in result["callers"]} == {"prodCaller"}
+    assert result["include_paths"] == ["src/myproject/"]
+
+
 def test_callers_unknown_symbol_is_error(store: GraphStore) -> None:
     result = mcp_server.callers(store, "does::not::exist")
     assert "error" in result
@@ -233,6 +259,28 @@ def test_hotspot_ranking_matches_store_hotspots_directly(store: GraphStore) -> N
     expected_ranked, expected_total = store.hotspots(kind="fan_out")
     assert result["total"] == expected_total
     assert [(h["symbol"], h["count"]) for h in result["hotspots"]] == expected_ranked
+
+
+def test_hotspot_ranking_exclude_paths_matches_store_hotspots_directly(tmp_path: Path) -> None:
+    """Parity check for the path-prefix filter, same shape as the exclude_tests
+    parity test above."""
+    graph = Graph()
+    graph.add_edge("calls", "proj_caller", "target", file="src/myproject/foo.cpp", line=1)
+    graph.add_edge("calls", "vendor_caller", "target", file="src/myproject/foo.cpp", line=2)
+    graph.nodes["proj_caller"].file = "src/myproject/foo.cpp"
+    graph.nodes["vendor_caller"].file = "vendor/somelib/foo.cpp"
+    graph.nodes["target"].file = "src/myproject/foo.cpp"
+    path = tmp_path / "hs.db"
+    write_sqlite(graph, path)
+    st = GraphStore(path)
+
+    result = mcp_server.hotspot_ranking(
+        st, kind="fan_in", full_symbols=True, exclude_paths=["vendor/"]
+    )
+    expected_ranked, expected_total = st.hotspots(kind="fan_in", exclude_paths=["vendor/"])
+    assert result["total"] == expected_total
+    assert [(h["symbol"], h["count"]) for h in result["hotspots"]] == expected_ranked
+    assert expected_ranked == [("target", 1)]
 
 
 BASE = "cxx . . $ mongo/Base#"

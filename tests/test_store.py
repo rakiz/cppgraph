@@ -246,6 +246,38 @@ def test_hotspots_exclude_tests_drops_edges_touching_a_test_defined_symbol(
     assert total == 1
 
 
+def test_hotspots_exclude_paths_drops_edges_touching_a_vendored_symbol(
+    tmp_path: Path,
+) -> None:
+    """`exclude_paths` mirrors `exclude_tests`' symmetric shape: an edge counts
+    only if *both* endpoints' definition files pass the prefix filter."""
+    graph = Graph()
+    graph.add_edge("calls", "proj_caller", "target", file="src/myproject/foo.cpp", line=1)
+    graph.add_edge("calls", "vendor_caller", "target", file="src/myproject/foo.cpp", line=2)
+    graph.nodes["proj_caller"].file = "src/myproject/foo.cpp"
+    graph.nodes["vendor_caller"].file = "vendor/somelib/foo.cpp"
+    graph.nodes["target"].file = "src/myproject/foo.cpp"
+    store = _store(tmp_path, graph)
+    ranked, total = store.hotspots(kind="fan_in", exclude_paths=["vendor/"])
+    assert ranked == [("target", 1)]
+    assert total == 1
+
+
+def test_hotspots_include_paths_keeps_only_project_edges(
+    tmp_path: Path,
+) -> None:
+    graph = Graph()
+    graph.add_edge("calls", "proj_caller", "target", file="src/myproject/foo.cpp", line=1)
+    graph.add_edge("calls", "vendor_caller", "target", file="src/myproject/foo.cpp", line=2)
+    graph.nodes["proj_caller"].file = "src/myproject/foo.cpp"
+    graph.nodes["vendor_caller"].file = "vendor/somelib/foo.cpp"
+    graph.nodes["target"].file = "src/myproject/foo.cpp"
+    store = _store(tmp_path, graph)
+    ranked, total = store.hotspots(kind="fan_in", include_paths=["src/myproject/"])
+    assert ranked == [("target", 1)]
+    assert total == 1
+
+
 def test_hotspots_unknown_kind_raises(tmp_path: Path) -> None:
     store = _store(tmp_path, Graph())
     with pytest.raises(ValueError):

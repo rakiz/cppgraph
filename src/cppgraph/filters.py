@@ -109,3 +109,64 @@ def drop_test_edges(store: GraphStore, edges: list[Edge], *, on: str) -> list[Ed
         if node is None or not is_test_file(node.file):
             kept.append(e)
     return kept
+
+
+def matches_path_prefix(
+    file: str | None, *, include: list[str] | None, exclude: list[str] | None
+) -> bool:
+    """True if `file` should be KEPT under `include`/`exclude` path prefixes.
+
+    Prefix match only — no glob, no regex — against the normalized (`/`-slashed)
+    file path AND the normalized prefixes, on a path-*segment* boundary (`"src/foo"`
+    matches `"src/foo/bar.cpp"` and `"src/foo"` itself, never `"src/foobar.cpp"` —
+    a bare string prefix would false-positive on a sibling file/directory that
+    merely shares characters). Mirrors `is_test_file`'s own slash normalization.
+    An empty `include`/`exclude` list is treated as not given (no constraint from
+    that side), matching every other filter in this module. `file=None` (no
+    recorded definition site) is excluded when `include` is given (it can't match
+    a prefix it lacks) and kept when only `exclude` is given (same reasoning, the
+    other way).
+    """
+    include = include or None
+    exclude = exclude or None
+    if file is None:
+        return include is None
+    p = file.replace("\\", "/")
+
+    def _segment_match(prefix: str) -> bool:
+        # rstrip("/") only trims a *trailing* separator (e.g. a user-given
+        # "src/foo/"); a prefix that's only "/" (or empty) has nothing left to
+        # match on a segment boundary — treat it as matching nothing, not as a
+        # universal match (a `not prefix` special case here would make
+        # `exclude=["/"]` silently drop every relative path).
+        prefix = prefix.replace("\\", "/").rstrip("/")
+        return bool(prefix) and (p == prefix or p.startswith(prefix + "/"))
+
+    if include and not any(_segment_match(prefix) for prefix in include):
+        return False
+    if exclude and any(_segment_match(prefix) for prefix in exclude):
+        return False
+    return True
+
+
+def filter_by_path(
+    store: GraphStore,
+    edges: list[Edge],
+    *,
+    on: str,
+    include_paths: list[str] | None,
+    exclude_paths: list[str] | None,
+) -> list[Edge]:
+    """Keep edges whose far endpoint (`src` for callers, `dst` for callees)
+    passes `matches_path_prefix` — the path-prefix analog of `drop_test_edges`.
+    No-op (returns `edges` unchanged) when neither `include_paths` nor
+    `exclude_paths` is given."""
+    if not include_paths and not exclude_paths:
+        return edges
+    kept: list[Edge] = []
+    for e in edges:
+        node = store.get_node(_far_symbol(e, on))
+        file = node.file if node is not None else None
+        if matches_path_prefix(file, include=include_paths, exclude=exclude_paths):
+            kept.append(e)
+    return kept

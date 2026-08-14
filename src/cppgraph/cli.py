@@ -14,7 +14,13 @@ from cppgraph.export import (
     to_graphify_graph,
     to_symbol_usage_graph,
 )
-from cppgraph.filters import drop_test_edges, is_trivial_callee, short_label
+from cppgraph.filters import (
+    drop_test_edges,
+    filter_by_path,
+    is_trivial_callee,
+    matches_path_prefix,
+    short_label,
+)
 from cppgraph.model import Edge, Node
 from cppgraph.proto import scip_pb2
 from cppgraph.store import (
@@ -88,9 +94,10 @@ def _print_edge(edge: Edge, *, other: str, full_symbols: bool = True) -> None:
 def _add_query_filters(parser: argparse.ArgumentParser, *, hide_trivial: bool = False) -> None:
     """Attach the shared filter/budget flags so the CLI query commands match the
     MCP tools (`who_calls`/`what_it_calls`/`impact_of`): a result cap, test-edge
-    exclusion (on by default), full-SCIP rendering, and — for `callees` — trivial
-    callee hiding. Same primitives (`cppgraph.filters`) drive both surfaces, so a
-    given flag combination gives the same answer either way."""
+    exclusion (on by default), path-prefix filtering, full-SCIP rendering, and —
+    for `callees` — trivial callee hiding. Same primitives (`cppgraph.filters`)
+    drive both surfaces, so a given flag combination gives the same answer
+    either way."""
     parser.add_argument(
         "--limit",
         type=int,
@@ -104,6 +111,7 @@ def _add_query_filters(parser: argparse.ArgumentParser, *, hide_trivial: bool = 
         help="drop edges/symbols defined in test files "
         "(default: on; --no-exclude-tests keeps them)",
     )
+    _add_path_filters(parser)
     parser.add_argument(
         "--full-symbols",
         action="store_true",
@@ -115,6 +123,28 @@ def _add_query_filters(parser: argparse.ArgumentParser, *, hide_trivial: bool = 
             action="store_true",
             help="hide ubiquitous helpers (operators, *assert, makeStatus, …)",
         )
+
+
+def _add_path_filters(parser: argparse.ArgumentParser) -> None:
+    """Attach `--include-path`/`--exclude-path` (repeatable): filter results by
+    `Node.file`-prefix (`cppgraph.filters.matches_path_prefix`) — simple prefix
+    match, no glob/regex — so a query can scope to "my code" vs vendored deps."""
+    parser.add_argument(
+        "--include-path",
+        action="append",
+        dest="include_paths",
+        metavar="PREFIX",
+        help="keep only results whose definition file starts with PREFIX "
+        "(repeatable; prefix match only, no glob)",
+    )
+    parser.add_argument(
+        "--exclude-path",
+        action="append",
+        dest="exclude_paths",
+        metavar="PREFIX",
+        help="drop results whose definition file starts with PREFIX "
+        "(repeatable; prefix match only, no glob)",
+    )
 
 
 def _resolve_graph(args: argparse.Namespace, parser: argparse.ArgumentParser) -> str:
@@ -448,6 +478,7 @@ def main(argv: list[str] | None = None) -> int:
         help="name to match against the symbol or display name; a substring, or "
         "several space-separated words that must all appear (order-free AND)",
     )
+    _add_path_filters(p_find)
 
     p_callers = sub.add_parser("callers", help="list callers of a symbol")
     p_callers.add_argument(
@@ -529,6 +560,7 @@ def main(argv: list[str] | None = None) -> int:
     p_refs.add_argument(
         "--limit", type=int, default=50, help="max use sites to print (default: 50)"
     )
+    _add_path_filters(p_refs)
 
     p_path = sub.add_parser("path", help="shortest call chain from one symbol to another")
     p_path.add_argument(
@@ -597,6 +629,7 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="print the raw SCIP symbol strings instead of readable labels",
     )
+    _add_path_filters(p_hotspots)
 
     p_status = sub.add_parser(
         "status",
@@ -940,6 +973,14 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "find":
         store = GraphStore(_resolve_graph(args, parser))
         matches = store.find(args.query)
+        if args.include_paths or args.exclude_paths:
+            matches = [
+                n
+                for n in matches
+                if matches_path_prefix(
+                    n.file, include=args.include_paths, exclude=args.exclude_paths
+                )
+            ]
         if not matches:
             print(f"[cppgraph] no symbol matching {args.query!r}")
             return 1
@@ -953,6 +994,13 @@ def main(argv: list[str] | None = None) -> int:
         edges = store.callers_of(args.symbol)
         if args.exclude_tests:
             edges = drop_test_edges(store, edges, on="src")
+        edges = filter_by_path(
+            store,
+            edges,
+            on="src",
+            include_paths=args.include_paths,
+            exclude_paths=args.exclude_paths,
+        )
         tests_note = " (excluding tests)" if args.exclude_tests else ""
         print(f"[cppgraph] {len(edges)} caller(s) of {args.symbol}{tests_note}")
         shown = edges[: args.limit] if args.limit is not None else edges
@@ -968,6 +1016,13 @@ def main(argv: list[str] | None = None) -> int:
         edges = store.callees_of(args.symbol)
         if args.exclude_tests:
             edges = drop_test_edges(store, edges, on="dst")
+        edges = filter_by_path(
+            store,
+            edges,
+            on="dst",
+            include_paths=args.include_paths,
+            exclude_paths=args.exclude_paths,
+        )
         trivial_hidden = 0
         if args.hide_trivial:
             kept = [e for e in edges if not is_trivial_callee(e.dst)]
@@ -1011,6 +1066,14 @@ def main(argv: list[str] | None = None) -> int:
         if not refs and store.meta().get("has_references") != "true":
             print("[cppgraph] this graph was built with --no-references (no location index)")
             return 1
+        if args.include_paths or args.exclude_paths:
+            refs = [
+                r
+                for r in refs
+                if matches_path_prefix(
+                    r.file, include=args.include_paths, exclude=args.exclude_paths
+                )
+            ]
         print(f"[cppgraph] {len(refs)} use site(s) of {args.symbol}")
         for ref in refs[: args.limit]:
             line = ref.line + 1 if ref.line is not None else "?"
@@ -1067,6 +1130,16 @@ def main(argv: list[str] | None = None) -> int:
         nodes = [(sym, store.get_node(sym)) for sym in affected]
         if args.exclude_tests:
             nodes = [(sym, n) for sym, n in nodes if n is None or not is_test_file(n.file)]
+        if args.include_paths or args.exclude_paths:
+            nodes = [
+                (sym, n)
+                for sym, n in nodes
+                if matches_path_prefix(
+                    n.file if n is not None else None,
+                    include=args.include_paths,
+                    exclude=args.exclude_paths,
+                )
+            ]
         verb = "transitively call" if args.kind == "calls" else "transitively inherit from"
         tests_note = " (excluding tests)" if args.exclude_tests else ""
         print(f"[cppgraph] {len(nodes)} symbol(s) {verb} {args.symbol}{tests_note}")
@@ -1081,7 +1154,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "hotspots":
         store = GraphStore(_resolve_graph(args, parser))
         ranked, total = store.hotspots(
-            limit=args.limit, kind=args.kind, exclude_tests=args.exclude_tests
+            limit=args.limit,
+            kind=args.kind,
+            exclude_tests=args.exclude_tests,
+            include_paths=args.include_paths,
+            exclude_paths=args.exclude_paths,
         )
         tests_note = " (excluding tests)" if args.exclude_tests else ""
         print(f"[cppgraph] top {len(ranked)} of {total} symbol(s) by {args.kind}{tests_note}")

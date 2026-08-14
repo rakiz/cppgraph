@@ -33,6 +33,7 @@ from typing import TYPE_CHECKING
 
 from cppgraph.builder import _gc_disabled, build_graph
 from cppgraph.export import is_test_file
+from cppgraph.filters import matches_path_prefix
 from cppgraph.model import Edge, Graph, Node, Reference
 
 if TYPE_CHECKING:
@@ -964,7 +965,12 @@ class GraphStore:
         return set(self._symbols_for_ids(visited).values())
 
     def hotspots(
-        self, limit: int = 20, kind: str = "fan_in", exclude_tests: bool = False
+        self,
+        limit: int = 20,
+        kind: str = "fan_in",
+        exclude_tests: bool = False,
+        include_paths: list[str] | None = None,
+        exclude_paths: list[str] | None = None,
     ) -> tuple[list[tuple[str, int]], int]:
         """Rank symbols by call-edge volume across the whole graph.
 
@@ -987,6 +993,10 @@ class GraphStore:
         `cppgraph.filters.drop_test_edges` — not the call site, which is a
         different, unrelated file). Symmetric because this is a global ranking
         with no single "far endpoint" the way a per-symbol query has one.
+        `include_paths`/`exclude_paths` apply the same way, via
+        `cppgraph.filters.matches_path_prefix` registered as a SQL function
+        (`cpg_path_ok`) — an edge counts only if *both* endpoints' definition
+        files pass the prefix filter.
 
         Returns `(ranked, total)`: `ranked` is the top `limit` `(symbol, count)`
         pairs in descending order, `total` is how many distinct symbols have at
@@ -1004,6 +1014,14 @@ class GraphStore:
             if exclude_tests
             else ""
         )
+        path_clause = ""
+        if include_paths or exclude_paths:
+
+            def _path_ok(path: str | None) -> bool:
+                return matches_path_prefix(path, include=include_paths, exclude=exclude_paths)
+
+            self._con.create_function("cpg_path_ok", 1, _path_ok, deterministic=True)
+            path_clause = "AND cpg_path_ok(f_src.path) AND cpg_path_ok(f_dst.path)"
         # UNION ALL one subquery per role so a self-loop naturally yields two
         # rows (one per role) — the degree-convention doubling from the
         # docstring falls out of the query shape rather than a special case.
@@ -1020,7 +1038,7 @@ class GraphStore:
             JOIN symbols s_dst ON s_dst.id = e.dst_id
             LEFT JOIN files f_src ON f_src.id = s_src.file_id
             LEFT JOIN files f_dst ON f_dst.id = s_dst.file_id
-            WHERE e.kind = 'calls' {test_clause}
+            WHERE e.kind = 'calls' {test_clause} {path_clause}
             """
             for column in role_columns
         )
