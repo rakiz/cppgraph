@@ -53,27 +53,6 @@ active list. Design detail is in `DESIGN.md`, shipped features in
   already prints the file→symbol upgrade hint (index with a #504 binary / `enrich-refs`);
   add the extra `.graph.db` cost so the user can weigh it. Measure the real delta first
   (same graph with vs without `--attributed-refs`); don't hardcode a guess.
-- **Surface `transport` (`cli`|`mcp`) in `status`.** From real use: a report claimed
-  `cppgraph_status` had confirmed freshness in the orchestrator session, but a Task
-  subagent's own claim of having called `status` couldn't be verified after the fact —
-  nothing in the output says which surface produced it. `status_report` (shared by
-  `cli.py` and `mcp_server.py`) already reports `graph_meta`/`drift`/the graph path; add
-  a literal `"transport": "cli"` set by `cli.py` and `"transport": "mcp"` set by the MCP
-  `status` tool, so a copy-pasted status block settles the question instead of resting on
-  an agent's say-so. One literal per surface, no new logic.
-- **Document the CLI fallback for MCP-less (sub)agents in `AGENTS.md`.** From real use:
-  a Task subagent without `cppgraph_*` tools in its context read `.cppgraph/*.graph.db`
-  directly with a raw SQLite client to check the indexed commit; another fell back to the
-  dev venv. Both are workable, but undocumented — and the first crosses into a schema
-  that isn't a public contract (`DESIGN.md` § `schema_version` exists precisely so this
-  format can change). `cli.py` already has full parity with the MCP tools (`status`,
-  `find`, `callers`, `callees`, `bases`, `subtypes`, `refs`, `path`, `impact`, `explain`,
-  `export`, `view` — same underlying functions, per `AGENTS.md`'s "keep the CLI and MCP
-  surfaces equivalent" rule), and auto-discovers `.cppgraph/` from the cwd like the MCP
-  tools do — the
-  gap is purely that nothing tells an agent without MCP to reach for it. Add a short
-  paragraph to `AGENTS.md`'s cppgraph section: if `cppgraph_*` isn't in your context, use
-  `cppgraph <cmd>` directly; never open `.graph.db` with sqlite.
 - **`stats` — aggregate counts by file / directory.** No tool gives a module-level
   map (symbols, edges, refs per file, rolled up per directory via `dirname`). Exact
   aggregation over `Node.file`/`Edge.file`; lets an LLM size up an unfamiliar module

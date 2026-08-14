@@ -706,7 +706,9 @@ def test_status_reports_recorded_commit_without_root(
 ) -> None:
     db = _store_at(tmp_path, "deadbeefcafe")
     assert main(["status", "--graph", str(db)]) == 0
-    assert "deadbeefcafe" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "deadbeefcafe" in out
+    assert "transport:     cli" in out
 
 
 def test_status_up_to_date(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

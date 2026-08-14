@@ -22,6 +22,9 @@ on-disk store also carries its own `schema_version` for forward-compatibility.
   `hotspots` applies the filter in SQL (a `cpg_path_ok` function registered
   alongside the existing `cpg_is_test_file`), keeping its whole-graph
   aggregation off the Python side.
+- **`transport` in `status`**: `"cli"` or `"mcp"`, so a copied status block (e.g.
+  from a Task subagent without direct MCP access) says which surface produced
+  it instead of resting on an agent's say-so.
 
 ### Fixed
 

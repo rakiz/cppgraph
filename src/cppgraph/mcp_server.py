@@ -819,6 +819,7 @@ def status_report(
     m = store.meta()
     commit = m.get("source_commit")
     result: dict[str, Any] = {
+        "transport": "mcp",
         "graph_meta": {
             "source_commit": commit,
             "source_dirty": m.get("source_dirty") == "true",

@@ -1181,6 +1181,7 @@ def main(argv: list[str] | None = None) -> int:
         commit = m.get("source_commit")
         dirty = m.get("source_dirty") == "true"
         print(f"[cppgraph] graph store: {graph_path}")
+        print("  transport:     cli")
         if commit:
             print(f"  source commit: {commit}{' (dirty)' if dirty else ''}")
         else:

@@ -68,6 +68,16 @@ when you want to measure at scale; keep such paths out of the shipped code.)
   `cppgraph.cli.build_export_json`) — never fork the logic into one surface only.
   When adding a flag or view, wire it through the shared function and expose it on
   each side.
+- **No `cppgraph_*` MCP tools in your context (e.g. a Task subagent that doesn't
+  inherit the orchestrator's MCP servers)? Use the CLI directly.** `cppgraph
+  <cmd>` (`status`/`find`/`callers`/`callees`/`bases`/`subtypes`/`refs`/`path`/
+  `impact`/`hotspots`/`explain`/`export`/`view`) has full parity with the MCP
+  tools per the rule above, and auto-discovers `.cppgraph/` from the cwd the
+  same way. **Never open a `.graph.db` directly with a SQLite client** to work
+  around a missing tool — the on-disk schema isn't a public contract (`schema_version`
+  exists precisely so it can change between releases); `cppgraph status` reports
+  a `"transport": "cli"`/`"mcp"` field for exactly this reason, so a copied
+  status block always says which surface produced it.
 - **Attributed references (`enclosing_range` / #504).** References carry an
   optional enclosing-definition symbol, enabling the symbol-granularity usage view
   (`export --mode usage`). It's opt-in at build (`--attributed-refs`) or added

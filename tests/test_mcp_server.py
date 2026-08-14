@@ -446,6 +446,7 @@ def test_status_reports_commit_without_root(tmp_path: Path) -> None:
         result = mcp_server.status_report(st)
     assert result["source_commit"] == "abc123"
     assert result["drift"]["checked"] is False
+    assert result["transport"] == "mcp"
 
 
 def test_status_up_to_date_with_root(tmp_path: Path) -> None:
