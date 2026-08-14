@@ -266,12 +266,23 @@ def build_graph(
                 continue
             call_sites.append((occ.symbol, line))
         callers = _attribute_containment(callable_intervals, [line for _, line in call_sites])
+        # The nearest-preceding fallback is only a sound approximation when this
+        # document has NO interval data at all (genuinely stock binary). When
+        # `callable_intervals` is non-empty (#504) but a site still isn't
+        # contained by any body, that's almost always a role-0 declaration
+        # occurrence (see DESIGN.md "Known limitation") rather than a real call
+        # outside every function — bisecting would attribute it to an arbitrary
+        # unrelated sibling definition. Drop the edge instead of guessing.
+        has_intervals = bool(callable_intervals)
         for (callee, line), caller_symbol in zip(call_sites, callers):
             if caller_symbol is None:
-                pos = bisect.bisect_right(boundary_lines, line) - 1
-                if pos < 0:
-                    continue  # no enclosing callable definition found in this document
-                _, caller_symbol = callable_defs[pos]
+                if not has_intervals:
+                    pos = bisect.bisect_right(boundary_lines, line) - 1
+                    if pos < 0:
+                        continue  # no enclosing callable definition found in this document
+                    _, caller_symbol = callable_defs[pos]
+                else:
+                    continue  # #504 doc: uncontained site, not a sound fallback target
             graph.add_edge("calls", caller_symbol, callee, doc.relative_path, line)
 
         if include_references:

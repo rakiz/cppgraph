@@ -199,6 +199,15 @@ fallback (`src/cppgraph/builder.py`):
    above is the stock-binary fallback only. A #504 binary is built from source
    via `docker/build-scip-clang/`.
 
+   On a #504 graph specifically, `build_graph` also detects the declaration case
+   above by a different signal: `callable_intervals` is populated (the binary
+   *does* emit body extents), yet a given role-`0` site still isn't contained by
+   any of them — exactly what a bodyless in-class declaration looks like once
+   real bodies are known. There it drops the edge instead of falling back to
+   nearest-preceding, since that fallback is only a sound approximation when a
+   document has no interval data at all. The "keep the over-capture" call above
+   stands only for stock graphs, which have no such signal to detect the case.
+
 This is where semantic identity still pays off even with the fallback: the
 callee is the *exact* symbol, so the two `makeResumeToken` never mix,
 independent of how the caller is attributed.

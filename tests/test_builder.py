@@ -142,6 +142,33 @@ def test_calls_fall_back_to_nearest_preceding_without_enclosing_range() -> None:
     assert [e.src for e in graph.callers_of(helper)] == [nested]
 
 
+def test_declaration_only_occurrence_is_not_attributed_as_a_phantom_call() -> None:
+    """On a #504 doc (has enclosing_range / callable_intervals), a role-0
+    occurrence not contained by any callable body (e.g. scip-clang's known gap:
+    a bodyless in-class method declaration, see DESIGN.md 'Known limitation')
+    must NOT fall back to nearest-preceding-definition — that misattributes it
+    to an arbitrary unrelated sibling. The edge should simply be dropped, while
+    a real, contained call site is still attributed exactly."""
+    sibling = "cxx . . $ pkg/Foo#sibling(s1)."
+    outer = "cxx . . $ pkg/Foo#outer(o1)."
+    helper = "cxx . . $ pkg/helper(h1)."
+    declared_elsewhere = "cxx . . $ pkg/Foo#declaredElsewhere(d1)."
+
+    doc = scip_pb2.Document(relative_path="foo.cpp")
+    doc.occurrences.extend(
+        [
+            _def_with_body(sibling, line=5, end_line=10),  # unrelated earlier definition
+            _occurrence(declared_elsewhere, line=15, roles=0),  # role-0, outside every body
+            _def_with_body(outer, line=20, end_line=40),
+            _occurrence(helper, line=25),  # a real call inside outer's body
+        ]
+    )
+    graph = build_graph(scip_pb2.Index(documents=[doc]))
+
+    assert [e.src for e in graph.callers_of(helper)] == [outer]
+    assert graph.callers_of(declared_elsewhere) == []
+
+
 def test_attribute_references_by_containment() -> None:
     """A reference is attributed to the definition whose body contains it — read
     from the definitions' enclosing ranges, not off the reference (which carries

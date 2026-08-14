@@ -20,7 +20,10 @@ token-lean output.
   templates, and free functions.
 - Edge kinds `calls`, `inherits`, `implements`; a definition site is recorded for
   every symbol, types included. Caller attribution is exact via `enclosing_range`
-  containment when the binary emits it (a #504 build), else nearest-preceding.
+  containment when the binary emits it (a #504 build): a call site outside every
+  known callable body yields no caller edge, never a guess. Without
+  `enclosing_range` (stock binary), attribution falls back to the nearest-preceding
+  callable definition in the same file.
 - Exact **reference-location index** (`symbol → file:line`), on by default —
   answers "where is this used?" for symbols the call graph can't (e.g. a struct).
   With a #504 binary, references can be attributed to the enclosing definition
