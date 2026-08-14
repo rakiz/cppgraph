@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from cppgraph.builder import _gc_disabled, build_graph
+from cppgraph.export import is_test_file
 from cppgraph.model import Edge, Graph, Node, Reference
 
 if TYPE_CHECKING:
@@ -961,6 +962,79 @@ class GraphStore:
 
         visited.discard(start_id)
         return set(self._symbols_for_ids(visited).values())
+
+    def hotspots(
+        self, limit: int = 20, kind: str = "fan_in", exclude_tests: bool = False
+    ) -> tuple[list[tuple[str, int]], int]:
+        """Rank symbols by call-edge volume across the whole graph.
+
+        `kind="fan_in"` (default) ranks by incoming `calls` edges (most-called);
+        `"fan_out"` by outgoing edges (most-calling); `"edges"` sums both per
+        symbol — including a self-recursive symbol's own edge to itself *twice*
+        (once as the caller, once as the callee), the usual graph-degree
+        convention for a self-loop, not a double-counting bug.
+
+        Aggregated entirely in SQL (`GROUP BY` + `ORDER BY` + `LIMIT`) over the
+        `edges` index, in id-space until the final `LIMIT` rows are resolved to
+        symbol strings — consistent with this store's "hot topology stays
+        all-integer, cold payload materialized only for results actually shown"
+        design (see DESIGN.md § Store); a global ranking still has to scan every
+        `calls` edge (there's no way around that for a whole-graph aggregate),
+        but never materializes a symbol string or a Python `Counter` over it.
+
+        `exclude_tests` drops a `calls` edge if *either* endpoint symbol is
+        itself defined in a test file (via its own definition site, like
+        `cppgraph.filters.drop_test_edges` — not the call site, which is a
+        different, unrelated file). Symmetric because this is a global ranking
+        with no single "far endpoint" the way a per-symbol query has one.
+
+        Returns `(ranked, total)`: `ranked` is the top `limit` `(symbol, count)`
+        pairs in descending order, `total` is how many distinct symbols have at
+        least one edge of the requested kind (so the caller knows if the list
+        was truncated).
+        """
+        if kind not in ("fan_in", "fan_out", "edges"):
+            raise ValueError(f"unknown hotspots kind: {kind!r}")
+        if limit < 0:
+            raise ValueError(f"limit must be >= 0, got {limit}")
+
+        self._con.create_function("cpg_is_test_file", 1, is_test_file, deterministic=True)
+        test_clause = (
+            "AND NOT cpg_is_test_file(f_src.path) AND NOT cpg_is_test_file(f_dst.path)"
+            if exclude_tests
+            else ""
+        )
+        # UNION ALL one subquery per role so a self-loop naturally yields two
+        # rows (one per role) — the degree-convention doubling from the
+        # docstring falls out of the query shape rather than a special case.
+        role_columns: list[str] = []
+        if kind in ("fan_in", "edges"):
+            role_columns.append("dst_id")
+        if kind in ("fan_out", "edges"):
+            role_columns.append("src_id")
+        per_role = "\n            UNION ALL\n            ".join(
+            f"""
+            SELECT e.{column} AS ranked_id
+            FROM edges e
+            JOIN symbols s_src ON s_src.id = e.src_id
+            JOIN symbols s_dst ON s_dst.id = e.dst_id
+            LEFT JOIN files f_src ON f_src.id = s_src.file_id
+            LEFT JOIN files f_dst ON f_dst.id = s_dst.file_id
+            WHERE e.kind = 'calls' {test_clause}
+            """
+            for column in role_columns
+        )
+        rows = self._con.execute(
+            f"""
+            SELECT s.symbol, COUNT(*) AS n
+            FROM ({per_role}) ranked
+            JOIN symbols s ON s.id = ranked.ranked_id
+            GROUP BY ranked.ranked_id
+            ORDER BY n DESC
+            """
+        ).fetchall()
+        ranked = [(sym, n) for sym, n in rows]
+        return ranked[:limit], len(ranked)
 
     def subgraph(
         self, symbol: str, depth: int = 2, direction: str = "both"

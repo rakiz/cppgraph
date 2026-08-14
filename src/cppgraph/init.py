@@ -255,6 +255,22 @@ def onboarding_plan(
     # from" before the user decides — never silently reuse or clobber.
     questions: list[dict] = []
     if status["scip"] or status["graph"]:
+        options = [{"value": "reuse", "label": "use the existing index/graph (no flag)"}]
+        # Only a graph (not just a .scip) can be refreshed incrementally, and
+        # only when it recorded a source commit at build time — `cppgraph
+        # update` refuses one without (see `pipeline.incremental_update`), so
+        # don't offer a choice that's known upfront to fail.
+        graph_meta = (existing.get("graph") or {}) if status["graph"] else {}
+        if status["graph"] and graph_meta.get("source_commit"):
+            # Same three choices the interactive wizard offers (update/rebuild/keep).
+            options.append(
+                {
+                    "value": "update",
+                    "label": "update incrementally, re-indexing only changed files "
+                    "(`cppgraph update`)",
+                }
+            )
+        options.append({"value": "recompute", "label": "recompute from scratch (--from-scratch)"})
         questions.append(
             {
                 "key": "reuse",
@@ -262,10 +278,7 @@ def onboarding_plan(
                 "prompt": "This project is already indexed — use the existing data or recompute?",
                 "default": "reuse",
                 "info": _existing_summary(existing),
-                "options": [
-                    {"value": "reuse", "label": "use the existing index/graph (no flag)"},
-                    {"value": "recompute", "label": "recompute from scratch (--from-scratch)"},
-                ],
+                "options": options,
             }
         )
 

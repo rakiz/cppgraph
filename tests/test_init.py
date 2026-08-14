@@ -337,6 +337,52 @@ def test_onboarding_plan_offers_reuse_when_indexed(tmp_path: Path) -> None:
     assert "scip-clang" in plan["questions"][0]["info"]
 
 
+def test_onboarding_plan_offers_update_when_graph_exists(tmp_path: Path) -> None:
+    """A built graph (not just a `.scip`) can be refreshed incrementally, so the
+    plan's reuse question adds an `update` option alongside reuse/recompute —
+    matching the interactive wizard's update/rebuild/keep choices. Requires a
+    recorded `source_commit`: that's what `cppgraph update` diffs against
+    (`pipeline.incremental_update` refuses a graph without one)."""
+    from cppgraph.compdb import load_compdb
+    from cppgraph.model import Graph
+    from cppgraph.store import write_sqlite
+
+    compdb = _write_compdb(tmp_path / "compile_commands.json")
+    cpg = tmp_path / ".cppgraph"
+    cpg.mkdir()
+    write_sqlite(Graph(), cpg / "proj.graph.db", meta={"source_commit": "abc1234"})
+
+    plan = onboarding_plan(compdb, load_compdb(str(compdb)), tmp_path, "proj")
+    assert [o["value"] for o in plan["questions"][0]["options"]] == [
+        "reuse",
+        "update",
+        "recompute",
+    ]
+
+
+def test_onboarding_plan_omits_update_when_graph_has_no_source_commit(
+    tmp_path: Path,
+) -> None:
+    """A graph built without git provenance (no `source_commit`) can't be
+    diffed for an incremental update — `cppgraph update` refuses it outright
+    (`pipeline.incremental_update`), so the plan must not offer a choice known
+    upfront to fail."""
+    from cppgraph.compdb import load_compdb
+    from cppgraph.model import Graph
+    from cppgraph.store import write_sqlite
+
+    compdb = _write_compdb(tmp_path / "compile_commands.json")
+    cpg = tmp_path / ".cppgraph"
+    cpg.mkdir()
+    write_sqlite(Graph(), cpg / "proj.graph.db")  # no source_commit in meta
+
+    plan = onboarding_plan(compdb, load_compdb(str(compdb)), tmp_path, "proj")
+    assert [o["value"] for o in plan["questions"][0]["options"]] == [
+        "reuse",
+        "recompute",
+    ]
+
+
 def test_init_plan_json_via_cli(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     compdb = _write_compdb(tmp_path / "compile_commands.json")
     rc = main(

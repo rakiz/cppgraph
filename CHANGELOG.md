@@ -6,7 +6,24 @@ on-disk store also carries its own `schema_version` for forward-compatibility.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+
+- **`hotspots`**: ranks symbols by fan-in, fan-out, or total edge count across the
+  whole graph — one call instead of N manual `who_calls`/`what_it_calls` queries.
+  On the CLI and as an MCP tool, both backed by the same `GraphStore.hotspots`.
+  Bounded output (`limit` + a `total` count), `exclude_tests` supported like other
+  query tools.
+
+### Fixed
+
+- **`cppgraph update`**: works with no arguments — auto-discovers the graph and
+  compilation database from the working directory, re-indexes the changed
+  translation units, and applies the update in place, matching every other query
+  command's auto-discovery convention. `init.py`, `cli.py`, `mcp_server.py`, and
+  `QUICKSTART.md` all point at this one command now, instead of four inconsistent
+  (and in one case wrong) instructions. `pipeline.incremental_update` now reads
+  "changed" the same way `status` does (via the dirty-fingerprint-aware
+  `changed_files_since`), so the two agree on scope.
 
 ## [0.1.0] - 2026-08-14
 

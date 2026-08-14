@@ -164,6 +164,94 @@ def test_impact_unknown_symbol_returns_empty(tmp_path: Path) -> None:
     assert store.impact("nope") == set()
 
 
+# --- hotspots ----------------------------------------------------------------
+
+
+def _hotspots_graph() -> Graph:
+    graph = Graph()
+    # "hot" is called 5 times, "warm" 3 times, "cold" once.
+    for i, caller in enumerate(["c1", "c2", "c3", "c4", "c5"]):
+        graph.add_edge("calls", caller, "hot", file="f.cpp", line=i)
+    for i, caller in enumerate(["c1", "c2", "c3"]):
+        graph.add_edge("calls", caller, "warm", file="f.cpp", line=10 + i)
+    graph.add_edge("calls", "c1", "cold", file="f.cpp", line=20)
+    return graph
+
+
+def test_hotspots_fan_in_ranks_by_incoming_call_count(tmp_path: Path) -> None:
+    store = _store(tmp_path, _hotspots_graph())
+    ranked, total = store.hotspots(kind="fan_in")
+    assert ranked[:3] == [("hot", 5), ("warm", 3), ("cold", 1)]
+    assert total == 3
+
+
+def test_hotspots_fan_out_ranks_by_outgoing_call_count(tmp_path: Path) -> None:
+    store = _store(tmp_path, _hotspots_graph())
+    ranked, total = store.hotspots(kind="fan_out")
+    # c1 calls hot+warm+cold = 3, c2/c3 call hot+warm = 2, c4/c5 call hot = 1.
+    assert ranked[0] == ("c1", 3)
+    assert total == 5
+
+
+def test_hotspots_edges_sums_fan_in_and_fan_out(tmp_path: Path) -> None:
+    store = _store(tmp_path, _hotspots_graph())
+    ranked, _total = store.hotspots(kind="edges")
+    by_symbol = dict(ranked)
+    # "hot" has 5 incoming, 0 outgoing.
+    assert by_symbol["hot"] == 5
+    # "c1" has 0 incoming, 3 outgoing.
+    assert by_symbol["c1"] == 3
+
+
+def test_hotspots_edges_counts_a_self_loop_twice_like_graph_degree(tmp_path: Path) -> None:
+    """A recursive symbol's own edge to itself is one edge but two structural
+    facts (it's called, and it calls) — `edges` sums both, per the standard
+    graph-degree convention for a self-loop, not a double-counting bug."""
+    graph = Graph()
+    graph.add_edge("calls", "recurse", "recurse", file="foo.cpp", line=1)
+    store = _store(tmp_path, graph)
+    ranked, _total = store.hotspots(kind="edges")
+    assert ranked == [("recurse", 2)]
+    fan_in, _ = store.hotspots(kind="fan_in")
+    fan_out, _ = store.hotspots(kind="fan_out")
+    assert fan_in == [("recurse", 1)]
+    assert fan_out == [("recurse", 1)]
+
+
+def test_hotspots_rejects_negative_limit(tmp_path: Path) -> None:
+    store = _store(tmp_path, _hotspots_graph())
+    with pytest.raises(ValueError):
+        store.hotspots(limit=-1, kind="fan_in")
+
+
+def test_hotspots_limit_truncates_but_total_is_full_count(tmp_path: Path) -> None:
+    store = _store(tmp_path, _hotspots_graph())
+    ranked, total = store.hotspots(limit=1, kind="fan_in")
+    assert ranked == [("hot", 5)]
+    assert total == 3
+
+
+def test_hotspots_exclude_tests_drops_edges_touching_a_test_defined_symbol(
+    tmp_path: Path,
+) -> None:
+    """`exclude_tests` follows the same convention as `filters.drop_test_edges`:
+    a symbol's own *definition* file decides test-ness, not the call site."""
+    graph = Graph()
+    graph.add_edge("calls", "prod_caller", "target", file="src/foo.cpp", line=1)
+    graph.add_edge("calls", "test_helper_caller", "target", file="src/foo.cpp", line=2)
+    graph.nodes["test_helper_caller"].file = "src/foo_test.cpp"
+    store = _store(tmp_path, graph)
+    ranked, total = store.hotspots(kind="fan_in", exclude_tests=True)
+    assert ranked == [("target", 1)]
+    assert total == 1
+
+
+def test_hotspots_unknown_kind_raises(tmp_path: Path) -> None:
+    store = _store(tmp_path, Graph())
+    with pytest.raises(ValueError):
+        store.hotspots(kind="bogus")
+
+
 # --- inheritance queries ---------------------------------------------------
 
 # --- schema versioning -----------------------------------------------------

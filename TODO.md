@@ -2,21 +2,10 @@
 
 The active list — open work we intend to do. Parked "someday / just in case"
 ideas live in the **Attic** at the bottom: kept for reference, not part of the
-active list. The project isn't versioned yet, so this is a snapshot, not a log;
-design detail is in `DESIGN.md`, shipped features in `CHANGELOG.md`.
+active list. Design detail is in `DESIGN.md`, shipped features in
+`CHANGELOG.md`, releases in `versions.json`.
 
-## Release (0.1.0)
-
-- **Cut the actual releases.** The plumbing is in place — `scripts/setup.sh`
-  installs by tag (`--version`/`--nightly`/`--branch`), `current_version` derives
-  from `git describe`, and `cppgraph status` reads `versions.json` for the
-  "update available / rebuild needed" advice — but no release exists yet. Per
-  release: tag `vX.Y.Z`, then bump `latest` in `versions.json` and append a
-  `releases` entry (`rebuild` level `none`/`store`/`reindex` — what the release
-  invalidates in the index stack — plus one-line `notes`, `url`). The advice only
-  becomes meaningful once at least one tag exists.
-
-## Other (not release-gating)
+## Other
 
 - **Follow-up to the declaration-site phantom-caller bug (fixed for #504 graphs):**
   `who_calls(extractShardKeyFromDoc)` used to return `getKeyPatternFields` as a caller
@@ -35,46 +24,6 @@ design detail is in `DESIGN.md`, shipped features in `CHANGELOG.md`.
   carry default values and surface it in `explain_symbol` (needs `--root`, factual — read
   from source). Note: this shows the default *exists*; knowing whether a given call *relies*
   on it needs per-call arity — see the scip-clang section.
-- **BUG: the refresh path has no runnable entry point, and `status` prints a broken
-  command.** From real use: a user read "keeping it — pass `--from-scratch` to rebuild, or
-  `cppgraph update` to refresh changed files" (`init.py:419`), found no `cppgraph` binary
-  and no update script, and fell back to a full `--from-scratch` re-index. The verdict
-  layer is already coherent — `staleness_verdict` (`store.py:225`) emits exactly
-  `"update"` or `"rebuild"` on a measured threshold (`REBUILD_FILE_FRACTION` = 0.25),
-  it's tested (`test_store.py:703,720`) and printed by both surfaces — but nothing
-  *executes* that verdict, so four sources give four different answers to one question:
-  (a) `init.py:419` names `cppgraph update`, which exists but requires `--graph` **and** a
-  partial `.scip` the user cannot produce; (b) `cli.py:1125` prints
-  `scripts/index.sh <graph.db> <compdb>`, which is **wrong** — `index.sh` forwards to
-  `cppgraph index`, whose first positional is the *compdb* (`cli.py:313`), so the graph
-  store gets read as a compilation database; it is the signature of the old
-  `reindex.sh --update GRAPH_DB COMPDB`, deleted in `fcbb7f4`, never updated since;
-  (c) `mcp_server.py:792` says "run scripts/index.sh"; (d) `QUICKSTART.md:129` says re-run
-  the wizard — both interactive-only, and per `AGENTS.md` a `! …` run gets EOF. Fix, in
-  order: (1) the fingerprint alignment below — while `status` and `update` disagree on
-  what "changed" means, promoting `update` makes the disagreement user-visible, so that
-  item is a **prerequisite**, not a follow-up; (2) make `--graph`/`--scip` **optional** on
-  `update` — with no args it discovers the graph from the cwd exactly as every query
-  command already does (`_resolve_graph`), diffs, re-indexes the changed TUs and applies;
-  with args, today's low-level behaviour is untouched. Explicitly **not** a rename: an
-  `apply-update` split would churn `DESIGN.md:299,323`, `CHANGELOG.md:34` and
-  `test_cli.py:379` for zero gain, and optional `--graph` is already the convention;
-  (3) point all four sources at that one command, deriving the wording from the existing
-  verdict rather than restating advice per file; (4) `--plan-json`'s `reuse` question
-  offers only `reuse`/`recompute` (`init.py:256-270`) while the interactive wizard offers
-  update/rebuild/keep (`init.py:426-435`) — add `update` so the agent path and the human
-  path decide from the same options. Keep `--from-scratch` as the `index` flag, but let
-  `rebuild` be the user-facing word, aligned with the verdict. Progress reporting is a
-  separate item (below) — bundling it would gate a coherence fix on unmeasured UX work.
-- **Align `pipeline.incremental_update` with the dirty fingerprints.** `status`
-  (CLI + MCP) reads `meta.dirty_fingerprints` via `changed_files_since` so a graph
-  built from a dirty tree isn't falsely reported stale (and a revert *is* caught).
-  But `pipeline.incremental_update` computes its changed set with its own `git diff`
-  (`_git_diff_names`), unaware of the fingerprints — so an explicit update
-  re-indexes dirty-at-build files it needn't, and wouldn't notice a revert. Have it
-  call `changed_files_since` so the report and the actual update agree. **Prerequisite
-  for the entry-point item above** — one definition of "changed", or the tool
-  recommends an update whose scope contradicts the report that recommended it.
 - **Indexing progress: consume scip-clang's per-TU report instead of suppressing it.**
   Same user, same session: a full re-index runs for an unknown duration with no signal.
   `run_scip_clang` passes `--no-progress-report` (`pipeline.py:132`), inherited from the
@@ -125,12 +74,6 @@ design detail is in `DESIGN.md`, shipped features in `CHANGELOG.md`.
   gap is purely that nothing tells an agent without MCP to reach for it. Add a short
   paragraph to `AGENTS.md`'s cppgraph section: if `cppgraph_*` isn't in your context, use
   `cppgraph <cmd>` directly; never open `.graph.db` with sqlite.
-- **`hotspots` — global ranking by fan-in / fan-out / edge count.** Per-symbol
-  tools (`who_calls`/`what_it_calls`) can't answer "top N most-called / most-calling
-  symbols across the project" — today that needs manual SQL or N parallel calls.
-  `hotspots(limit, kind=fan_in|fan_out|edges)` is a `Counter` over `graph.edges`:
-  exact, data already in memory, works on any graph. The canonical "where's the
-  weight?" question, one call replacing ~10 queries. Highest-value of the batch.
 - **`stats` — aggregate counts by file / directory.** No tool gives a module-level
   map (symbols, edges, refs per file, rolled up per directory via `dirname`). Exact
   aggregation over `Node.file`/`Edge.file`; lets an LLM size up an unfamiliar module

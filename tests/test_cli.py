@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -388,6 +389,105 @@ def test_update_applies_partial_reindex(tmp_path: Path, capsys: pytest.CaptureFi
     assert store.meta()["source_commit"] == "newsha"
 
 
+def test_update_with_no_args_auto_discovers_and_runs_incremental_update(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`cppgraph update` with no flags is the real entry point: discover the graph
+    and compdb from the cwd (like every other query command) and run a full
+    incremental update — no `--graph`/`--scip` required."""
+    import subprocess as sp
+
+    from cppgraph import pipeline
+    from cppgraph.store import build_provenance
+
+    def git(*a: str) -> sp.CompletedProcess:
+        return sp.run(["git", "-C", str(tmp_path), *a], check=True, capture_output=True, text=True)
+
+    git("init", "-q")
+    git("config", "user.email", "t@example.com")
+    git("config", "user.name", "t")
+    src = tmp_path / "a.cpp"
+    src.write_text("int a() {}\n")
+    (tmp_path / "compile_commands.json").write_text(json.dumps([{"file": str(src)}]))
+    git("add", "-A")
+    git("commit", "-q", "-m", "init")
+    commit = git("rev-parse", "HEAD").stdout.strip()
+
+    cpg = tmp_path / ".cppgraph"
+    cpg.mkdir()
+    index = scip_pb2.Index(metadata=scip_pb2.Metadata(project_root=f"file://{tmp_path}"))
+    meta = build_provenance(index, source_commit=commit)
+    write_sqlite(Graph(), cpg / "proj.graph.db", meta=meta)
+
+    src.write_text("int a() { return 1; }\n")  # a real change since the indexed commit
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(pipeline.os, "access", lambda *a, **k: True)  # pretend scip-clang exists
+    reindexed: list[list[str]] = []
+
+    def _fake_run_scip_clang(project_root, compdb_path, out_scip, *, print_fn=print):
+        data = json.loads(compdb_path.read_text())
+        reindexed.append([e["file"] for e in data])
+        empty = scip_pb2.Index()
+        empty.metadata.project_root = f"file://{project_root}"
+        out_scip.write_bytes(empty.SerializeToString())
+
+    monkeypatch.setattr(pipeline, "run_scip_clang", _fake_run_scip_clang)
+
+    assert main(["update"]) == 0
+    assert reindexed == [[str(src)]]
+
+
+def test_update_with_explicit_graph_uses_recorded_project_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An explicit `--graph` isn't required to live at the conventional
+    `<project_root>/.cppgraph/<name>.graph.db` depth — the store's own recorded
+    `project_root` is authoritative, not a `parent.parent` guess from the path."""
+    import subprocess as sp
+
+    from cppgraph import pipeline
+    from cppgraph.store import build_provenance
+
+    def git(*a: str) -> sp.CompletedProcess:
+        return sp.run(["git", "-C", str(tmp_path), *a], check=True, capture_output=True, text=True)
+
+    git("init", "-q")
+    git("config", "user.email", "t@example.com")
+    git("config", "user.name", "t")
+    src = tmp_path / "a.cpp"
+    src.write_text("int a() {}\n")
+    (tmp_path / "compile_commands.json").write_text(json.dumps([{"file": str(src)}]))
+    git("add", "-A")
+    git("commit", "-q", "-m", "init")
+    commit = git("rev-parse", "HEAD").stdout.strip()
+
+    # Graph lives somewhere with NO relation to tmp_path two levels up — only
+    # `meta.project_root` says where the real checkout/compdb are.
+    elsewhere = tmp_path / "elsewhere" / "nested"
+    elsewhere.mkdir(parents=True)
+    graph_path = elsewhere / "proj.graph.db"
+    index = scip_pb2.Index(metadata=scip_pb2.Metadata(project_root=f"file://{tmp_path}"))
+    meta = build_provenance(index, source_commit=commit)
+    write_sqlite(Graph(), graph_path, meta=meta)
+
+    src.write_text("int a() { return 1; }\n")
+    monkeypatch.setattr(pipeline.os, "access", lambda *a, **k: True)
+    reindexed: list[list[str]] = []
+
+    def _fake_run_scip_clang(project_root, compdb_path, out_scip, *, print_fn=print):
+        data = json.loads(compdb_path.read_text())
+        reindexed.append([e["file"] for e in data])
+        empty = scip_pb2.Index()
+        empty.metadata.project_root = f"file://{project_root}"
+        out_scip.write_bytes(empty.SerializeToString())
+
+    monkeypatch.setattr(pipeline, "run_scip_clang", _fake_run_scip_clang)
+
+    assert main(["update", "--graph", str(graph_path)]) == 0
+    assert reindexed == [[str(src)]]
+
+
 @pytest.fixture
 def explain_graph(tmp_path: Path) -> Path:
     """A graph whose symbol has a real definition site (file + line)."""
@@ -577,6 +677,71 @@ def test_impact_lists_transitive_callers(
     assert exit_code == 0
     assert "1 symbol(s)" in out
     assert "caller(a2)." in out
+
+
+@pytest.fixture
+def hotspots_graph(tmp_path: Path) -> Path:
+    graph = Graph()
+    for i, caller in enumerate(["c1", "c2", "c3", "c4", "c5"]):
+        graph.add_edge("calls", caller, "hot", file="f.cpp", line=i)
+    for i, caller in enumerate(["c1", "c2", "c3"]):
+        graph.add_edge("calls", caller, "warm", file="f.cpp", line=10 + i)
+    graph.add_edge("calls", "c1", "cold", file="f.cpp", line=20)
+    path = tmp_path / "hotspots.db"
+    write_sqlite(graph, path)
+    return path
+
+
+def test_hotspots_ranks_fan_in_descending(
+    hotspots_graph: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    exit_code = main(["hotspots", "--graph", str(hotspots_graph)])
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "top 3 of 3 symbol(s) by fan_in" in out
+    lines = [line for line in out.splitlines() if line.startswith("  ")]
+    assert lines[0].split()[0] == "5"
+    assert "hot" in lines[0]
+    assert lines[1].split()[0] == "3"
+    assert lines[2].split()[0] == "1"
+
+
+def test_hotspots_limit_truncates_and_reports_total(
+    hotspots_graph: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    exit_code = main(["hotspots", "--graph", str(hotspots_graph), "--limit", "1"])
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "top 1 of 3 symbol(s)" in out
+    assert "... and 2 more" in out
+
+
+def test_hotspots_fan_out_kind(hotspots_graph: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    exit_code = main(["hotspots", "--graph", str(hotspots_graph), "--kind", "fan_out"])
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    lines = [line for line in out.splitlines() if line.startswith("  ")]
+    assert lines[0].split()[0] == "3"
+    assert "c1" in lines[0]
+
+
+def test_hotspots_exclude_tests_drops_edges_touching_a_test_defined_symbol(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Test-ness is decided by the symbol's own definition file (like
+    `filters.drop_test_edges`), not the call site — matches `store.hotspots`."""
+    graph = Graph()
+    graph.add_edge("calls", "prod_caller", "target", file="src/foo.cpp", line=1)
+    graph.add_edge("calls", "test_helper_caller", "target", file="src/foo.cpp", line=2)
+    graph.nodes["test_helper_caller"].file = "src/foo_test.cpp"
+    path = tmp_path / "excl.db"
+    write_sqlite(graph, path)
+    exit_code = main(["hotspots", "--graph", str(path), "--exclude-tests"])
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "top 1 of 1 symbol(s)" in out
+    lines = [line for line in out.splitlines() if line.startswith("  ")]
+    assert lines[0].split()[0] == "1"  # only prod_caller's edge counted
 
 
 @pytest.fixture

@@ -126,8 +126,11 @@ project, or to target a specific store, pass `--graph <path/to/.cppgraph/name.gr
 ## Keeping it fresh
 
 The graph is a snapshot. `cppgraph status --root /path/to/project` (run from the
-project) tells you how far it has drifted; re-run `scripts/index.sh` and the wizard
-offers an incremental update or a full rebuild.
+project) tells you how far it has drifted, and recommends `update` or `rebuild`.
+Run `cppgraph update` (no args needed inside an indexed project — it
+auto-discovers the graph and compdb, re-indexes the changed files, and applies
+in place); for a full rebuild, or to answer the wizard's questions
+interactively, re-run `scripts/index.sh` from a real terminal.
 
 ## Feedback
 

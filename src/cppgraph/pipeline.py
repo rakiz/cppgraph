@@ -25,7 +25,14 @@ from cppgraph.builder import build_graph
 from cppgraph.export import is_test_file
 from cppgraph.init import scip_clang_bin_dir, scip_clang_info
 from cppgraph.proto import scip_pb2
-from cppgraph.store import GraphStore, build_provenance, update_store, write_sqlite
+from cppgraph.store import (
+    GraphStore,
+    build_provenance,
+    changed_files_since,
+    read_dirty_fingerprints,
+    update_store,
+    write_sqlite,
+)
 
 _HEADER_EXTS = (".h", ".hpp", ".hh", ".hxx", ".ipp", ".inl")
 
@@ -251,26 +258,6 @@ def full_build(
     return 0
 
 
-def _git_diff_names(project_root: Path, base_commit: str, diff_filter: str) -> list[str]:
-    """Paths changed between `base_commit` and the working tree, `--diff-filter`
-    selecting the change kinds (e.g. 'd' = exclude deletions, 'D' = only deletions)."""
-    out = subprocess.run(
-        [
-            "git",
-            "-C",
-            str(project_root),
-            "diff",
-            "--name-only",
-            f"--diff-filter={diff_filter}",
-            base_commit,
-            "--",
-        ],
-        capture_output=True,
-        text=True,
-    )
-    return [line for line in out.stdout.splitlines() if line]
-
-
 def incremental_update(
     *,
     graph_db: Path,
@@ -316,8 +303,13 @@ def incremental_update(
     print_fn(f"  indexed scope: {src_filter or '<whole tree>'} (tests {tests_state})")
     print_fn(f"[1/4] Diffing working tree against stored commit {base_commit} ...")
 
-    changed = _git_diff_names(project_root, base_commit, "d")
-    deleted = _git_diff_names(project_root, base_commit, "D")
+    result = changed_files_since(
+        project_root, base_commit, dirty_fingerprints=read_dirty_fingerprints(meta)
+    )
+    if result is None:
+        print_fn(f"  error: {project_root} is not a git checkout (or git unavailable).")
+        return 1
+    changed, deleted = result
     if src_filter:
         changed = [c for c in changed if src_filter in c]
         deleted = [c for c in deleted if src_filter in c]

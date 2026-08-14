@@ -24,6 +24,7 @@ from cppgraph.store import (
     commits_behind,
     discover_graph,
     enrich_references,
+    project_root_path,
     read_dirty_fingerprints,
     staleness_verdict,
     update_store,
@@ -391,15 +392,22 @@ def main(argv: list[str] | None = None) -> int:
 
     p_update = sub.add_parser(
         "update",
-        help="incrementally apply a partial re-index (only changed TUs) to an existing store",
+        help="refresh a graph for changed source files: with no args, auto-discovers "
+        "the graph + compdb and re-indexes incrementally; with --scip, applies an "
+        "already-produced partial re-index instead",
     )
     p_update.add_argument(
-        "--graph", required=True, help="path to the graph store to update in place"
+        "--graph",
+        default=None,
+        help="path to the graph store to update in place "
+        "(default: auto-discovered from the cwd's .cppgraph/)",
     )
     p_update.add_argument(
         "--scip",
-        required=True,
-        help="SCIP index of only the re-indexed (changed) translation units",
+        default=None,
+        help="SCIP index of only the re-indexed (changed) translation units. Omit this "
+        "(and --graph) to run a full incremental update in one step: diff the "
+        "discovered graph's checkout, re-index the changed TUs, and apply",
     )
     p_update.add_argument(
         "--deleted",
@@ -562,6 +570,33 @@ def main(argv: list[str] | None = None) -> int:
         "'inherits' = all transitive subclasses of a base type",
     )
     _add_query_filters(p_impact)
+
+    p_hotspots = sub.add_parser("hotspots", help="global ranking of symbols by call-edge volume")
+    p_hotspots.add_argument(
+        "--graph",
+        required=False,
+        default=None,
+        help="graph store path (default: auto-discovered from the cwd's .cppgraph/)",
+    )
+    p_hotspots.add_argument(
+        "--kind",
+        choices=("fan_in", "fan_out", "edges"),
+        default="fan_in",
+        help="'fan_in' = most-called (default); 'fan_out' = most-calling; 'edges' = both summed",
+    )
+    p_hotspots.add_argument("--limit", type=int, default=20, help="max rows to show (default: 20)")
+    p_hotspots.add_argument(
+        "--exclude-tests",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="drop edges where either endpoint symbol is itself defined in a test file "
+        "(default: off)",
+    )
+    p_hotspots.add_argument(
+        "--full-symbols",
+        action="store_true",
+        help="print the raw SCIP symbol strings instead of readable labels",
+    )
 
     p_status = sub.add_parser(
         "status",
@@ -837,6 +872,49 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "update":
+        if args.scip is None:
+            from cppgraph.init import find_compdb
+            from cppgraph.pipeline import incremental_update
+
+            if args.graph:
+                graph_path = Path(args.graph)
+                store = GraphStore(graph_path)
+                try:
+                    recorded_root = store.meta().get("project_root")
+                finally:
+                    store.close()
+                # The store's own recorded `project_root` is authoritative — an
+                # explicit `--graph` isn't required to live at the conventional
+                # `<project_root>/.cppgraph/<name>.graph.db` depth (a copy, a
+                # symlink, a non-default layout), so guessing two directories up
+                # can silently pick the wrong checkout/compdb. Only fall back to
+                # the depth guess for an older graph built before this field was
+                # recorded.
+                project_root = (
+                    project_root_path(recorded_root) if recorded_root else None
+                ) or graph_path.resolve().parent.parent
+            else:
+                found = discover_graph()
+                if found is None:
+                    parser.error(
+                        "no --graph given and no .cppgraph/*.graph.db found from here. "
+                        "Pass --graph <store.db>, or run from inside an indexed project."
+                    )
+                graph_path, project_root = found
+            compdb_path = find_compdb(project_root)
+            if compdb_path is None:
+                parser.error(
+                    f"no compile_commands.json found at or above {project_root}; pass "
+                    "--scip to apply an already-produced partial index instead."
+                )
+            return incremental_update(
+                graph_db=graph_path,
+                compdb=compdb_path,
+                project_root=project_root,
+                print_fn=print,
+            )
+        if not args.graph:
+            parser.error("--graph is required together with --scip")
         index = scip_pb2.Index()
         with open(args.scip, "rb") as f:
             index.ParseFromString(f.read())
@@ -1000,6 +1078,25 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  ... and {len(nodes) - len(shown)} more (raise --limit to see them)")
         return 0
 
+    if args.command == "hotspots":
+        store = GraphStore(_resolve_graph(args, parser))
+        ranked, total = store.hotspots(
+            limit=args.limit, kind=args.kind, exclude_tests=args.exclude_tests
+        )
+        tests_note = " (excluding tests)" if args.exclude_tests else ""
+        print(f"[cppgraph] top {len(ranked)} of {total} symbol(s) by {args.kind}{tests_note}")
+        for symbol, count in ranked:
+            node = store.get_node(symbol)
+            label = symbol if args.full_symbols else short_label(symbol)
+            if node is not None and node.file is not None and node.line is not None:
+                loc = f"{node.file}:{node.line + 1}"
+            else:
+                loc = "?"
+            print(f"  {count:>6}  {label}  ({loc})")
+        if total > len(ranked):
+            print(f"  ... and {total - len(ranked)} more (raise --limit to see them)")
+        return 0
+
     if args.command == "status":
         graph_path = _resolve_graph(args, parser)
         store = GraphStore(graph_path)
@@ -1122,7 +1219,7 @@ def main(argv: list[str] | None = None) -> int:
             )
         else:
             print("  recommendation: incremental update")
-            print(f"    next: scripts/index.sh {graph_path} <compile_commands.json>")
+            print("    next: cppgraph update")
         return 1
 
     if args.command == "explain":

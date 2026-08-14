@@ -205,6 +205,36 @@ def test_impact_depth_bounds_walk(store: GraphStore) -> None:
     assert names == {"mid"}  # only the direct caller at depth 1
 
 
+def test_hotspot_ranking_fan_in_orders_by_incoming_calls(store: GraphStore) -> None:
+    # fixture: caller -> mid -> makeResumeToken, so FOO and MID each have
+    # exactly one caller (fan_in == 1); this proves the MCP wrapper is driven
+    # by the same GraphStore.hotspots used by the CLI (parity, not reimplementation).
+    result = mcp_server.hotspot_ranking(store, kind="fan_in")
+    assert result["kind"] == "fan_in"
+    assert result["total"] == 2
+    names = {h["name"] for h in result["hotspots"]}
+    assert names == {"makeResumeToken", "mid"}
+    counts = {h["name"]: h["count"] for h in result["hotspots"]}
+    assert counts["makeResumeToken"] == 1
+    assert counts["mid"] == 1
+
+
+def test_hotspot_ranking_limit_truncates(store: GraphStore) -> None:
+    result = mcp_server.hotspot_ranking(store, kind="fan_in", limit=1)
+    assert result["total"] == 2
+    assert len(result["hotspots"]) == 1
+    assert result["truncated"] is True
+
+
+def test_hotspot_ranking_matches_store_hotspots_directly(store: GraphStore) -> None:
+    """Parity check: the MCP tool's ranking is exactly `store.hotspots`, not a
+    reimplementation — same symbols in the same order, not just same counts."""
+    result = mcp_server.hotspot_ranking(store, kind="fan_out", full_symbols=True)
+    expected_ranked, expected_total = store.hotspots(kind="fan_out")
+    assert result["total"] == expected_total
+    assert [(h["symbol"], h["count"]) for h in result["hotspots"]] == expected_ranked
+
+
 BASE = "cxx . . $ mongo/Base#"
 DERIVED = "cxx . . $ mongo/Derived#"
 LEAF = "cxx . . $ mongo/Leaf#"

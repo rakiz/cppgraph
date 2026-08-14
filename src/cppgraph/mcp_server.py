@@ -614,6 +614,48 @@ def impact(
     }
 
 
+def hotspot_ranking(
+    store: GraphStore,
+    limit: int = DEFAULT_LIMIT,
+    kind: str = "fan_in",
+    exclude_tests: bool = False,
+    full_symbols: bool = False,
+) -> dict[str, Any]:
+    """Global ranking of symbols by call-edge volume — "what's most-called /
+    most-calling across the whole project?", the question `who_calls`/
+    `what_it_calls` can only answer one symbol at a time.
+
+    `kind="fan_in"` (default) ranks by incoming `calls` edges (most-called);
+    `"fan_out"` by outgoing edges (most-calling); `"edges"` sums both per
+    symbol. `exclude_tests` drops an edge if either endpoint symbol is itself
+    defined in a test file (its own definition site, like `find_references`'
+    test filtering — not the call site).
+    `limit` caps the list (default 40): lower it to spend fewer tokens, raise
+    it when `truncated` is true — `total` always reports the full ranked count.
+    """
+    ranked, total = store.hotspots(limit=limit, kind=kind, exclude_tests=exclude_tests)
+    truncated = total > len(ranked)
+    items: list[dict[str, Any]] = []
+    for symbol, count in ranked:
+        node = store.get_node(symbol)
+        item = (
+            _node_dict(node, full_symbols)
+            if node is not None
+            else {"name": _short_label(symbol), "file": None, "line": None}
+        )
+        if full_symbols:
+            item["symbol"] = symbol
+        item["count"] = count
+        items.append(item)
+    return {
+        "kind": kind,
+        "total": total,
+        "truncated": truncated,
+        "excluded_tests": exclude_tests,
+        "hotspots": items,
+    }
+
+
 def explain(
     store: GraphStore,
     symbol: str,
@@ -789,7 +831,7 @@ def status_report(
         drift["changed_fraction"] = verdict.get("changed_fraction")
         drift["recommend"] = verdict["recommend"]  # "update" | "rebuild"
         drift["next"] = (
-            "run scripts/index.sh to refresh the graph"
+            "run `cppgraph update` to refresh the graph"
             if verdict["recommend"] == "update"
             else "drift too large for incremental — re-index the whole target and rebuild"
         )
@@ -1082,6 +1124,29 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
             kind=kind,
             full_symbols=full_symbols,
             exclude_tests=exclude_tests,
+        )
+
+    @mcp.tool()
+    def hotspots(
+        limit: int = DEFAULT_LIMIT,
+        kind: str = "fan_in",
+        exclude_tests: bool = False,
+        full_symbols: bool = False,
+    ) -> dict[str, Any]:
+        """Global ranking by call-edge volume — "top N most-called / most-calling
+        symbols in the project", the question `who_calls`/`what_it_calls` can't
+        answer without N manual calls. kind="fan_in" (default) = most-called
+        (incoming `calls` edges); kind="fan_out" = most-calling (outgoing);
+        kind="edges" = both summed. Compact `name` + `file:line` by default
+        (`full_symbols=True` for raw SCIP); pass `exclude_tests=True` to drop
+        edges whose call site is in a test file. `limit` caps the list (default
+        40): lower it to spend fewer tokens, raise it when `truncated`."""
+        return _call(
+            hotspot_ranking,
+            limit=limit,
+            kind=kind,
+            exclude_tests=exclude_tests,
+            full_symbols=full_symbols,
         )
 
     @mcp.tool()

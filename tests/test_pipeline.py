@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+import subprocess as sp
 from pathlib import Path
 
 from cppgraph import pipeline
+from cppgraph.model import Graph
 from cppgraph.proto import scip_pb2
-from cppgraph.store import GraphStore
+from cppgraph.store import GraphStore, build_provenance, write_sqlite
 
 
 def _compdb(path: Path) -> Path:
@@ -102,3 +104,63 @@ def test_full_build_reuses_scip_then_builds_real_graph(tmp_path: Path) -> None:
         assert store.meta().get("index_filter") == ""  # whole-tree scope recorded
     finally:
         store.close()
+
+
+def test_incremental_update_matches_status_on_dirty_fingerprints(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """`incremental_update` must agree with `status` on what "changed" means: a
+    file dirty *at build time* and still holding that exact content is NOT
+    re-indexed (the false-stale `changed_files_since` kills); reverted back to the
+    committed version, it IS re-indexed (the index still holds the dirty content).
+    Mirrors `test_dirty_fingerprints_prevent_false_stale` in test_store.py."""
+
+    def git(*a: str) -> sp.CompletedProcess:
+        return sp.run(["git", "-C", str(tmp_path), *a], check=True, capture_output=True, text=True)
+
+    git("init", "-q")
+    git("config", "user.email", "t@example.com")
+    git("config", "user.name", "t")
+    src = tmp_path / "a.cpp"
+    src.write_text("int a() { return 0; }\n")
+    git("add", "a.cpp")
+    git("commit", "-q", "-m", "init")
+    commit = git("rev-parse", "HEAD").stdout.strip()
+
+    # The state actually indexed: an uncommitted edit.
+    src.write_text("int a() { return 1; }\n")
+    index = scip_pb2.Index(metadata=scip_pb2.Metadata(project_root=f"file://{tmp_path}"))
+    meta = build_provenance(index, source_commit=commit, source_dirty=True)
+
+    db = tmp_path / "proj.graph.db"
+    write_sqlite(Graph(), db, meta=meta)
+    compdb = tmp_path / "compile_commands.json"
+    compdb.write_text(json.dumps([{"file": str(src)}]))
+
+    monkeypatch.setattr(pipeline.os, "access", lambda *a, **k: True)  # pretend scip-clang exists
+    reindexed: list[list[str]] = []
+
+    def _fake_run_scip_clang(project_root, compdb_path, out_scip, *, print_fn=print):
+        data = json.loads(compdb_path.read_text())
+        reindexed.append([e["file"] for e in data])
+        empty = scip_pb2.Index()
+        empty.metadata.project_root = f"file://{project_root}"
+        out_scip.write_bytes(empty.SerializeToString())
+
+    monkeypatch.setattr(pipeline, "run_scip_clang", _fake_run_scip_clang)
+
+    # Still dirty, unchanged since build -> nothing to do, scip-clang never runs.
+    rc = pipeline.incremental_update(
+        graph_db=db, compdb=compdb, project_root=tmp_path, print_fn=lambda *a: None
+    )
+    assert rc == 0
+    assert reindexed == []
+
+    # Reverted to the committed version -> the index holds different (dirty)
+    # content than the tree now does -> stale, must be re-indexed.
+    src.write_text("int a() { return 0; }\n")
+    rc = pipeline.incremental_update(
+        graph_db=db, compdb=compdb, project_root=tmp_path, print_fn=lambda *a: None
+    )
+    assert rc == 0
+    assert reindexed == [[str(src)]]
