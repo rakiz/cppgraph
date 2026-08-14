@@ -8,7 +8,7 @@ on-disk store also carries its own `schema_version` for forward-compatibility.
 
 _Nothing yet._
 
-## [0.1.0] - 2026-07-17
+## [0.1.0] - 2026-08-14
 
 First release. cppgraph builds an exact, compiler-grade C++ call/type graph and
 serves it to humans (CLI) and to LLMs (MCP), with a focus on precise answers and

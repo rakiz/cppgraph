@@ -5,6 +5,13 @@
     "version": "0.4.0",
     "rebuild": "reindex"
   },
-  "latest": null,
-  "releases": []
+  "latest": "0.1.0",
+  "releases": [
+    {
+      "version": "0.1.0",
+      "rebuild": "reindex",
+      "notes": "First release.",
+      "url": "https://github.com/rakiz/cppgraph/releases/tag/v0.1.0"
+    }
+  ]
 }
