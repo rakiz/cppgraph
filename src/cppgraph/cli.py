@@ -91,6 +91,40 @@ def _print_edge(edge: Edge, *, other: str, full_symbols: bool = True) -> None:
     print(f"  {label}  ({edge.file}:{line})")
 
 
+def extract_signature(root: str | None, file: str | None, line0: int | None) -> str | None:
+    """A best-effort readable parameter signature — including any default
+    argument values, verbatim as written — read from the source at a
+    definition site.
+
+    `scip-clang` disambiguates overloads by an opaque hash, not by argument
+    types, so grouped overloads (`find`) are otherwise indistinguishable, and
+    the graph itself never carries a parsed signature (`explain`/`explain_symbol`).
+    Since cppgraph has the checkout (`root`), it reads the def line and captures
+    the text from the first `(` to its matching `)` verbatim — so a defaulted
+    parameter (`bool useNullIfMissing = false`) is visible without opening the
+    header. Display-only, so templates / macros / multi-line params are
+    tolerated (whitespace collapsed). `None` if there's no root, the file can't
+    be read, or no parameter list is found."""
+    if root is None or file is None or line0 is None:
+        return None
+    snippet = read_source_snippet(root, file, line0, context=8)
+    if not snippet:
+        return None
+    text = " ".join(t for i, t in snippet if i >= line0)
+    start = text.find("(")
+    if start < 0:
+        return None
+    depth = 0
+    for j in range(start, len(text)):
+        if text[j] == "(":
+            depth += 1
+        elif text[j] == ")":
+            depth -= 1
+            if depth == 0:
+                return " ".join(text[start : j + 1].split())
+    return None
+
+
 def _add_query_filters(parser: argparse.ArgumentParser, *, hide_trivial: bool = False) -> None:
     """Attach the shared filter/budget flags so the CLI query commands match the
     MCP tools (`who_calls`/`what_it_calls`/`impact_of`): a result cap, test-edge
@@ -1317,6 +1351,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[cppgraph] {node.symbol}")
         print(f"  name:       {node.display_name or '?'}")
         print(f"  defined at: {loc}")
+        if args.root is not None:
+            sig = extract_signature(args.root, node.file, node.line)
+            if sig is not None:
+                print(f"  signature:  {sig}")
 
         # --root is the sole snippet switch: given => read source, omitted =>
         # coordinates only. We never fall back to the stored project_root, which

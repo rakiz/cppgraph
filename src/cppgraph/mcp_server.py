@@ -33,7 +33,7 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from cppgraph.cli import SOURCE_EXTS, build_export_json, read_source_snippet
+from cppgraph.cli import SOURCE_EXTS, build_export_json, extract_signature, read_source_snippet
 from cppgraph.export import is_test_file
 from cppgraph.filters import drop_test_edges as _drop_test_edges
 from cppgraph.filters import filter_by_path as _filter_by_path
@@ -161,36 +161,6 @@ def _merged_source(
     return [{"line": i + 1, "text": lines[i], "is_use": i in hits} for i in sorted(wanted)]
 
 
-def _extract_signature(root: str | None, file: str | None, line0: int | None) -> str | None:
-    """A best-effort readable parameter signature for an overload, read from the
-    source at its definition site.
-
-    `scip-clang` disambiguates overloads by an opaque hash, not by argument
-    types, so grouped overloads are otherwise indistinguishable. Since cppgraph
-    has the checkout (`root`), it reads the def line and captures the text from
-    the first `(` to its matching `)` — display-only, so templates / macros /
-    multi-line params are tolerated (whitespace collapsed). `None` if there's no
-    root, the file can't be read, or no parameter list is found."""
-    if root is None or file is None or line0 is None:
-        return None
-    snippet = read_source_snippet(root, file, line0, context=8)
-    if not snippet:
-        return None
-    text = " ".join(t for i, t in snippet if i >= line0)
-    start = text.find("(")
-    if start < 0:
-        return None
-    depth = 0
-    for j in range(start, len(text)):
-        if text[j] == "(":
-            depth += 1
-        elif text[j] == ")":
-            depth -= 1
-            if depth == 0:
-                return " ".join(text[start : j + 1].split())
-    return None
-
-
 def find_symbols(
     store: GraphStore,
     query: str,
@@ -266,7 +236,7 @@ def find_symbols(
             sigs: list[dict[str, Any]] = []
             for m in members:
                 d = _node_dict(m, full_symbols=True)
-                sig = _extract_signature(root, m.file, m.line)
+                sig = extract_signature(root, m.file, m.line)
                 if sig:
                     d["signature"] = sig
                 sigs.append(d)
@@ -748,7 +718,12 @@ def explain(
     default (`exclude_tests`); `full_symbols=True` keeps the raw SCIP strings in
     the caller/callee lists. With `hide_trivial=True`, ubiquitous helpers
     (operators, `*assert`, `makeStatus`, `source_location`, …) are dropped from
-    the caller/callee lists, each side reporting its `trivial_hidden` count."""
+    the caller/callee lists, each side reporting its `trivial_hidden` count.
+    With `root` given, `signature` is a best-effort parameter list read from the
+    definition site — including any default argument value, verbatim (e.g.
+    `(bool useNullIfMissing = false)`) — since the graph itself never carries a
+    parsed signature and a defaulted param is otherwise invisible without
+    opening the header."""
     node = store.get_node(symbol)
     if node is None:
         return {"error": _UNKNOWN.format(symbol=symbol)}
@@ -789,6 +764,13 @@ def explain(
         "callers": callers_block,
         "callees": callees_block,
     }
+
+    if root is not None:
+        # Always set the key, even when extraction failed (None) — mirrors
+        # `source`'s "None means requested but unavailable, absent means not
+        # requested" convention, rather than silently omitting the key and
+        # letting the caller wonder if signature extraction was even attempted.
+        result["signature"] = extract_signature(root, node.file, node.line)
 
     if include_source and root is not None and node.file is not None and node.line is not None:
         snippet = read_source_snippet(root, node.file, node.line, context=context)
@@ -1291,7 +1273,11 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         are compact `name` + `file:line` (`full_symbols=True` for raw SCIP) and
         drop test files unless `exclude_tests=False`. Set `hide_trivial=True` to
         also drop ubiquitous helpers (operators, `*assert`, `makeStatus`,
-        `source_location`, …) — each list reports its `trivial_hidden` count."""
+        `source_location`, …) — each list reports its `trivial_hidden` count.
+        With a checkout configured (`--root`), also returns `signature`: the
+        parameter list read from source, including any default argument value
+        verbatim (e.g. `(bool useNullIfMissing = false)`) — invisible from the
+        graph alone, which never carries a parsed signature."""
         return _call(
             explain,
             symbol,

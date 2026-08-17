@@ -415,6 +415,38 @@ def test_explain_unknown_symbol_is_error(store: GraphStore) -> None:
     assert "error" in result
 
 
+def test_explain_signature_includes_default_argument_value(
+    store: GraphStore, tmp_path: Path
+) -> None:
+    """From real use: a defaulted param (`useNullIfMissing = false`) a caller
+    omits was invisible without opening the header — `signature` surfaces it
+    verbatim, source-derived, since the graph itself has no parsed signature."""
+    root = tmp_path / "checkout"
+    root.mkdir()
+    (root / "foo.cpp").write_text(
+        "\n".join(f"line {i}" for i in range(234))
+        + "\nvoid makeResumeToken(const Document& doc, bool useNullIfMissing = false) {}\n"
+    )
+    result = mcp_server.explain(store, FOO, root=str(root))
+    assert result["signature"] == "(const Document& doc, bool useNullIfMissing = false)"
+
+
+def test_explain_signature_absent_without_root(store: GraphStore) -> None:
+    result = mcp_server.explain(store, FOO)
+    assert "signature" not in result
+
+
+def test_explain_signature_is_none_not_absent_when_root_given_but_unextractable(
+    store: GraphStore, tmp_path: Path
+) -> None:
+    """With `root` given, `signature` mirrors `source`'s convention: the key is
+    always present, `None` means "tried, couldn't extract" (missing file here)
+    — distinct from being absent entirely when `root` wasn't given at all."""
+    result = mcp_server.explain(store, FOO, root=str(tmp_path))  # no foo.cpp there
+    assert "signature" in result
+    assert result["signature"] is None
+
+
 def test_explain_limit_is_overridable(store: GraphStore) -> None:
     # FOO has one caller (mid); force a limit of 0 to prove the cap is honored
     # and truncation flagged, so an LLM can raise it back when it needs more.

@@ -16,14 +16,6 @@ active list. Design detail is in `DESIGN.md`, shipped features in
   (documented, accepted limitation, see `DESIGN.md`). Remaining item: expose an explicit
   `caller_count` (incl. `0`) for `no_incoming_calls`; that tool would also need to gate on
   graph type, since "0 callers" is only trustworthy on a #504 graph.
-- **Full signature with default arguments in `explain_symbol`.** From real use: the crux of
-  an investigation was that `extractElementsBasedOnTemplate(…, bool useNullIfMissing = false)`
-  has a defaulted param the caller omits — invisible today. `explain_symbol` gives
-  callers/callees but not the signature, so the user had to read the `.h`. cppgraph already
-  derives a source-derived `signature` for `find`'s overload disambiguation; extend it to
-  carry default values and surface it in `explain_symbol` (needs `--root`, factual — read
-  from source). Note: this shows the default *exists*; knowing whether a given call *relies*
-  on it needs per-call arity — see the scip-clang section.
 - **Indexing progress: consume scip-clang's per-TU report instead of suppressing it.**
   Same user, same session: a full re-index runs for an unknown duration with no signal.
   `run_scip_clang` passes `--no-progress-report` (`pipeline.py:132`), inherited from the

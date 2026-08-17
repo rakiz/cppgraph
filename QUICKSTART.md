@@ -92,11 +92,12 @@ graph) and ask, in plain language:
 - *"What's the blast radius if I change this function?"*
 - *"Show me everything that uses the type `Foo` (without the tests)."*
 - *"Show the dependency graph of `Bar`."* → opens a diagram in your browser.
+- *"What are the 10 most-called functions in this codebase?"*
 
 Claude picks the right tool (`find`, `who_calls`, `impact_of`, `find_references`,
-`path`, `visualize`, `status`, …). On connect, cppgraph steers Claude to prefer
-these tools over grep for code in the indexed scope; the tools take a plain name
-directly (`SomeClass::someMethod`), so no exact SCIP string is needed.
+`hotspots`, `path`, `visualize`, `status`, …). On connect, cppgraph steers Claude
+to prefer these tools over grep for code in the indexed scope; the tools take a
+plain name directly (`SomeClass::someMethod`), so no exact SCIP string is needed.
 
 The lookup is forgiving, so a rough name still lands: `find` matches multiple
 words in any order and, if nothing hits exactly, falls back

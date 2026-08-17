@@ -25,6 +25,13 @@ on-disk store also carries its own `schema_version` for forward-compatibility.
 - **`transport` in `status`**: `"cli"` or `"mcp"`, so a copied status block (e.g.
   from a Task subagent without direct MCP access) says which surface produced
   it instead of resting on an agent's say-so.
+- **`signature` in `explain`/`explain_symbol`**: a source-derived parameter list
+  for the definition, including any default argument value verbatim (e.g.
+  `(bool useNullIfMissing = false)`) — invisible from the graph alone, which
+  never carries a parsed signature. Needs `--root`/a configured checkout, like
+  the existing `include_source`. Shares `extract_signature` with `find`'s
+  overload-signature grouping (moved to `cppgraph.cli` alongside
+  `read_source_snippet`, its only dependency).
 
 ### Fixed
 

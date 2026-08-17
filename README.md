@@ -3,9 +3,10 @@
 Compiler-exact C++ code intelligence for AI agents. It answers the questions your
 assistant otherwise guesses at with grep — **who calls this function, what it
 calls, who references this type, the class hierarchy, the change impact / blast
-radius, the call path between two symbols** — exposed as **MCP tools your agent calls
+radius, the call path between two symbols, and where the busiest fan-in/fan-out
+symbols in the whole project are** — exposed as **MCP tools your agent calls
 directly** (`who_calls`, `what_it_calls`, `find_references`, `impact_of`, `path`,
-`base_classes` / `subclasses`), backed by a pre-indexed graph, plus a CLI.
+`base_classes` / `subclasses`, `hotspots`), backed by a pre-indexed graph, plus a CLI.
 
 Built from a **compiler front-end index** (SCIP via `scip-clang`), not a syntactic
 AST: every symbol has a stable, unique identity (USR / mangled name), so edges are

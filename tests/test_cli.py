@@ -674,6 +674,39 @@ def test_explain_unknown_symbol_errors(explain_graph: Path) -> None:
         main(["explain", "--graph", str(explain_graph), "nonexistent", "--root", "/tmp"])
 
 
+def test_explain_shows_signature_with_default_argument(
+    explain_graph: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = tmp_path / "checkout"
+    src = root / "src"
+    src.mkdir(parents=True)
+    (src / "foo.cpp").write_text(
+        "line0\nline1\nline2\nvoid bar(const Document& doc, bool useNullIfMissing = false) {\n}\n"
+    )
+    exit_code = main(
+        [
+            "explain",
+            "--graph",
+            str(explain_graph),
+            "cxx . . $ mongo/Foo#bar(a1).",
+            "--root",
+            str(root),
+        ]
+    )
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "signature:  (const Document& doc, bool useNullIfMissing = false)" in out
+
+
+def test_explain_omits_signature_without_root(
+    explain_graph: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    exit_code = main(["explain", "--graph", str(explain_graph), "cxx . . $ mongo/Foo#bar(a1)."])
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "signature:" not in out
+
+
 def _init_repo(root: Path) -> str:
     """Init a git repo with one committed file; return the HEAD commit hash."""
     root.mkdir(parents=True, exist_ok=True)

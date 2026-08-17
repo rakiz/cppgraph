@@ -341,8 +341,9 @@ designing the builder so this isn't a later rewrite:
   fixed at launch (`--graph <db>`, optional `--root <checkout>`) so tools never
   take — and the LLM never has to guess or repeat — a filesystem path. Tools:
   `find`, `who_calls`, `what_it_calls`, `base_classes`, `subclasses`,
-  `find_references`, `path`, `impact_of` (`kind` = calls|inherits),
-  `explain_symbol`, `status`, `visualize`. Each symbol-taking tool accepts a plain
+  `find_references`, `path`, `impact_of` (`kind` = calls|inherits), `hotspots`
+  (global fan-in/fan-out/edge-count ranking), `explain_symbol`, `status`,
+  `visualize`. Each symbol-taking tool accepts a plain
   name as well as an exact SCIP string, through the shared `GraphStore.resolve`
   (also behind the CLI): a unique name resolves, `Class::method` maps to
   `Class#method`, an ambiguous name returns candidates, and no symbol is guessed.
@@ -368,11 +369,15 @@ designing the builder so this isn't a later rewrite:
     Fan-out tools emit that label by default and the raw string only with
     `full_symbols=True`. Test callers/uses are dropped by default
     (`exclude_tests`, filtered on the far-end node's definition file, catching
-    `~..._Test` teardown sites too). These filter primitives live in
-    `cppgraph.filters` and drive **both** surfaces — the MCP tools and the CLI
-    query commands (`callers`/`callees`/`impact`, with `--limit`,
-    `--exclude-tests`/`--no-exclude-tests`, `--hide-trivial`, `--full-symbols`) —
-    so the same question gives the same answer whichever way it's asked.
+    `~..._Test` teardown sites too). A `Node.file`-prefix predicate
+    (`include_paths`/`exclude_paths`, simple prefix match) scopes a query to
+    "my code, not vendored deps" the same way, on `find`/`who_calls`/
+    `what_it_calls`/`find_references`/`impact_of`/`hotspots`. These filter
+    primitives live in `cppgraph.filters` and drive **both** surfaces — the MCP
+    tools and the CLI query commands (`callers`/`callees`/`impact`, with
+    `--limit`, `--exclude-tests`/`--no-exclude-tests`, `--hide-trivial`,
+    `--full-symbols`, `--include-path`/`--exclude-path`) — so the same question
+    gives the same answer whichever way it's asked.
     Measured effect on `who_calls` for a hub symbol: ~5.5× smaller payload
     (`scripts/measure_tokens.py`).
   - *Query quality*: `find` matches multiple words as an order-free AND (each
