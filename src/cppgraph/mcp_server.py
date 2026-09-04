@@ -47,6 +47,7 @@ from cppgraph.store import (
     changed_files_since,
     commits_behind,
     discover_graph,
+    is_stale,
     read_dirty_fingerprints,
     staleness_verdict,
 )
@@ -1021,11 +1022,20 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
     mcp = FastMCP("cppgraph", instructions=_server_instructions(stores.get()))
 
     def _call(fn: Any, *args: Any, **kwargs: Any) -> dict[str, Any]:
-        """Run a pure `(store, …) -> dict` query, or return the no-graph notice."""
+        """Run a pure `(store, …) -> dict` query, or return the no-graph notice.
+        Attaches a cheap `stale` flag (git diff, no rebuild) when `root` and a
+        recorded source commit make the check possible — the per-query drift
+        signal `status`'s full report already computes, without its cost."""
         s = stores.get()
         if s is None:
             return dict(_NO_GRAPH)
-        return fn(s, *args, **kwargs)
+        result = fn(s, *args, **kwargs)
+        if root is not None:
+            try:
+                result["stale"] = is_stale(s, root, SOURCE_EXTS)
+            except Exception:
+                result["stale"] = None
+        return result
 
     @mcp.tool()
     def find(

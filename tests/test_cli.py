@@ -780,6 +780,42 @@ def test_status_ignores_non_source_changes(
     assert "up to date" in capsys.readouterr().out.lower()
 
 
+def _store_with_recorded_root(root: Path, commit: str) -> Path:
+    """A store whose `meta.project_root` points at `root` — the provenance
+    `_open_store_checked` resolves `root` from for commands with no `--root`
+    flag of their own (`callers`, `callees`, `find`, …)."""
+    graph = Graph()
+    graph.add_node("cxx . . $ mongo/Foo#makeResumeToken(a1).", display_name="makeResumeToken")
+    graph.add_edge(
+        "calls",
+        "cxx . . $ mongo/Foo#caller(a2).",
+        "cxx . . $ mongo/Foo#makeResumeToken(a1).",
+        file="foo.cpp",
+        line=9,
+    )
+    db = root / "graph.db"
+    write_sqlite(graph, db, meta={"source_commit": commit, "project_root": f"file://{root}"})
+    return db
+
+
+def test_query_command_warns_on_stderr_when_stale(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`_open_store_checked` (used by `callers` and friends) resolves `root` from
+    the store's recorded `project_root` when no `--root` flag exists, and warns
+    on stderr — but only once the checkout has actually drifted."""
+    root = tmp_path / "repo"
+    head = _init_repo(root)
+    db = _store_with_recorded_root(root, head)
+
+    assert main(["callers", "--graph", str(db), "cxx . . $ mongo/Foo#makeResumeToken(a1)."]) == 0
+    assert capsys.readouterr().err == ""
+
+    (root / "a.cpp").write_text("int a() { return 1; }\n")  # uncommitted drift
+    assert main(["callers", "--graph", str(db), "cxx . . $ mongo/Foo#makeResumeToken(a1)."]) == 0
+    assert "stale" in capsys.readouterr().err.lower()
+
+
 def test_impact_lists_transitive_callers(
     graph_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

@@ -514,6 +514,29 @@ def test_status_detects_stale(tmp_path: Path) -> None:
     assert "notes.md" not in result["drift"]["changed"]
 
 
+def test_call_attaches_stale_flag(tmp_path: Path) -> None:
+    """A tool response routed through `build_server`'s `_call` wrapper carries a
+    `stale` bool driven by the real git drift state — not just the pure
+    `(store, ...) -> dict` functions tested elsewhere in this file."""
+    from cppgraph.mcp_server import build_server
+
+    root = tmp_path / "co"
+    root.mkdir()
+    (root / "a.cpp").write_text("int main(){}\n")
+    commit = _init_repo(root)
+    graph = Graph()
+    graph.add_node(FOO, display_name="makeResumeToken")
+    path = tmp_path / "g.db"
+    write_sqlite(graph, path, meta={"source_commit": commit})
+
+    server = build_server(str(path), root=str(root))
+    find_tool = server._tool_manager._tools["find"].fn
+    assert find_tool(query="makeResumeToken")["stale"] is False
+
+    (root / "a.cpp").write_text("int main(){return 1;}\n")  # drift
+    assert find_tool(query="makeResumeToken")["stale"] is True
+
+
 def test_make_export_deps_returns_subgraph(store: GraphStore) -> None:
     g = mcp_server.make_export(store, FOO, mode="deps", depth=1, direction="in")
     ids = {n["id"] for n in g["nodes"]}

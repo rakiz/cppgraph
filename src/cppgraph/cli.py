@@ -30,6 +30,7 @@ from cppgraph.store import (
     commits_behind,
     discover_graph,
     enrich_references,
+    is_stale,
     project_root_path,
     read_dirty_fingerprints,
     staleness_verdict,
@@ -196,6 +197,35 @@ def _resolve_graph(args: argparse.Namespace, parser: argparse.ArgumentParser) ->
         )
     graph, _root = found
     return str(graph)
+
+
+def _open_store_checked(args: argparse.Namespace, parser: argparse.ArgumentParser) -> GraphStore:
+    """Resolve the graph, open it, and — best-effort — warn on stderr if it has
+    drifted from its source commit (same cheap `git diff` `status`'s drift check
+    runs, no rebuild triggered). Mirrors the MCP tools' per-call `stale` flag for
+    the CLI's plain-text output."""
+    graph_path = _resolve_graph(args, parser)
+    store = GraphStore(graph_path)
+    root = getattr(args, "root", None)
+    if root is None:
+        # The store's own recorded `project_root` is authoritative — it's the
+        # checkout the graph was actually built from, unlike `discover_graph()`
+        # which searches from the CWD and can resolve to a *different* project's
+        # root when `--graph` points elsewhere (spurious drift / wrong commit).
+        # Only fall back to the CWD search for an older graph built before this
+        # field was recorded.
+        recorded_root = store.meta().get("project_root")
+        root = project_root_path(recorded_root) if recorded_root else None
+        if root is None:
+            found = discover_graph()
+            root = found[1] if found else None
+    if root is not None and is_stale(store, root, SOURCE_EXTS):
+        print(
+            "[cppgraph] warning: graph may be stale (source changed since indexing) "
+            "— run `cppgraph status` for details, `cppgraph update` to refresh",
+            file=sys.stderr,
+        )
+    return store
 
 
 def _resolve_symbol(
@@ -1005,7 +1035,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "find":
-        store = GraphStore(_resolve_graph(args, parser))
+        store = _open_store_checked(args, parser)
         matches = store.find(args.query)
         if args.include_paths or args.exclude_paths:
             matches = [
@@ -1023,7 +1053,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "callers":
-        store = GraphStore(_resolve_graph(args, parser))
+        store = _open_store_checked(args, parser)
         args.symbol = _resolve_symbol(store, args.symbol, parser)
         edges = store.callers_of(args.symbol)
         if args.exclude_tests:
@@ -1045,7 +1075,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "callees":
-        store = GraphStore(_resolve_graph(args, parser))
+        store = _open_store_checked(args, parser)
         args.symbol = _resolve_symbol(store, args.symbol, parser)
         edges = store.callees_of(args.symbol)
         if args.exclude_tests:
@@ -1076,7 +1106,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "bases":
-        store = GraphStore(_resolve_graph(args, parser))
+        store = _open_store_checked(args, parser)
         args.symbol = _resolve_symbol(store, args.symbol, parser)
         bases = store.bases_of(args.symbol)
         print(f"[cppgraph] {len(bases)} base class(es) of {args.symbol}")
@@ -1085,7 +1115,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "subtypes":
-        store = GraphStore(_resolve_graph(args, parser))
+        store = _open_store_checked(args, parser)
         args.symbol = _resolve_symbol(store, args.symbol, parser)
         subs = store.subtypes_of(args.symbol)
         print(f"[cppgraph] {len(subs)} subclass(es) of {args.symbol}")
@@ -1094,7 +1124,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "references":
-        store = GraphStore(_resolve_graph(args, parser))
+        store = _open_store_checked(args, parser)
         args.symbol = _resolve_symbol(store, args.symbol, parser)
         refs = store.references_of(args.symbol)
         if not refs and store.meta().get("has_references") != "true":
@@ -1129,7 +1159,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "path":
-        store = GraphStore(_resolve_graph(args, parser))
+        store = _open_store_checked(args, parser)
         args.src = _resolve_symbol(store, args.src, parser, what="src symbol")
         args.dst = _resolve_symbol(store, args.dst, parser, what="dst symbol")
         chain = store.shortest_call_path(args.src, args.dst)
@@ -1150,7 +1180,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "impact":
-        store = GraphStore(_resolve_graph(args, parser))
+        store = _open_store_checked(args, parser)
         args.symbol = _resolve_symbol(store, args.symbol, parser)
         if args.kind == "calls" and args.symbol.rstrip().endswith("#"):
             n = len(store.references_of(args.symbol))
@@ -1186,7 +1216,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "hotspots":
-        store = GraphStore(_resolve_graph(args, parser))
+        store = _open_store_checked(args, parser)
         ranked, total = store.hotspots(
             limit=args.limit,
             kind=args.kind,
@@ -1335,7 +1365,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     if args.command == "explain":
-        store = GraphStore(_resolve_graph(args, parser))
+        store = _open_store_checked(args, parser)
         args.symbol = _resolve_symbol(store, args.symbol, parser)
         node = store.get_node(args.symbol)
         if node is None:
@@ -1389,7 +1419,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "export":
-        store = GraphStore(_resolve_graph(args, parser))
+        store = _open_store_checked(args, parser)
         args.symbol = _resolve_symbol(store, args.symbol, parser)
         graph_json = build_export_json(
             store,
@@ -1420,7 +1450,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "view":
-        store = GraphStore(_resolve_graph(args, parser))
+        store = _open_store_checked(args, parser)
         args.symbol = _resolve_symbol(store, args.symbol, parser)
         graph_json = build_export_json(
             store,

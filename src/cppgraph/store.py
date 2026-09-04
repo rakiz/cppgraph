@@ -255,6 +255,25 @@ def staleness_verdict(
     return verdict
 
 
+def is_stale(store: GraphStore, root: str | Path, source_exts: tuple[str, ...]) -> bool | None:
+    """Cheap per-query drift flag: has any indexed C++ file changed since the
+    graph's source commit? A single `git diff --name-only`, no `commits_behind`
+    subprocess and no fraction/recommendation — just enough to flag `stale` on
+    every query response without the cost of a full `status` drift report.
+    `None` when unknown (no recorded commit, or `root` isn't a git checkout)."""
+    m = store.meta()
+    commit = m.get("source_commit")
+    if not commit:
+        return None
+    changes = changed_files_since(root, commit, dirty_fingerprints=read_dirty_fingerprints(m))
+    if changes is None:
+        return None
+    changed, deleted = changes
+    return any(f.endswith(source_exts) for f in changed) or any(
+        f.endswith(source_exts) for f in deleted
+    )
+
+
 def project_root_path(project_root_uri: str) -> Path | None:
     """The local filesystem path behind a SCIP `Metadata.project_root`, which is
     a `file://` URI."""

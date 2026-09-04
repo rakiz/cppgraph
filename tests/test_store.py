@@ -21,6 +21,7 @@ from cppgraph.store import (
     IncompatibleStoreError,
     build_provenance,
     changed_files_since,
+    is_stale,
     read_dirty_fingerprints,
     update_store,
     write_sqlite,
@@ -612,6 +613,49 @@ def test_dirty_fingerprints_prevent_false_stale(tmp_path: Path) -> None:
     # sanity: a naive diff (no fingerprints) would wrongly call it up to date
     changed_naive_revert, _ = changed_files_since(tmp_path, commit)
     assert "a.cpp" not in changed_naive_revert
+
+
+def test_is_stale(tmp_path: Path) -> None:
+    """The cheap per-query drift flag: False right after indexing, True once a
+    tracked C++ file changes, None with no recorded commit — matching what the
+    MCP `stale` field / CLI stderr warning need without `status`'s full report."""
+    import subprocess as sp
+
+    def git(*a: str) -> sp.CompletedProcess:
+        return sp.run(["git", "-C", str(tmp_path), *a], check=True, capture_output=True, text=True)
+
+    git("init", "-q")
+    git("config", "user.email", "t@example.com")
+    git("config", "user.name", "t")
+    (tmp_path / "a.cpp").write_text("int a() { return 0; }\n")
+    git("add", "a.cpp")
+    git("commit", "-q", "-m", "init")
+    commit = git("rev-parse", "HEAD").stdout.strip()
+
+    def store_with(commit: str | None) -> GraphStore:
+        # meta is provenance stamped at write time (no in-place mutator), so each
+        # case gets a fresh store built with its own meta dict.
+        graph = Graph()
+        graph.add_node(METHOD, display_name="makeResumeToken")
+        db = tmp_path / "graph.db"
+        write_sqlite(graph, db, meta={"source_commit": commit} if commit else None)
+        return GraphStore(db)
+
+    store = store_with(commit)
+    assert is_stale(store, tmp_path, (".cpp", ".h")) is False
+
+    (tmp_path / "a.cpp").write_text("int a() { return 1; }\n")
+    assert is_stale(store, tmp_path, (".cpp", ".h")) is True
+
+    # A non-source-extension change doesn't count as drift.
+    store = store_with(commit)
+    git("checkout", "--", "a.cpp")
+    (tmp_path / "README.md").write_text("docs\n")
+    assert is_stale(store, tmp_path, (".cpp", ".h")) is False
+
+    # No recorded commit -> unknown, not a false "up to date".
+    store = store_with(None)
+    assert is_stale(store, tmp_path, (".cpp", ".h")) is None
 
 
 def test_build_provenance_autodetects_commit_on_this_repo() -> None:
