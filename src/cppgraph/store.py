@@ -31,7 +31,7 @@ from importlib import metadata as importlib_metadata
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from cppgraph.builder import _gc_disabled, build_graph
+from cppgraph.builder import _gc_disabled, build_graph, is_callable_symbol
 from cppgraph.export import is_test_file
 from cppgraph.filters import matches_path_prefix
 from cppgraph.model import Edge, Graph, Node, Reference
@@ -44,12 +44,16 @@ CREATE TABLE files (
     id   INTEGER PRIMARY KEY,
     path TEXT
 );
+-- `end_line` = the definition's `enclosing_range` body extent, present only
+-- when the binary emits it (#504); NULL on stock. Powers `line_span`, gates
+-- `no_incoming_calls` (flagged `has_enclosing_ranges` in meta).
 CREATE TABLE symbols (
     id           INTEGER PRIMARY KEY,
     symbol       TEXT NOT NULL,
     display_name TEXT,
     file_id      INTEGER,
-    line         INTEGER
+    line         INTEGER,
+    end_line     INTEGER
 );
 CREATE TABLE edges (
     kind    TEXT NOT NULL,
@@ -98,7 +102,8 @@ _ID_CHUNK = 900
 # `schema_version` predates versioning (treated as the oldest, still readable).
 # `GraphStore` refuses to open a store whose version is *newer* than this — an
 # old binary must not silently misread a format it doesn't understand.
-SCHEMA_VERSION = 2
+# v3: `symbols.end_line` (definition body extents, #504 binaries only).
+SCHEMA_VERSION = 3
 
 
 class IncompatibleStoreError(RuntimeError):
@@ -419,7 +424,9 @@ def write_sqlite(graph: Graph, path: str | Path, *, meta: dict[str, str] | None 
         sym_rows = []
         for i, node in enumerate(graph.nodes.values()):
             sym_ids[node.symbol] = i
-            sym_rows.append((i, node.symbol, node.display_name, file_id(node.file), node.line))
+            sym_rows.append(
+                (i, node.symbol, node.display_name, file_id(node.file), node.line, node.end_line)
+            )
 
         edge_rows = [
             (e.kind, sym_ids[e.src], sym_ids[e.dst], file_id(e.file), e.line) for e in graph.edges
@@ -442,6 +449,11 @@ def write_sqlite(graph: Graph, path: str | Path, *, meta: dict[str, str] | None 
         all_meta["schema_version"] = str(SCHEMA_VERSION)
         all_meta.setdefault("node_count", str(len(graph.nodes)))
         all_meta.setdefault("edge_count", str(len(graph.edges)))
+        # Definition body extents present => the binary emitted enclosing_range
+        # (#504). The data-driven gate for `line_span`/`no_incoming_calls`,
+        # mirroring `has_references`/`has_attributed_refs` (absent on stock).
+        if any(n.end_line is not None for n in graph.nodes.values()):
+            all_meta.setdefault("has_enclosing_ranges", "true")
         if graph.references:
             all_meta.setdefault("has_references", "true")
             all_meta.setdefault("ref_count", str(len(graph.references)))
@@ -452,7 +464,7 @@ def write_sqlite(graph: Graph, path: str | Path, *, meta: dict[str, str] | None 
         con.executemany(
             "INSERT INTO files VALUES (?, ?)", [(fid, p) for p, fid in file_ids.items()]
         )
-        con.executemany("INSERT INTO symbols VALUES (?, ?, ?, ?, ?)", sym_rows)
+        con.executemany("INSERT INTO symbols VALUES (?, ?, ?, ?, ?, ?)", sym_rows)
         con.executemany("INSERT INTO edges VALUES (?, ?, ?, ?, ?)", edge_rows)
         con.executemany("INSERT INTO refs VALUES (?, ?, ?, ?)", ref_rows)
         con.executemany("INSERT INTO meta VALUES (?, ?)", all_meta.items())
@@ -544,6 +556,13 @@ def enrich_references(path: str | Path, index: scip_pb2.Index) -> tuple[int, int
         cols = {row[1] for row in con.execute("PRAGMA table_info(refs)")}
         if "enclosing_id" not in cols:
             con.execute("ALTER TABLE refs ADD COLUMN enclosing_id INTEGER")
+        # Old (v2) stores lack `symbols.end_line` too. This function stamps
+        # schema_version=3 below, so a store it touches must actually be
+        # v3-shaped — otherwise a later `line_span` query ("no such column:
+        # s.end_line") would crash on a store that only ever ran enrichment.
+        sym_cols = {row[1] for row in con.execute("PRAGMA table_info(symbols)")}
+        if "end_line" not in sym_cols:
+            con.execute("ALTER TABLE symbols ADD COLUMN end_line INTEGER")
 
         sym_ids = dict(con.execute("SELECT symbol, id FROM symbols"))
         file_ids = dict(con.execute("SELECT path, id FROM files"))
@@ -690,17 +709,35 @@ class GraphStore:
     # --- point queries -----------------------------------------------------
 
     def get_node(self, symbol: str) -> Node | None:
-        row = self._con.execute(
-            """
-            SELECT s.symbol, s.display_name, f.path, s.line
-            FROM symbols s LEFT JOIN files f ON f.id = s.file_id
-            WHERE s.symbol = ?
-            """,
-            (symbol,),
-        ).fetchone()
+        try:
+            row = self._con.execute(
+                """
+                SELECT s.symbol, s.display_name, f.path, s.line, s.end_line
+                FROM symbols s LEFT JOIN files f ON f.id = s.file_id
+                WHERE s.symbol = ?
+                """,
+                (symbol,),
+            ).fetchone()
+        except sqlite3.OperationalError:
+            # Store predates `symbols.end_line` (schema v2, never migrated by
+            # apply_update/enrich_references) — degrade to the v2 shape rather
+            # than crash a plain read-only query.
+            row = self._con.execute(
+                """
+                SELECT s.symbol, s.display_name, f.path, s.line
+                FROM symbols s LEFT JOIN files f ON f.id = s.file_id
+                WHERE s.symbol = ?
+                """,
+                (symbol,),
+            ).fetchone()
+            if row is None:
+                return None
+            return Node(symbol=row[0], display_name=row[1] or "", file=row[2], line=row[3])
         if row is None:
             return None
-        return Node(symbol=row[0], display_name=row[1] or "", file=row[2], line=row[3])
+        return Node(
+            symbol=row[0], display_name=row[1] or "", file=row[2], line=row[3], end_line=row[4]
+        )
 
     def find(self, query: str, fuzzy: bool = False) -> list[Node]:
         """Nodes matching `query`.
@@ -1163,6 +1200,138 @@ class GraphStore:
         name = group_by
         return [{name: path, **c} for path, c in top], len(grouped)
 
+    def _own_file_filters(
+        self,
+        *,
+        alias: str,
+        exclude_tests: bool,
+        include_paths: list[str] | None,
+        exclude_paths: list[str] | None,
+    ) -> str:
+        """SQL `AND ...` clauses filtering a symbols row by its *own* definition
+        file (joined as `alias`) — the same test/path-prefix filters the other
+        ranking tools apply, on the row's own file like `stats` (a global
+        ranking over definitions has no far endpoint to filter on)."""
+        clauses: list[str] = []
+        if exclude_tests:
+            self._con.create_function("cpg_is_test_file", 1, is_test_file, deterministic=True)
+            clauses.append(f"AND NOT cpg_is_test_file({alias}.path)")
+        if include_paths or exclude_paths:
+
+            def _path_ok(path: str | None) -> bool:
+                return matches_path_prefix(path, include=include_paths, exclude=exclude_paths)
+
+            self._con.create_function("cpg_path_ok", 1, _path_ok, deterministic=True)
+            clauses.append(f"AND cpg_path_ok({alias}.path)")
+        return " ".join(clauses)
+
+    def _has_enclosing_ranges(self) -> bool:
+        """The data-driven capability gate: did any indexed definition carry a
+        body extent (`end_line`, from `enclosing_range` — a #504-built binary)?
+        Mirrors `has_references`/`has_attributed_refs`: a build-time meta flag,
+        not a live COUNT per call."""
+        return self.meta().get("has_enclosing_ranges") == "true"
+
+    def line_span(
+        self,
+        limit: int = 20,
+        exclude_tests: bool = False,
+        include_paths: list[str] | None = None,
+        exclude_paths: list[str] | None = None,
+    ) -> tuple[list[tuple[str, int]], int] | None:
+        """Rank definitions by body extent — `end_line - line`, largest first.
+
+        The extents are each definition's own `enclosing_range` (#504-built
+        binary), persisted at build time — the exact span, not a
+        def→next-symbol heuristic. On a store without them (a stock binary) the
+        meta gate `has_enclosing_ranges` is unset, so this returns **None** —
+        "unavailable", never an empty list that would read as "no definitions"
+        (the same degrade-cleanly contract as the reference-attribution
+        features).
+
+        Aggregated in SQL like `hotspots` (ORDER BY + LIMIT after the filters,
+        symbol strings materialized only for the shown rows). `exclude_tests`
+        and `include_paths`/`exclude_paths` filter by the definition's own
+        file. Returns `(ranked, total)`: the top `limit` `(symbol, span)` pairs
+        descending, and the full filtered count so the caller can flag
+        truncation.
+        """
+        if limit < 0:
+            raise ValueError(f"limit must be >= 0, got {limit}")
+        if not self._has_enclosing_ranges():
+            return None
+        filters = self._own_file_filters(
+            alias="f",
+            exclude_tests=exclude_tests,
+            include_paths=include_paths,
+            exclude_paths=exclude_paths,
+        )
+        rows = self._con.execute(
+            f"""
+            SELECT s.symbol, (s.end_line - s.line) AS span
+            FROM symbols s LEFT JOIN files f ON f.id = s.file_id
+            WHERE s.end_line IS NOT NULL AND s.file_id IS NOT NULL AND s.line IS NOT NULL {filters}
+            ORDER BY span DESC, s.symbol ASC
+            """
+        ).fetchall()
+        ranked = [(symbol, span) for symbol, span in rows]
+        return ranked[:limit], len(ranked)
+
+    def no_incoming_calls(
+        self,
+        limit: int = 20,
+        exclude_tests: bool = False,
+        include_paths: list[str] | None = None,
+        exclude_paths: list[str] | None = None,
+    ) -> tuple[list[str], int] | None:
+        """Callable definitions with zero incoming `calls` edges — the graph
+        fact behind the "dead code" question, stated as a fact, never a verdict
+        (vtable dispatch, exported API, templates, entry points can all have
+        no static caller and still be live).
+
+        Gated on `has_enclosing_ranges` like `line_span`, because the *answer*
+        is only trustworthy there: on a stock-binary graph, caller attribution
+        falls back to nearest-preceding-definition, which can fabricate a
+        phantom caller from a bodyless declaration site and turn a real 0 into
+        a false 1 (DESIGN.md "Known limitation") — so this returns None
+        (refuses) instead of answering unreliably.
+
+        Callable is the SCIP descriptor suffix (`is_callable_symbol`,
+        registered as a SQL function — one source of truth), and only symbols
+        with a recorded definition site count (`file_id IS NOT NULL`): a
+        callable merely mentioned (e.g. address-taken) but not defined in the
+        index isn't a definition. `exclude_tests`/path filters scope which
+        definitions are listed; every `calls` edge counts as a caller
+        regardless of where it comes from (a test-only caller still means
+        "called"). Returns `(symbols, total)`, ordered by definition site.
+        """
+        if limit < 0:
+            raise ValueError(f"limit must be >= 0, got {limit}")
+        if not self._has_enclosing_ranges():
+            return None
+        self._con.create_function("cpg_is_callable", 1, is_callable_symbol, deterministic=True)
+        filters = self._own_file_filters(
+            alias="f",
+            exclude_tests=exclude_tests,
+            include_paths=include_paths,
+            exclude_paths=exclude_paths,
+        )
+        rows = self._con.execute(
+            f"""
+            SELECT s.symbol
+            FROM symbols s LEFT JOIN files f ON f.id = s.file_id
+            WHERE s.file_id IS NOT NULL
+              AND cpg_is_callable(s.symbol)
+              AND NOT EXISTS (
+                  SELECT 1 FROM edges e WHERE e.kind = 'calls' AND e.dst_id = s.id
+              )
+              {filters}
+            ORDER BY f.path, s.line, s.symbol
+            """
+        ).fetchall()
+        symbols = [row[0] for row in rows]
+        return symbols[:limit], len(symbols)
+
     def subgraph(
         self, symbol: str, depth: int = 2, direction: str = "both"
     ) -> tuple[list[Node], list[Edge]]:
@@ -1298,6 +1467,18 @@ class GraphStore:
         con = self._con
         changed_files = list(changed_files)
         with con:  # atomic: commit on success, rollback on error
+            # (0) an older (v2) store lacks `end_line`; add it on demand — the
+            # same ALTER pattern `enrich_references` uses for `refs.enclosing_id`
+            # — so the re-insert below can write body extents. The store is now
+            # v3-shaped, so stamp it.
+            cols = {row[1] for row in con.execute("PRAGMA table_info(symbols)")}
+            if "end_line" not in cols:
+                con.execute("ALTER TABLE symbols ADD COLUMN end_line INTEGER")
+                con.execute(
+                    "INSERT INTO meta(key, value) VALUES ('schema_version', ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    (str(SCHEMA_VERSION),),
+                )
             changed_ids = self._file_ids(changed_files)
 
             # (1) candidate symbols for GC: endpoints of the edges we're about
@@ -1324,7 +1505,8 @@ class GraphStore:
                 edges_removed += cur.rowcount
                 con.execute(f"DELETE FROM refs WHERE file_id IN ({ph})", chunk)
                 con.execute(
-                    f"UPDATE symbols SET file_id = NULL, line = NULL WHERE file_id IN ({ph})",
+                    f"UPDATE symbols SET file_id = NULL, line = NULL, end_line = NULL "
+                    f"WHERE file_id IN ({ph})",
                     chunk,
                 )
 
@@ -1341,13 +1523,24 @@ class GraphStore:
                 "UPDATE symbols SET "
                 "display_name = COALESCE(NULLIF(?, ''), display_name), "
                 "file_id = COALESCE(?, file_id), "
-                "line = COALESCE(?, line) "
+                "line = COALESCE(?, line), "
+                # `end_line` must travel with file_id/line, not COALESCE
+                # independently: a fresh definition site (file_id is not NULL
+                # here) always replaces end_line too — even with NULL, when
+                # this occurrence turned out bodyless — instead of leaking a
+                # stale extent from a previous, different definition site.
+                # Only when the partial has *no* fresh site (file_id param is
+                # NULL, e.g. a symbol only seen as an edge endpoint) does the
+                # old end_line survive untouched.
+                "end_line = CASE WHEN ? IS NOT NULL THEN ? ELSE end_line END "
                 "WHERE id = ?",
                 [
                     (
                         n.display_name,
                         file_id.get(n.file) if n.file else None,
                         n.line,
+                        file_id.get(n.file) if n.file else None,
+                        n.end_line,
                         sym_id[n.symbol],
                     )
                     for n in partial.nodes.values()
@@ -1398,13 +1591,17 @@ class GraphStore:
                     con.execute("DELETE FROM symbols WHERE id = ?", (sid,))
                     symbols_removed += 1
 
-            # (5) refresh meta: provided provenance + recomputed counts.
+            # (5) refresh meta: provided provenance + recomputed counts. A
+            # partial carrying body extents (#504 re-index) flips the
+            # enclosing-range gate on; nothing ever flips it off.
             node_count = con.execute("SELECT COUNT(*) FROM symbols").fetchone()[0]
             edge_count = con.execute("SELECT COUNT(*) FROM edges").fetchone()[0]
             ref_count = con.execute("SELECT COUNT(*) FROM refs").fetchone()[0]
             all_meta = dict(meta or {})
             all_meta["node_count"] = str(node_count)
             all_meta["edge_count"] = str(edge_count)
+            if any(n.end_line is not None for n in partial.nodes.values()):
+                all_meta.setdefault("has_enclosing_ranges", "true")
             if ref_count:
                 all_meta["ref_count"] = str(ref_count)
             con.executemany("INSERT OR REPLACE INTO meta VALUES (?, ?)", all_meta.items())

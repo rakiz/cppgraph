@@ -231,13 +231,20 @@ def build_graph(
             line = _occurrence_start_line(occ)
             if line is None:
                 continue
+            enclosing = _occurrence_enclosing_range(occ)
             node = graph.add_node(occ.symbol)
             if node.file is None:  # first definition site wins (header dedup)
                 node.file = doc.relative_path
                 node.line = line
+                # Keep the definition's own body extent on the node (the same
+                # datum the intervals below attribute by): `end_line` drives
+                # `line_span` and flags the store as enclosing-range-capable.
+                # Nested in this same guard so file/line/end_line always come
+                # from one occurrence — never spliced across documents.
+                if enclosing is not None:
+                    node.end_line = enclosing[1]
             if is_callable_symbol(occ.symbol):
                 callable_defs.append((line, occ.symbol))
-            enclosing = _occurrence_enclosing_range(occ)
             if enclosing is not None:
                 interval = (enclosing[0], enclosing[1], occ.symbol)
                 if is_callable_symbol(occ.symbol):

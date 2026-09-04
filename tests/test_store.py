@@ -366,6 +366,234 @@ def test_stats_rejects_negative_limit(tmp_path: Path) -> None:
         store.stats(limit=-1)
 
 
+# --- line_span / no_incoming_calls (enclosing-range gated) -------------------
+
+BIG = "cxx . . $ app/big(b1)."
+MIDFN = "cxx . . $ app/mid(m1)."
+TINY = "cxx . . $ app/tiny(t1)."
+NEVER = "cxx . . $ app/never_called(n1)."
+WIDGET = "cxx . . $ app/Widget#"
+MENTIONED = "cxx . . $ app/address_taken(a1)."
+
+
+def _spans_graph() -> Graph:
+    """A #504-shaped graph: definitions carry body extents (`end_line`), and
+    one call edge so `no_incoming_calls` has a real caller to exclude."""
+    graph = Graph()
+    graph.nodes[BIG] = Node(symbol=BIG, file="src/app.cpp", line=10, end_line=110)  # span 100
+    graph.nodes[MIDFN] = Node(symbol=MIDFN, file="src/app.cpp", line=200, end_line=250)  # 50
+    graph.nodes[TINY] = Node(symbol=TINY, file="src/app.cpp", line=300, end_line=302)  # 2
+    graph.add_edge("calls", BIG, MIDFN, file="src/app.cpp", line=15)  # mid has a caller
+    return graph
+
+
+def _no_callers_graph() -> Graph:
+    """`_spans_graph` plus: a never-called callable, a type (never callable),
+    and a callable merely mentioned (address-taken) with no definition site."""
+    graph = _spans_graph()
+    graph.nodes[NEVER] = Node(symbol=NEVER, file="src/lib.cpp", line=5, end_line=8)
+    graph.nodes[WIDGET] = Node(symbol=WIDGET, file="src/lib.cpp", line=1)
+    graph.nodes[MENTIONED] = Node(symbol=MENTIONED)  # no def site in this index
+    graph.add_reference(MENTIONED, "src/app.cpp", line=12)
+    return graph
+
+
+def test_line_span_ranks_by_body_extent_descending(tmp_path: Path) -> None:
+    store = _store(tmp_path, _spans_graph())
+    ranked, total = store.line_span()
+    assert ranked == [(BIG, 100), (MIDFN, 50), (TINY, 2)]
+    assert total == 3
+    assert store.meta().get("has_enclosing_ranges") == "true"
+
+
+def test_line_span_unavailable_without_enclosing_range_data(tmp_path: Path) -> None:
+    """A stock-binary graph carries no `end_line`: None (explicitly
+    unavailable), never an empty list that would read as 'no definitions'."""
+    store = _store(tmp_path, _hotspots_graph())
+    assert store.line_span() is None
+    assert store.meta().get("has_enclosing_ranges") is None
+
+
+def test_line_span_limit_truncates_but_total_is_full_count(tmp_path: Path) -> None:
+    store = _store(tmp_path, _spans_graph())
+    ranked, total = store.line_span(limit=1)
+    assert ranked == [(BIG, 100)]
+    assert total == 3
+
+
+def test_line_span_rejects_negative_limit(tmp_path: Path) -> None:
+    store = _store(tmp_path, _spans_graph())
+    with pytest.raises(ValueError):
+        store.line_span(limit=-1)
+
+
+def test_line_span_exclude_tests_drops_test_defined_symbols(tmp_path: Path) -> None:
+    graph = _spans_graph()
+    graph.nodes[TINY].file = "src/app_test.cpp"
+    store = _store(tmp_path, graph)
+    ranked, total = store.line_span(exclude_tests=True)
+    assert ranked == [(BIG, 100), (MIDFN, 50)]
+    assert total == 2
+
+
+def test_line_span_exclude_paths_drops_vendored_definitions(tmp_path: Path) -> None:
+    graph = _spans_graph()
+    graph.nodes[TINY].file = "vendor/lib/tiny.cpp"
+    store = _store(tmp_path, graph)
+    ranked, total = store.line_span(exclude_paths=["vendor/"])
+    assert ranked == [(BIG, 100), (MIDFN, 50)]
+    assert total == 2
+
+
+def test_no_incoming_calls_lists_defined_callables_with_zero_callers(
+    tmp_path: Path,
+) -> None:
+    """BIG and TINY have no callers, NEVER none; MIDFN is called; a type and a
+    definition-less mention are never listed. Ordered by definition site."""
+    store = _store(tmp_path, _no_callers_graph())
+    symbols, total = store.no_incoming_calls()
+    assert symbols == [BIG, TINY, NEVER]  # src/app.cpp:10, src/app.cpp:300, src/lib.cpp:5
+    assert total == 3
+
+
+def test_no_incoming_calls_unavailable_without_enclosing_range_data(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path, _hotspots_graph())
+    assert store.no_incoming_calls() is None
+
+
+def test_no_incoming_calls_counts_test_callers_as_callers(tmp_path: Path) -> None:
+    """`exclude_tests` scopes which definitions are listed, not which edges
+    count: a symbol called only from a test file still has callers — the fact
+    the tool states."""
+    graph = _no_callers_graph()
+    graph.add_edge("calls", "cxx . . $ app/t(t1).", NEVER, file="never_test.cpp", line=1)
+    store = _store(tmp_path, graph)
+    symbols, total = store.no_incoming_calls(exclude_tests=True)
+    assert symbols == [BIG, TINY]
+    assert total == 2
+
+
+def test_no_incoming_calls_exclude_tests_drops_test_defined_symbols(
+    tmp_path: Path,
+) -> None:
+    graph = _no_callers_graph()
+    graph.nodes[NEVER].file = "src/lib_test.cpp"
+    store = _store(tmp_path, graph)
+    symbols, total = store.no_incoming_calls(exclude_tests=True)
+    assert symbols == [BIG, TINY]
+    assert total == 2
+
+
+def test_no_incoming_calls_path_filters(tmp_path: Path) -> None:
+    graph = _no_callers_graph()
+    graph.nodes[NEVER].file = "vendor/lib.cpp"
+    store = _store(tmp_path, graph)
+    symbols, _total = store.no_incoming_calls(exclude_paths=["vendor/"])
+    assert symbols == [BIG, TINY]
+    symbols, _total = store.no_incoming_calls(include_paths=["vendor/"])
+    assert symbols == [NEVER]
+
+
+def test_no_incoming_calls_limit_truncates_but_total_is_full_count(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path, _no_callers_graph())
+    symbols, total = store.no_incoming_calls(limit=1)
+    assert symbols == [BIG]
+    assert total == 3
+
+
+def test_no_incoming_calls_rejects_negative_limit(tmp_path: Path) -> None:
+    store = _store(tmp_path, _no_callers_graph())
+    with pytest.raises(ValueError):
+        store.no_incoming_calls(limit=-1)
+
+
+def test_update_upgrades_a_v2_store_adding_end_line(tmp_path: Path) -> None:
+    """An older (schema v2) store has no `end_line` column; an incremental
+    update from a #504 partial must add it on demand (the same ALTER pattern
+    `enrich_references` uses for `refs.enclosing_id`), write the extents, and
+    flip `has_enclosing_ranges`."""
+    db = tmp_path / "graph.db"
+    write_sqlite(_no_callers_graph(), db)
+    con = sqlite3.connect(db)
+    con.execute("ALTER TABLE symbols DROP COLUMN end_line")
+    con.execute("UPDATE meta SET value = '2' WHERE key = 'schema_version'")
+    # A real v2 store predates the feature entirely — it never had this key.
+    con.execute("DELETE FROM meta WHERE key = 'has_enclosing_ranges'")
+    con.commit()
+    con.close()
+
+    fn = "cxx . . $ app/patched(p1)."
+    partial = _partial_index("src/app.cpp")
+    d = partial.documents[0].occurrences.add(symbol=fn, symbol_roles=scip_pb2.SymbolRole.Definition)
+    d.range.extend([40, 0, 3])
+    d.enclosing_range.extend([40, 0, 60, 0])
+    update_store(db, partial)
+
+    store = GraphStore(db)
+    assert store.schema_version() == SCHEMA_VERSION
+    assert store.meta().get("has_enclosing_ranges") == "true"
+    ranked, _total = store.line_span()
+    assert (fn, 20) in ranked
+
+
+def test_update_clears_end_line_when_definition_site_is_removed(tmp_path: Path) -> None:
+    """A symbol's definition can be cleared (file re-indexed with no occurrence
+    for it anymore) while it survives GC because something elsewhere still
+    calls it. `end_line` must clear alongside file_id/line -- not linger as a
+    stale extent paired with a NULL line, which would make `line_span` compute
+    `end_line - line` as NULL and crash CLI formatting."""
+    db = tmp_path / "graph.db"
+    original = Graph()
+    original.nodes["shared()."] = Node(symbol="shared().", file="foo.cpp", line=10, end_line=60)
+    original.add_edge("calls", "b().", "shared().", file="bar.cpp", line=7)
+    write_sqlite(original, db)
+
+    # foo.cpp re-indexed with no occurrence of shared() at all (its definition
+    # was deleted from the source); bar.cpp (still calling it) is untouched.
+    update_store(db, _partial_index("foo.cpp"))
+
+    store = GraphStore(db)
+    assert store.has_symbol("shared().")  # kept: bar.cpp still calls it
+    node = store.get_node("shared().")
+    assert node is not None
+    assert node.file is None
+    assert node.line is None
+    assert node.end_line is None  # not left stale
+    ranked, _total = store.line_span()
+    assert all(symbol != "shared()." for symbol, _span in ranked)
+
+
+def test_update_does_not_leak_stale_end_line_across_a_redefinition_site(
+    tmp_path: Path,
+) -> None:
+    """A symbol already defined (with a body extent) in an *untouched* file,
+    re-indexed as a bodyless occurrence in a *changed* file, must not keep
+    the old extent: end_line must travel with file_id/line as one fact from
+    one occurrence, not be independently COALESCEd from a stale prior row."""
+    db = tmp_path / "graph.db"
+    original = Graph()
+    original.nodes["sym()."] = Node(symbol="sym().", file="untouched.h", line=10, end_line=60)
+    write_sqlite(original, db)
+
+    partial = _partial_index("moved.h")
+    d = partial.documents[0].occurrences.add(
+        symbol="sym().", symbol_roles=scip_pb2.SymbolRole.Definition
+    )
+    d.range.extend([3, 0, 3])  # no enclosing_range: a bodyless occurrence
+    update_store(db, partial)
+
+    store = GraphStore(db)
+    node = store.get_node("sym().")
+    assert node is not None
+    assert node.file == "moved.h"
+    assert node.line == 3
+    assert node.end_line is None  # not the stale 60 from the old site
+
+
 # --- inheritance queries ---------------------------------------------------
 
 # --- schema versioning -----------------------------------------------------

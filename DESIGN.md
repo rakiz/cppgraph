@@ -126,7 +126,10 @@ symbol-granularity **usage view** (`export --mode usage`): `symbol → enclosing
 definition` ("the *functions* that use this type", not just the files), falling
 back to file granularity for any reference left unattributed — always exact
 either way. The same `enclosing_range`, on the `calls` side, gives exact caller
-attribution (replacing the nearest-preceding heuristic when present). Still
+attribution (replacing the nearest-preceding heuristic when present), and each
+definition's body extent is persisted on the node (`end_line`) — powering
+`line_span` (rank by body size) and gating `no_incoming_calls` (a zero-caller
+count is only trustworthy with exact attribution). Still
 open: promoting attributed references to first-class traversable graph *edges*
 for `impact`/`path`. See TODO.md.
 
@@ -208,6 +211,13 @@ fallback (`src/cppgraph/builder.py`):
    document has no interval data at all. The "keep the over-capture" call above
    stands only for stock graphs, which have no such signal to detect the case.
 
+   This asymmetry is why `no_incoming_calls` (definitions with zero incoming
+   `calls` edges) refuses to answer on a stock graph: a phantom caller from a
+   mis-attributed declaration site turns a real 0 into a false 1 — exactly the
+   answer that tool exists to get right. It gates on the store's
+   enclosing-range data (`has_enclosing_ranges`, the same signal as
+   `line_span`) and reports unavailability with the reason instead.
+
 This is where semantic identity still pays off even with the fallback: the
 callee is the *exact* symbol, so the two `makeResumeToken` never mix,
 independent of how the caller is attributed.
@@ -238,7 +248,9 @@ Store schema (stdlib `sqlite3`):
 ```sql
 -- COLD: payload, read only to materialize the results shown
 files(id INTEGER PRIMARY KEY, path TEXT)
-symbols(id INTEGER PRIMARY KEY, symbol TEXT, display_name TEXT, file_id INT, line INT)
+-- end_line: the definition's enclosing_range body extent (#504 binaries only,
+-- NULL on stock); flagged has_enclosing_ranges in meta. Powers line_span.
+symbols(id INTEGER PRIMARY KEY, symbol TEXT, display_name TEXT, file_id INT, line INT, end_line INT)
 CREATE INDEX ix_sym ON symbols(symbol);   -- keeps `find`'s LIKE substring search
 -- HOT: topology walked by traversal — indexed, all-integer, never compressed
 edges(kind TEXT, src_id INT, dst_id INT, file_id INT, line INT)
@@ -264,7 +276,7 @@ when index→build run back-to-back. Non-git projects simply record no commit
 (the tool stays general, `git`-optional). This commit is the **anchor for
 incremental updates** — see below.
 
-The `meta` table also carries a **`schema_version`** (currently 1): the on-disk
+The `meta` table also carries a **`schema_version`** (currently 3): the on-disk
 *format* version, distinct from `cppgraph_version` (the code that wrote it).
 It's the enabler for format migrations — a future schema change bumps it, and
 migration code can branch on the stored value. `GraphStore` refuses to open a
@@ -335,17 +347,23 @@ designing the builder so this isn't a later rewrite:
   = all transitive subclasses), `references` (exact use sites, present unless the
   graph was built `--no-references`; `--root` for snippets, else coordinates), `explain`
   (definition + neighbors; pass `--root` to also get a source snippet, omit it
-  for coordinates only), `status` (source commit + drift check).
+  for coordinates only), `line_span` (definitions ranked by body extent,
+  #504-gated), `no_incoming_calls` (zero-caller definitions — a fact, never a
+  "dead" verdict; #504-gated), `status` (source commit + drift check).
 - MCP server (`cppgraph-mcp`, `src/cppgraph/mcp_server.py`): exposes the same
   queries to an LLM, token-budgeted. FastMCP over stdio; the graph store is
   fixed at launch (`--graph <db>`, optional `--root <checkout>`) so tools never
   take — and the LLM never has to guess or repeat — a filesystem path. Tools:
-  `find`, `who_calls`, `what_it_calls`, `base_classes`, `subclasses`,
-  `find_references`, `path`, `impact_of` (`kind` = calls|inherits), `hotspots`
-  (global fan-in/fan-out/edge-count ranking), `stats` (per-file/per-directory
-  aggregate counts: symbols, call edges, refs — a module "how big/dense" view),
-  `explain_symbol`, `status`,
-  `visualize`. Each symbol-taking tool accepts a plain
+   `find`, `who_calls`, `what_it_calls`, `base_classes`, `subclasses`,
+   `find_references`, `path`, `impact_of` (`kind` = calls|inherits), `hotspots`
+   (global fan-in/fan-out/edge-count ranking), `stats` (per-file/per-directory
+   aggregate counts: symbols, call edges, refs — a module "how big/dense" view),
+   `line_span` (definitions ranked by body extent) and `no_incoming_calls`
+   (zero-incoming-calls definitions — a fact, never a "dead" verdict), both
+   gated on the store's enclosing-range data (#504) and reporting
+   unavailability with the reason on a stock-binary graph,
+   `explain_symbol`, `status`,
+   `visualize`. Each symbol-taking tool accepts a plain
   name as well as an exact SCIP string, through the shared `GraphStore.resolve`
   (also behind the CLI): a unique name resolves, `Class::method` maps to
   `Class#method`, an ambiguous name returns candidates, and no symbol is guessed.
@@ -373,8 +391,9 @@ designing the builder so this isn't a later rewrite:
     (`exclude_tests`, filtered on the far-end node's definition file, catching
     `~..._Test` teardown sites too). A `Node.file`-prefix predicate
     (`include_paths`/`exclude_paths`, simple prefix match) scopes a query to
-    "my code, not vendored deps" the same way, on `find`/`who_calls`/
-    `what_it_calls`/`find_references`/`impact_of`/`hotspots`/`stats`. These filter
+     "my code, not vendored deps" the same way, on `find`/`who_calls`/
+     `what_it_calls`/`find_references`/`impact_of`/`hotspots`/`stats`/
+     `line_span`/`no_incoming_calls`. These filter
     primitives live in `cppgraph.filters` and drive **both** surfaces — the MCP
     tools and the CLI query commands (`callers`/`callees`/`impact`, with
     `--limit`, `--exclude-tests`/`--no-exclude-tests`, `--hide-trivial`,

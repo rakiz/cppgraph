@@ -979,6 +979,98 @@ def test_stats_exclude_path_scopes_output(
     assert "vendor/" not in out
 
 
+BIG = "cxx . . $ app/big(b1)."
+MIDFN = "cxx . . $ app/mid(m1)."
+TINY = "cxx . . $ app/tiny(t1)."
+NEVER = "cxx . . $ app/never_called(n1)."
+WIDGET = "cxx . . $ app/Widget#"
+
+
+@pytest.fixture
+def spans_graph(tmp_path: Path) -> Path:
+    """A #504-shaped graph: definitions carry body extents, one real call edge
+    (big -> mid), a never-called callable, and a type."""
+    graph = Graph()
+    graph.nodes[BIG] = Node(symbol=BIG, file="src/app.cpp", line=10, end_line=110)
+    graph.nodes[MIDFN] = Node(symbol=MIDFN, file="src/app.cpp", line=200, end_line=250)
+    graph.nodes[TINY] = Node(symbol=TINY, file="src/app.cpp", line=300, end_line=302)
+    graph.nodes[NEVER] = Node(symbol=NEVER, file="src/lib.cpp", line=5, end_line=8)
+    graph.nodes[WIDGET] = Node(symbol=WIDGET, file="src/lib.cpp", line=1)
+    graph.add_edge("calls", BIG, MIDFN, file="src/app.cpp", line=15)
+    path = tmp_path / "spans.db"
+    write_sqlite(graph, path)
+    return path
+
+
+def test_line_span_ranks_descending(spans_graph: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    exit_code = main(["line_span", "--graph", str(spans_graph)])
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "top 4 of 4 definition(s) by body span" in out
+    lines = [line for line in out.splitlines() if line.startswith("  ")]
+    assert lines[0].split()[0] == "100"
+    assert "big" in lines[0]
+    assert lines[1].split()[0] == "50"
+
+
+def test_line_span_limit_truncates_and_reports_total(
+    spans_graph: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    exit_code = main(["line_span", "--graph", str(spans_graph), "--limit", "1"])
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "top 1 of 4 definition(s)" in out
+    assert "... and 3 more" in out
+
+
+def test_line_span_unavailable_returns_nonzero(
+    graph_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A stock-binary graph (no body extents) gets an explicit unavailable
+    message, like `references` without an index — not an empty list."""
+    exit_code = main(["line_span", "--graph", str(graph_path)])
+    out = capsys.readouterr().out
+    assert exit_code == 1
+    assert "unavailable" in out
+    assert "#504" in out
+
+
+def test_no_incoming_calls_lists_zero_caller_definitions(
+    spans_graph: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    exit_code = main(["no_incoming_calls", "--graph", str(spans_graph)])
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "3 of 3 defined callable(s) with zero incoming calls" in out
+    assert "big" in out
+    assert "never_called" in out
+    assert "mid" not in out  # mid has a caller; the type Widget is not callable
+    # the fact-not-verdict caveat is printed with the answer
+    assert "not proof of dead code" in out
+
+
+def test_no_incoming_calls_limit_truncates_and_reports_total(
+    spans_graph: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    exit_code = main(["no_incoming_calls", "--graph", str(spans_graph), "--limit", "1"])
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "1 of 3 defined callable(s)" in out
+    assert "... and 2 more" in out
+
+
+def test_no_incoming_calls_unavailable_returns_nonzero(
+    graph_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Refused on a stock-binary graph with the why: a phantom caller from a
+    mis-attributed declaration site turns a real 0 into a false 1."""
+    exit_code = main(["no_incoming_calls", "--graph", str(graph_path)])
+    out = capsys.readouterr().out
+    assert exit_code == 1
+    assert "not reliable" in out
+    assert "phantom caller" in out
+
+
 @pytest.fixture
 def refs_graph(tmp_path: Path) -> Path:
     graph = Graph()

@@ -713,6 +713,59 @@ def main(argv: list[str] | None = None) -> int:
     p_stats.add_argument("--limit", type=int, default=20, help="max rows to show (default: 20)")
     _add_path_filters(p_stats)
 
+    p_line_span = sub.add_parser(
+        "line_span",
+        help="rank definitions by body extent (end_line - start, largest first); "
+        "needs a graph indexed with a #504-built scip-clang",
+    )
+    p_line_span.add_argument(
+        "--graph",
+        required=False,
+        default=None,
+        help="graph store path (default: auto-discovered from the cwd's .cppgraph/)",
+    )
+    p_line_span.add_argument("--limit", type=int, default=20, help="max rows to show (default: 20)")
+    p_line_span.add_argument(
+        "--exclude-tests",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="drop definitions in test files (default: off)",
+    )
+    p_line_span.add_argument(
+        "--full-symbols",
+        action="store_true",
+        help="print the raw SCIP symbol strings instead of readable labels",
+    )
+    _add_path_filters(p_line_span)
+
+    p_no_incoming = sub.add_parser(
+        "no_incoming_calls",
+        help="defined callables with zero incoming calls edges (a fact, not a "
+        "dead-code verdict); needs a graph indexed with a #504-built scip-clang",
+    )
+    p_no_incoming.add_argument(
+        "--graph",
+        required=False,
+        default=None,
+        help="graph store path (default: auto-discovered from the cwd's .cppgraph/)",
+    )
+    p_no_incoming.add_argument(
+        "--limit", type=int, default=20, help="max rows to show (default: 20)"
+    )
+    p_no_incoming.add_argument(
+        "--exclude-tests",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="drop definitions in test files (default: off; a test caller still "
+        "counts as a caller)",
+    )
+    p_no_incoming.add_argument(
+        "--full-symbols",
+        action="store_true",
+        help="print the raw SCIP symbol strings instead of readable labels",
+    )
+    _add_path_filters(p_no_incoming)
+
     p_status = sub.add_parser(
         "status",
         help="show the graph's source commit and, with --root, whether the checkout has drifted",
@@ -1273,6 +1326,75 @@ def main(argv: list[str] | None = None) -> int:
             )
         if total > len(groups):
             print(f"  ... and {total - len(groups)} more (raise --limit to see them)")
+        return 0
+
+    if args.command == "line_span":
+        store = _open_store_checked(args, parser)
+        result = store.line_span(
+            limit=args.limit,
+            exclude_tests=args.exclude_tests,
+            include_paths=args.include_paths,
+            exclude_paths=args.exclude_paths,
+        )
+        if result is None:
+            print(
+                "[cppgraph] line_span unavailable: this graph carries no definition "
+                "body extents (enclosing_range), which only a #504-built scip-clang "
+                "emits — index with one and rebuild the store to enable it"
+            )
+            return 1
+        ranked, total = result
+        tests_note = " (excluding tests)" if args.exclude_tests else ""
+        print(f"[cppgraph] top {len(ranked)} of {total} definition(s) by body span{tests_note}")
+        for symbol, span in ranked:
+            node = store.get_node(symbol)
+            label = symbol if args.full_symbols else short_label(symbol)
+            if node is not None and node.file is not None and node.line is not None:
+                loc = f"{node.file}:{node.line + 1}"
+            else:
+                loc = "?"
+            print(f"  {span:>6}  {label}  ({loc})")
+        if total > len(ranked):
+            print(f"  ... and {total - len(ranked)} more (raise --limit to see them)")
+        return 0
+
+    if args.command == "no_incoming_calls":
+        store = _open_store_checked(args, parser)
+        result = store.no_incoming_calls(
+            limit=args.limit,
+            exclude_tests=args.exclude_tests,
+            include_paths=args.include_paths,
+            exclude_paths=args.exclude_paths,
+        )
+        if result is None:
+            print(
+                "[cppgraph] no_incoming_calls is not reliable on this graph: a stock "
+                "scip-clang's caller attribution (nearest-preceding definition, no "
+                "enclosing ranges) can mis-attribute a bodyless member declaration "
+                "to the preceding definition — a phantom caller that turns a real 0 "
+                "into a false 1. Index with a #504-built scip-clang and rebuild the "
+                "store to enable it"
+            )
+            return 1
+        symbols, total = result
+        tests_note = " (excluding tests)" if args.exclude_tests else ""
+        print(
+            f"[cppgraph] {len(symbols)} of {total} defined callable(s) with zero "
+            f"incoming calls{tests_note}"
+        )
+        print(
+            "  note: 0 static callers is a fact, not proof of dead code — vtable "
+            "dispatch, exported API, templates, entry points can have no static "
+            "caller and still be live"
+        )
+        for symbol in symbols:
+            node = store.get_node(symbol)
+            if node is not None:
+                _print_node(node, full_symbols=args.full_symbols)
+            else:
+                print(f"  {symbol if args.full_symbols else short_label(symbol)}  (?)")
+        if total > len(symbols):
+            print(f"  ... and {total - len(symbols)} more (raise --limit to see them)")
         return 0
 
     if args.command == "status":

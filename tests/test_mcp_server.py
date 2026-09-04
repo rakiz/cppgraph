@@ -341,6 +341,137 @@ def test_stats_tool_registered_and_routes_through_call(tmp_path: Path) -> None:
     ]
 
 
+BIG = "cxx . . $ app/big(b1)."
+MIDFN = "cxx . . $ app/mid(m1)."
+TINY = "cxx . . $ app/tiny(t1)."
+NEVER = "cxx . . $ app/never_called(n1)."
+WIDGET = "cxx . . $ app/Widget#"
+
+
+@pytest.fixture
+def spans_store(tmp_path: Path) -> GraphStore:
+    """A #504-shaped store: definitions carry body extents, one real call edge
+    (big -> mid), plus a never-called callable and a type."""
+    graph = Graph()
+    graph.nodes[BIG] = Node(
+        symbol=BIG, display_name="big", file="src/app.cpp", line=10, end_line=110
+    )
+    graph.nodes[MIDFN] = Node(
+        symbol=MIDFN, display_name="mid", file="src/app.cpp", line=200, end_line=250
+    )
+    graph.nodes[TINY] = Node(
+        symbol=TINY, display_name="tiny", file="src/app.cpp", line=300, end_line=302
+    )
+    graph.nodes[NEVER] = Node(
+        symbol=NEVER, display_name="never_called", file="src/lib.cpp", line=5, end_line=8
+    )
+    graph.nodes[WIDGET] = Node(symbol=WIDGET, display_name="Widget", file="src/lib.cpp", line=1)
+    graph.add_edge("calls", BIG, MIDFN, file="src/app.cpp", line=15)
+    path = tmp_path / "spans.db"
+    write_sqlite(graph, path)
+    return GraphStore(path)
+
+
+def test_line_span_ranking_orders_by_span_descending(spans_store: GraphStore) -> None:
+    result = mcp_server.line_span_ranking(spans_store)
+    assert result["total"] == 4
+    assert [(d["name"], d["span"]) for d in result["definitions"]] == [
+        ("big", 100),
+        ("mid", 50),
+        ("never_called", 3),
+        ("tiny", 2),
+    ]
+    assert result["definitions"][0]["file"] == "src/app.cpp"
+    assert result["definitions"][0]["line"] == 11  # 0-indexed 10 -> 1-indexed
+
+
+def test_line_span_ranking_limit_truncates(spans_store: GraphStore) -> None:
+    result = mcp_server.line_span_ranking(spans_store, limit=1)
+    assert result["total"] == 4
+    assert len(result["definitions"]) == 1
+    assert result["truncated"] is True
+
+
+def test_line_span_ranking_unavailable_reports_reason(store: GraphStore) -> None:
+    """The default fixture is a stock-binary graph (no body extents): the tool
+    says so explicitly — the `available: false` convention `references` uses —
+    rather than a silently empty list."""
+    result = mcp_server.line_span_ranking(store)
+    assert result["available"] is False
+    assert "#504" in result["reason"]
+
+
+def test_line_span_ranking_matches_store_line_span_directly(spans_store: GraphStore) -> None:
+    """Parity check: the MCP tool's ranking is exactly `store.line_span`, not a
+    reimplementation."""
+    result = mcp_server.line_span_ranking(spans_store, full_symbols=True)
+    expected_ranked, expected_total = spans_store.line_span()
+    assert result["total"] == expected_total
+    assert [(d["symbol"], d["span"]) for d in result["definitions"]] == expected_ranked
+
+
+def test_line_span_tool_registered_and_routes_through_call(tmp_path: Path) -> None:
+    from cppgraph.mcp_server import build_server
+
+    path = tmp_path / "g.db"
+    write_sqlite(Graph(), path)
+    server = build_server(str(path))
+    tool = server._tool_manager._tools["line_span"].fn
+    assert tool()["available"] is False  # no enclosing-range data in this store
+
+
+def test_no_incoming_calls_report_lists_zero_caller_callables(
+    spans_store: GraphStore,
+) -> None:
+    result = mcp_server.no_incoming_calls_report(spans_store)
+    assert result["total"] == 3
+    assert [d["name"] for d in result["definitions"]] == ["big", "tiny", "never_called"]
+
+
+def test_no_incoming_calls_report_states_fact_not_verdict(
+    spans_store: GraphStore,
+) -> None:
+    """Every response carries the caveat: 0 static callers is a fact, not proof
+    of dead code (vtable dispatch / exported API / templates / entry points)."""
+    result = mcp_server.no_incoming_calls_report(spans_store)
+    assert "not proof of dead code" in result["note"]
+    assert "vtable" in result["note"]
+
+
+def test_no_incoming_calls_report_limit_truncates(spans_store: GraphStore) -> None:
+    result = mcp_server.no_incoming_calls_report(spans_store, limit=1)
+    assert result["total"] == 3
+    assert result["truncated"] is True
+
+
+def test_no_incoming_calls_report_unavailable_reports_reason(store: GraphStore) -> None:
+    """Refuses on a stock-binary graph, explaining why: a phantom caller from a
+    mis-attributed declaration site can turn a real 0 into a false 1."""
+    result = mcp_server.no_incoming_calls_report(store)
+    assert result["available"] is False
+    assert "phantom caller" in result["reason"]
+    assert "#504" in result["reason"]
+
+
+def test_no_incoming_calls_report_matches_store_directly(spans_store: GraphStore) -> None:
+    result = mcp_server.no_incoming_calls_report(spans_store, full_symbols=True)
+    expected, expected_total = spans_store.no_incoming_calls()
+    assert result["total"] == expected_total
+    assert [d["symbol"] for d in result["definitions"]] == expected
+
+
+def test_no_incoming_calls_tool_registered_and_routes_through_call(
+    tmp_path: Path,
+) -> None:
+    from cppgraph.mcp_server import build_server
+
+    path = tmp_path / "g.db"
+    write_sqlite(Graph(), path)
+    server = build_server(str(path))
+    tool = server._tool_manager._tools["no_incoming_calls"].fn
+    assert tool()["available"] is False  # stock-binary store: refused, not guessed
+
+
 BASE = "cxx . . $ mongo/Base#"
 DERIVED = "cxx . . $ mongo/Derived#"
 LEAF = "cxx . . $ mongo/Leaf#"

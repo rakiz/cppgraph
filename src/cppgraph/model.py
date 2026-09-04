@@ -19,6 +19,10 @@ class Node:
     display_name: str = ""
     file: str | None = None
     line: int | None = None  # 0-indexed start line of the defining occurrence
+    # 0-indexed end line of the definition's body extent (`enclosing_range`),
+    # present only when the indexing binary emits it (#504); None on stock.
+    # Drives `line_span` (rank by body size) and gates `no_incoming_calls`.
+    end_line: int | None = None
 
 
 @dataclass(slots=True)
@@ -185,7 +189,13 @@ class Graph:
     def to_dict(self) -> dict:
         return {
             "nodes": [
-                {"symbol": n.symbol, "display_name": n.display_name, "file": n.file, "line": n.line}
+                {
+                    "symbol": n.symbol,
+                    "display_name": n.display_name,
+                    "file": n.file,
+                    "line": n.line,
+                    "end_line": n.end_line,
+                }
                 for n in self.nodes.values()
             ],
             "edges": [

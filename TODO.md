@@ -45,22 +45,6 @@ active list. Design detail is in `DESIGN.md`, shipped features in
   already prints the file→symbol upgrade hint (index with a #504 binary / `enrich-refs`);
   add the extra `.graph.db` cost so the user can weigh it. Measure the real delta first
   (same graph with vs without `--attributed-refs`); don't hardcode a guess.
-- **`line_span` — definitions ranked by body extent.** `enclosing_range` (#504)
-  carries each definition's exact `(start, end)`; the builder already computes it for
-  attribution (`_occurrence_enclosing_range`) but discards the end — `Node` keeps only
-  `line`. Persist `end_line` on `Node`, then rank by `end - start`. Exact line span,
-  not the fragile "def → next symbol" heuristic. #504-only, degrades cleanly on a
-  stock graph like ref attribution does. States span, not complexity (facts-not-
-  judgments rule in `DESIGN.md`) — so it's `line_span`, not `most_complex`.
-- **`no_incoming_calls` — definitions with zero incoming `calls` edges.** The exact
-  primitive behind the "dead code" question: a graph fact (`callers_of(sym) == []`),
-  not a verdict. Unreliable as "dead" — vtable dispatch, exported API, templates,
-  entry points all have no static caller yet are live — so the tool states the fact
-  and the LLM judges. Cheap (`Counter` complement over `Edge.dst`). Pairs naturally
-  with an `exclude` of known entry points (`setup`/`loop`/`main`) surfaced as a hint,
-  never a filter that hides. **Gated on the declaration-attribution bug above** — a
-  phantom caller from a mis-attributed declaration site turns a real 0 into a false 1,
-  which is exactly the answer this tool must get right.
 - **`strongly_connected_components` — call-graph cycles.** The exact primitive behind
   "circular deps": SCC membership on the `calls` subgraph (Tarjan), not a "bad
   architecture" verdict — mutual recursion is often legitimate. Returns the components

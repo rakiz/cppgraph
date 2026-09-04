@@ -68,6 +68,26 @@ EXPLAIN_LIMIT = 10
 
 _UNKNOWN = "unknown symbol {symbol!r} — use the `find` tool to look up its exact SCIP symbol string"
 
+# Degrade-cleanly responses for the enclosing-range-gated (#504) tools, the
+# same `available: false` + `reason` convention `references` uses when the
+# graph was built `--no-references`: say why, point at the upgrade, never a
+# silently empty/wrong list.
+_NO_ENCLOSING_RANGES = (
+    "this graph carries no definition body extents: `enclosing_range` is emitted "
+    "only by a #504-built scip-clang, and a stock-binary graph cannot answer "
+    "this (an empty list would read as 'none', which is wrong). Index with a "
+    "#504-built scip-clang and rebuild the store (`cppgraph build --scip "
+    "<index.scip>`) to enable it"
+)
+_STOCK_ATTRIBUTION_UNRELIABLE = (
+    "not reliable on this graph: it was indexed with a stock scip-clang, whose "
+    "caller attribution (nearest-preceding definition, no enclosing ranges) can "
+    "mis-attribute a bodyless member declaration to the preceding definition — "
+    "a phantom caller that turns a real 0 into a false 1, exactly the answer "
+    "this tool must get right. Index with a #504-built scip-clang and rebuild "
+    "the store to enable it"
+)
+
 
 def _line1(line0: int | None) -> int | None:
     """0-indexed store line -> 1-indexed for display; None stays None."""
@@ -734,6 +754,114 @@ def stats_summary(
     }
 
 
+def line_span_ranking(
+    store: GraphStore,
+    limit: int = DEFAULT_LIMIT,
+    exclude_tests: bool = False,
+    full_symbols: bool = False,
+    include_paths: list[str] | None = None,
+    exclude_paths: list[str] | None = None,
+) -> dict[str, Any]:
+    """Definitions ranked by body extent — `end_line - start line`, largest
+    first. Where the biggest bodies live, from the exact `enclosing_range`
+    extents (#504), not a def→next-symbol heuristic.
+
+    On a store without body extents (a stock-binary graph) the response is
+    `{"available": false, "reason": …}` — the same convention `references`
+    uses — not a silently empty list. `exclude_tests` drops definitions in
+    test files; `include_paths`/`exclude_paths` filter by definition-file path
+    prefix. `limit` caps the list (default 40); `total` always reports the
+    full filtered count.
+    """
+    result = store.line_span(
+        limit=limit,
+        exclude_tests=exclude_tests,
+        include_paths=include_paths,
+        exclude_paths=exclude_paths,
+    )
+    if result is None:
+        return {"available": False, "reason": _NO_ENCLOSING_RANGES}
+    ranked, total = result
+    items: list[dict[str, Any]] = []
+    for symbol, span in ranked:
+        node = store.get_node(symbol)
+        item = (
+            _node_dict(node, full_symbols)
+            if node is not None
+            else {"name": _short_label(symbol), "file": None, "line": None}
+        )
+        if full_symbols:
+            item["symbol"] = symbol
+        item["span"] = span
+        items.append(item)
+    return {
+        "total": total,
+        "truncated": total > len(ranked),
+        "excluded_tests": exclude_tests,
+        "include_paths": include_paths,
+        "exclude_paths": exclude_paths,
+        "definitions": items,
+    }
+
+
+def no_incoming_calls_report(
+    store: GraphStore,
+    limit: int = DEFAULT_LIMIT,
+    exclude_tests: bool = False,
+    full_symbols: bool = False,
+    include_paths: list[str] | None = None,
+    exclude_paths: list[str] | None = None,
+) -> dict[str, Any]:
+    """Callable definitions with zero incoming `calls` edges — the exact
+    primitive behind the "dead code" question, stated as a graph fact
+    (`callers_of(sym) == []`), never a verdict. Unreliable as "dead": vtable
+    dispatch, exported API, templates, entry points all have no static caller
+    yet are live — the tool states the fact (a standing `note` on every
+    response) and the LLM judges.
+
+    Refuses (same `available: false` + `reason` convention as `line_span`) on
+    a stock-binary graph, where a phantom caller from a mis-attributed
+    declaration site can turn a real 0 into a false 1. `exclude_tests` drops
+    definitions in test files (a test caller still counts as a caller);
+    `include_paths`/`exclude_paths` filter by definition-file path prefix.
+    `limit` caps the list (default 40); `total` always reports the full count.
+    """
+    result = store.no_incoming_calls(
+        limit=limit,
+        exclude_tests=exclude_tests,
+        include_paths=include_paths,
+        exclude_paths=exclude_paths,
+    )
+    if result is None:
+        return {"available": False, "reason": _STOCK_ATTRIBUTION_UNRELIABLE}
+    symbols, total = result
+    items: list[dict[str, Any]] = []
+    for symbol in symbols:
+        node = store.get_node(symbol)
+        item = (
+            _node_dict(node, full_symbols)
+            if node is not None
+            else {"name": _short_label(symbol), "file": None, "line": None}
+        )
+        if full_symbols:
+            item["symbol"] = symbol
+        items.append(item)
+    return {
+        "total": total,
+        "truncated": total > len(symbols),
+        "excluded_tests": exclude_tests,
+        "include_paths": include_paths,
+        "exclude_paths": exclude_paths,
+        "note": (
+            "0 static callers is a graph fact, not proof of dead code — vtable "
+            "dispatch, exported API, templates, and entry points (e.g. main, "
+            "setup/loop) all have no static caller yet are live. The tool "
+            "states the fact; the judgment is yours."
+        ),
+        "definitions": items,
+    }
+
+
 def explain(
     store: GraphStore,
     symbol: str,
@@ -857,6 +985,7 @@ def status_report(
             "cppgraph_version": m.get("cppgraph_version"),
             "has_references": m.get("has_references") == "true",
             "has_attributed_refs": m.get("has_attributed_refs") == "true",
+            "has_enclosing_ranges": m.get("has_enclosing_ranges") == "true",
             "node_count": m.get("node_count"),
             "edge_count": m.get("edge_count"),
             "ref_count": m.get("ref_count"),
@@ -1320,6 +1449,67 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
             stats_summary,
             group_by=group_by,
             limit=limit,
+            include_paths=include_paths,
+            exclude_paths=exclude_paths,
+        )
+
+    @mcp.tool()
+    def line_span(
+        limit: int = DEFAULT_LIMIT,
+        exclude_tests: bool = False,
+        full_symbols: bool = False,
+        include_paths: list[str] | None = None,
+        exclude_paths: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Definitions ranked by body extent — top N largest bodies
+        (`end_line - start line`, largest first), the exact extents from
+        `enclosing_range`, not a def→next-symbol heuristic. Needs a graph
+        indexed with a #504-built scip-clang (the same binary `status`'s
+        usage-view upgrade advice names — it is what emits enclosing ranges):
+        on a stock-binary graph the tool returns `available: false` with the
+        rebuild pointer instead of a silently empty list. `exclude_tests` drops
+        definitions in test files; `include_paths`/`exclude_paths` filter by
+        definition-file path prefix (e.g. scope out vendored deps). `limit`
+        caps the list (default 40): lower it to spend fewer tokens, raise it
+        when `truncated` — `total` always reports the full count."""
+        return _call(
+            line_span_ranking,
+            limit=limit,
+            exclude_tests=exclude_tests,
+            full_symbols=full_symbols,
+            include_paths=include_paths,
+            exclude_paths=exclude_paths,
+        )
+
+    @mcp.tool()
+    def no_incoming_calls(
+        limit: int = DEFAULT_LIMIT,
+        exclude_tests: bool = False,
+        full_symbols: bool = False,
+        include_paths: list[str] | None = None,
+        exclude_paths: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Callable definitions with zero incoming `calls` edges — the exact
+        primitive behind the "dead code" question, stated as a graph fact
+        (`callers_of(sym) == []`), never a verdict. Unreliable as "dead" —
+        vtable dispatch, exported API, templates, entry points all have no
+        static caller yet are live — so the tool states the fact (a standing
+        `note` on every response) and the LLM judges. Only trustworthy on a
+        graph indexed with a #504-built scip-clang: on a stock binary, caller
+        attribution can mis-attribute a bodyless declaration site to the
+        preceding definition — a phantom caller that turns a real 0 into a
+        false 1 — so there the tool refuses (`available: false`, reason
+        included) instead of answering. Compact `name` + `file:line` by
+        default (`full_symbols=True` for raw SCIP). `exclude_tests` drops
+        definitions in test files, but a test caller still counts as a caller.
+        `include_paths`/`exclude_paths` filter by definition-file path prefix.
+        `limit` caps the list (default 40) — `total` always reports the full
+        count."""
+        return _call(
+            no_incoming_calls_report,
+            limit=limit,
+            exclude_tests=exclude_tests,
+            full_symbols=full_symbols,
             include_paths=include_paths,
             exclude_paths=exclude_paths,
         )

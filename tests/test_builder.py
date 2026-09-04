@@ -121,6 +121,26 @@ def test_enclosing_range_attributes_caller_by_containment() -> None:
     assert callers == sorted([outer, nested])  # 20 -> run (contains it), 11 -> lambda
 
 
+def test_definition_body_extent_recorded_on_node() -> None:
+    """#504: a definition's enclosing_range end is kept on the Node (`end_line`,
+    what `line_span` ranks by) instead of being discarded after attribution; a
+    stock binary's definitions keep `end_line=None`."""
+    fn = "cxx . . $ pkg/render(r1)."
+    stock = "cxx . . $ pkg/plain(p1)."
+
+    doc = scip_pb2.Document(relative_path="render.cpp")
+    doc.occurrences.extend(
+        [
+            _def_with_body(fn, line=5, end_line=20),
+            _occurrence(stock, line=30, roles=DEFINITION),  # no enclosing_range
+        ]
+    )
+    graph = build_graph(scip_pb2.Index(documents=[doc]))
+
+    assert (graph.nodes[fn].line, graph.nodes[fn].end_line) == (5, 20)
+    assert graph.nodes[stock].end_line is None
+
+
 def test_calls_fall_back_to_nearest_preceding_without_enclosing_range() -> None:
     """A stock binary (no #504) emits no `enclosing_range`, so there are no
     intervals: attribution degrades to the nearest-preceding heuristic, unchanged.

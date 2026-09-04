@@ -8,6 +8,30 @@ on-disk store also carries its own `schema_version` for forward-compatibility.
 
 ### Added
 
+- **`no_incoming_calls`**: callable definitions with zero incoming `calls`
+  edges — the exact primitive behind the "dead code" question, stated as a
+  graph fact, never a verdict (vtable dispatch, exported API, templates, entry
+  points all have no static caller yet are live; the MCP response carries that
+  caveat as a standing `note`). Gated on the same `has_enclosing_ranges` signal
+  as `line_span`: on a stock-binary graph it refuses with the reason — the
+  nearest-preceding attribution fallback can fabricate a phantom caller from a
+  bodyless declaration site, turning a real 0 into a false 1 — rather than
+  answer unreliably. On the CLI and as an MCP tool, both backed by the same
+  `GraphStore.no_incoming_calls` (a SQL anti-join over `edges`, callability
+  from the shared `is_callable_symbol`); bounded output (`limit` + `total`),
+  same `exclude_tests`/path-prefix filters, and only symbols with a recorded
+  definition site (a test-only caller still counts as a caller).
+- **`line_span`**: definitions ranked by body extent (`end_line - start line`,
+  largest first) — where the biggest bodies live, from the exact
+  `enclosing_range` extents, not a def→next-symbol heuristic. #504-only: on a
+  stock-binary graph the tool reports `available: false` with the rebuild
+  pointer (the same degrade-cleanly contract as the reference-attribution
+  features) instead of a silently empty list. On the CLI and as an MCP tool,
+  both backed by the same `GraphStore.line_span`; bounded output (`limit` +
+  `total`) and the same `exclude_tests`/path-prefix filters as `hotspots`.
+  Persists `Node.end_line` in the store — **schema v3**: older stores keep
+  working (an incremental `update` adds the column on demand), and an older
+  cppgraph refuses a v3 store with the usual upgrade/rebuild error.
 - **`stats`**: module-level aggregate counts per file (`--group-by file`) or
   rolled up per directory via `dirname` (`--group-by dir`) — symbols defined,
   `calls` edges whose call site, and reference use sites, sorted by the three
