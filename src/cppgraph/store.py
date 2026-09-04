@@ -1073,6 +1073,96 @@ class GraphStore:
         ranked = [(sym, n) for sym, n in rows]
         return ranked[:limit], len(ranked)
 
+    def stats(
+        self,
+        group_by: str = "file",
+        limit: int = 20,
+        include_paths: list[str] | None = None,
+        exclude_paths: list[str] | None = None,
+    ) -> tuple[list[dict[str, str | int]], int]:
+        """Aggregate counts per file or per directory — a module-level
+        "how big / how dense is this part of the codebase" view.
+
+        Per file (the group's own path, before any rollup): `symbols` = symbols
+        *defined* there (`symbols.file_id`), `edges` = `calls` edges whose call
+        site is there (`edges.file_id` — the caller's call-site file, not either
+        endpoint's definition file), `refs` = references whose use site is there
+        (`refs.file_id`). Three SQL `GROUP BY file_id` aggregations merged into
+        one dict per file; a file with zero of everything never appears (there
+        is nothing to count, no LEFT JOIN needed).
+
+        `group_by="dir"` rolls the per-file counts up by `dirname(path)` in
+        Python (top-level files land in `"."`) — the file-level counts are the
+        aggregation unit, so the rollup is over grouped rows, not raw ones.
+        `include_paths`/`exclude_paths` filter by the group's own file path via
+        `cppgraph.filters.matches_path_prefix` (registered as `cpg_path_ok`,
+        like `hotspots`), applied *before* aggregation — a vendored file's
+        counts drop out entirely, including its rollup contribution.
+
+        Sorted by `symbols + edges + refs` (combined size) descending. Returns
+        `(groups, total)`: `groups` is the top `limit` dicts (`{"file"|"dir":
+        path, "symbols": n, "edges": n, "refs": n}` — the key matches
+        `group_by`), `total` the full group count, so `truncated =
+        total > len(groups)` works like `hotspots`' `(ranked, total)`.
+        """
+        if group_by not in ("file", "dir"):
+            raise ValueError(f"unknown stats group_by: {group_by!r}")
+        if limit < 0:
+            raise ValueError(f"limit must be >= 0, got {limit}")
+
+        path_clause = ""
+        if include_paths or exclude_paths:
+
+            def _path_ok(path: str | None) -> bool:
+                return matches_path_prefix(path, include=include_paths, exclude=exclude_paths)
+
+            self._con.create_function("cpg_path_ok", 1, _path_ok, deterministic=True)
+            path_clause = "AND cpg_path_ok(f.path)"
+        counts: dict[str, dict[str, int]] = {}
+
+        def _bucket(path: str) -> dict[str, int]:
+            c = counts.get(path)
+            if c is None:
+                c = {"symbols": 0, "edges": 0, "refs": 0}
+                counts[path] = c
+            return c
+
+        for key, sql in (
+            (
+                "symbols",
+                "SELECT f.path AS path, COUNT(*) AS n FROM symbols s "
+                "JOIN files f ON f.id = s.file_id WHERE 1=1 {pc} GROUP BY s.file_id",
+            ),
+            (
+                "edges",
+                "SELECT f.path AS path, COUNT(*) AS n FROM edges e "
+                "JOIN files f ON f.id = e.file_id WHERE e.kind = 'calls' {pc} "
+                "GROUP BY e.file_id",
+            ),
+            (
+                "refs",
+                "SELECT f.path AS path, COUNT(*) AS n FROM refs r "
+                "JOIN files f ON f.id = r.file_id WHERE 1=1 {pc} GROUP BY r.file_id",
+            ),
+        ):
+            for path, n in self._con.execute(sql.format(pc=path_clause)):
+                _bucket(path)[key] = n
+        if group_by == "dir":
+            rolled: dict[str, dict[str, int]] = {}
+            for path, c in counts.items():
+                p = path.replace("\\", "/")
+                d = p.rsplit("/", 1)[0] if "/" in p else "."
+                b = rolled.setdefault(d, {"symbols": 0, "edges": 0, "refs": 0})
+                for k in ("symbols", "edges", "refs"):
+                    b[k] += c[k]
+            grouped: list[tuple[str, dict[str, int]]] = list(rolled.items())
+        else:
+            grouped = list(counts.items())
+        grouped.sort(key=lambda pc: sum(pc[1].values()), reverse=True)
+        top = grouped[:limit]
+        name = group_by
+        return [{name: path, **c} for path, c in top], len(grouped)
+
     def subgraph(
         self, symbol: str, depth: int = 2, direction: str = "both"
     ) -> tuple[list[Node], list[Edge]]:

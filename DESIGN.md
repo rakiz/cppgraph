@@ -342,7 +342,9 @@ designing the builder so this isn't a later rewrite:
   take — and the LLM never has to guess or repeat — a filesystem path. Tools:
   `find`, `who_calls`, `what_it_calls`, `base_classes`, `subclasses`,
   `find_references`, `path`, `impact_of` (`kind` = calls|inherits), `hotspots`
-  (global fan-in/fan-out/edge-count ranking), `explain_symbol`, `status`,
+  (global fan-in/fan-out/edge-count ranking), `stats` (per-file/per-directory
+  aggregate counts: symbols, call edges, refs — a module "how big/dense" view),
+  `explain_symbol`, `status`,
   `visualize`. Each symbol-taking tool accepts a plain
   name as well as an exact SCIP string, through the shared `GraphStore.resolve`
   (also behind the CLI): a unique name resolves, `Class::method` maps to
@@ -372,7 +374,7 @@ designing the builder so this isn't a later rewrite:
     `~..._Test` teardown sites too). A `Node.file`-prefix predicate
     (`include_paths`/`exclude_paths`, simple prefix match) scopes a query to
     "my code, not vendored deps" the same way, on `find`/`who_calls`/
-    `what_it_calls`/`find_references`/`impact_of`/`hotspots`. These filter
+    `what_it_calls`/`find_references`/`impact_of`/`hotspots`/`stats`. These filter
     primitives live in `cppgraph.filters` and drive **both** surfaces — the MCP
     tools and the CLI query commands (`callers`/`callees`/`impact`, with
     `--limit`, `--exclude-tests`/`--no-exclude-tests`, `--hide-trivial`,

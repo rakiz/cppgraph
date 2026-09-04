@@ -8,6 +8,16 @@ on-disk store also carries its own `schema_version` for forward-compatibility.
 
 ### Added
 
+- **`stats`**: module-level aggregate counts per file (`--group-by file`) or
+  rolled up per directory via `dirname` (`--group-by dir`) — symbols defined,
+  `calls` edges whose call site, and reference use sites, sorted by the three
+  summed descending. A "how big / how dense is this part of the codebase" view
+  to size up an unfamiliar module without reading files, next to `hotspots`'
+  "what's most-called". On the CLI and as an MCP tool, both backed by the same
+  `GraphStore.stats` (three SQL `GROUP BY file_id` aggregations merged, dir
+  rollup in Python); bounded output (`limit` + `total`), and the same
+  `include_paths`/`exclude_paths` prefix filters as `hotspots`, applied to the
+  counted file before aggregation.
 - **`hotspots`**: ranks symbols by fan-in, fan-out, or total edge count across the
   whole graph — one call instead of N manual `who_calls`/`what_it_calls` queries.
   On the CLI and as an MCP tool, both backed by the same `GraphStore.hotspots`.

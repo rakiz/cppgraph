@@ -698,6 +698,42 @@ def hotspot_ranking(
     }
 
 
+def stats_summary(
+    store: GraphStore,
+    group_by: str = "file",
+    limit: int = DEFAULT_LIMIT,
+    include_paths: list[str] | None = None,
+    exclude_paths: list[str] | None = None,
+) -> dict[str, Any]:
+    """Module-level aggregate counts — "how big / how connected is this part of
+    the codebase?" without reading a single file, the size/density view next to
+    `hotspots`' "what's most-called".
+
+    `group_by="file"` (default) counts per file; `"dir"` rolls up per directory
+    (`dirname`, top-level files in `"."`). Each row: `symbols` defined there,
+    `edges` = `calls` edges whose call site is there, `refs` = reference use
+    sites there, sorted by the three summed, descending. `include_paths`/
+    `exclude_paths` drop a file's counts entirely on path-prefix mismatch
+    (e.g. scope out vendored deps). `limit` caps the list (default 40): lower it
+    to spend fewer tokens, raise it when `truncated` is true — `total` always
+    reports the full group count.
+    """
+    groups, total = store.stats(
+        group_by=group_by,
+        limit=limit,
+        include_paths=include_paths,
+        exclude_paths=exclude_paths,
+    )
+    return {
+        "group_by": group_by,
+        "total": total,
+        "truncated": total > len(groups),
+        "include_paths": include_paths,
+        "exclude_paths": exclude_paths,
+        "stats": groups,
+    }
+
+
 def explain(
     store: GraphStore,
     symbol: str,
@@ -1259,6 +1295,31 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
             kind=kind,
             exclude_tests=exclude_tests,
             full_symbols=full_symbols,
+            include_paths=include_paths,
+            exclude_paths=exclude_paths,
+        )
+
+    @mcp.tool()
+    def stats(
+        group_by: str = "file",
+        limit: int = DEFAULT_LIMIT,
+        include_paths: list[str] | None = None,
+        exclude_paths: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Module-level aggregate counts — "how big / how dense is this part of
+        the codebase?" without reading a single file: symbols defined, `calls`
+        edges whose call site, and ref use sites per file (group_by="file",
+        default) or rolled up per directory (group_by="dir"), sorted by the
+        three summed descending. Scales an unfamiliar module/repo at a glance,
+        the size/density view next to `hotspots`' "what's most-called".
+        `include_paths`/`exclude_paths` drop a file's counts on path-prefix
+        mismatch (e.g. scope out vendored deps). `limit` caps the list (default
+        40): lower it to spend fewer tokens, raise it when `truncated` —
+        `total` always reports the full group count."""
+        return _call(
+            stats_summary,
+            group_by=group_by,
+            limit=limit,
             include_paths=include_paths,
             exclude_paths=exclude_paths,
         )

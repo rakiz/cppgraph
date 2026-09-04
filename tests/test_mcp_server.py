@@ -283,6 +283,64 @@ def test_hotspot_ranking_exclude_paths_matches_store_hotspots_directly(tmp_path:
     assert expected_ranked == [("target", 1)]
 
 
+def test_stats_summary_groups_per_file(store: GraphStore) -> None:
+    # fixture: every definition and call site lives in foo.cpp — 3 symbols,
+    # 2 call edges, no refs. Parity with the CLI via the same GraphStore.stats.
+    result = mcp_server.stats_summary(store, group_by="file")
+    assert result["group_by"] == "file"
+    assert result["total"] == 1
+    assert result["truncated"] is False
+    assert result["stats"] == [{"file": "foo.cpp", "symbols": 3, "edges": 2, "refs": 0}]
+
+
+def test_stats_summary_dir_rollup(store: GraphStore) -> None:
+    result = mcp_server.stats_summary(store, group_by="dir")
+    assert result["group_by"] == "dir"
+    assert result["stats"] == [{"dir": ".", "symbols": 3, "edges": 2, "refs": 0}]
+
+
+def test_stats_summary_limit_truncates(store: GraphStore) -> None:
+    result = mcp_server.stats_summary(store, group_by="file", limit=0)
+    assert result["total"] == 1
+    assert result["stats"] == []
+    assert result["truncated"] is True
+
+
+def test_stats_summary_matches_store_stats_directly(tmp_path: Path) -> None:
+    """Parity check, same shape as the hotspots ones: the MCP wrapper is exactly
+    `store.stats`, not a reimplementation — same groups in the same order."""
+    graph = Graph()
+    graph.nodes["a"] = Node(symbol="a", file="src/a.cpp", line=1)
+    graph.nodes["b"] = Node(symbol="b", file="vendor/b.cpp", line=1)
+    graph.add_edge("calls", "a", "b", file="src/a.cpp", line=2)
+    graph.add_reference("b", "src/a.cpp", 3)
+    path = tmp_path / "stats.db"
+    write_sqlite(graph, path)
+    st = GraphStore(path)
+
+    result = mcp_server.stats_summary(st, group_by="dir", exclude_paths=["vendor/"])
+    expected_groups, expected_total = st.stats(group_by="dir", exclude_paths=["vendor/"])
+    assert result["total"] == expected_total
+    assert result["stats"] == expected_groups
+    assert expected_groups == [{"dir": "src", "symbols": 1, "edges": 1, "refs": 1}]
+
+
+def test_stats_tool_registered_and_routes_through_call(tmp_path: Path) -> None:
+    """The `@mcp.tool()` wrapper exists and delegates to `stats_summary` (the
+    pure functions above are covered directly; this covers the wiring)."""
+    from cppgraph.mcp_server import build_server
+
+    graph = Graph()
+    graph.nodes[FOO] = Node(symbol=FOO, display_name="makeResumeToken", file="foo.cpp", line=234)
+    path = tmp_path / "g.db"
+    write_sqlite(graph, path)
+    server = build_server(str(path))
+    stats_tool = server._tool_manager._tools["stats"].fn
+    assert stats_tool(group_by="dir")["stats"] == [
+        {"dir": ".", "symbols": 1, "edges": 0, "refs": 0}
+    ]
+
+
 BASE = "cxx . . $ mongo/Base#"
 DERIVED = "cxx . . $ mongo/Derived#"
 LEAF = "cxx . . $ mongo/Leaf#"

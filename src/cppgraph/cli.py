@@ -695,6 +695,24 @@ def main(argv: list[str] | None = None) -> int:
     )
     _add_path_filters(p_hotspots)
 
+    p_stats = sub.add_parser(
+        "stats", help="aggregate counts (symbols, call edges, refs) per file or directory"
+    )
+    p_stats.add_argument(
+        "--graph",
+        required=False,
+        default=None,
+        help="graph store path (default: auto-discovered from the cwd's .cppgraph/)",
+    )
+    p_stats.add_argument(
+        "--group-by",
+        choices=("file", "dir"),
+        default="file",
+        help="'file' (default): counts per file; 'dir': rolled up per directory via dirname",
+    )
+    p_stats.add_argument("--limit", type=int, default=20, help="max rows to show (default: 20)")
+    _add_path_filters(p_stats)
+
     p_status = sub.add_parser(
         "status",
         help="show the graph's source commit and, with --root, whether the checkout has drifted",
@@ -1236,6 +1254,25 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  {count:>6}  {label}  ({loc})")
         if total > len(ranked):
             print(f"  ... and {total - len(ranked)} more (raise --limit to see them)")
+        return 0
+
+    if args.command == "stats":
+        store = _open_store_checked(args, parser)
+        groups, total = store.stats(
+            group_by=args.group_by,
+            limit=args.limit,
+            include_paths=args.include_paths,
+            exclude_paths=args.exclude_paths,
+        )
+        unit = "file(s)" if args.group_by == "file" else "dir(s)"
+        print(f"[cppgraph] top {len(groups)} of {total} {unit} by symbols+edges+refs")
+        for g in groups:
+            print(
+                f"  {g['symbols']:>6} sym  {g['edges']:>5} edges  {g['refs']:>5} refs"
+                f"  {g[args.group_by]}"
+            )
+        if total > len(groups):
+            print(f"  ... and {total - len(groups)} more (raise --limit to see them)")
         return 0
 
     if args.command == "status":

@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from cppgraph.cli import main
-from cppgraph.model import Graph
+from cppgraph.model import Graph, Node
 from cppgraph.proto import scip_pb2
 from cppgraph.store import GraphStore, write_sqlite
 
@@ -912,6 +912,71 @@ def test_hotspots_exclude_path_drops_edges_touching_a_vendored_symbol(
     assert "top 1 of 1 symbol(s)" in out
     lines = [line for line in out.splitlines() if line.startswith("  ")]
     assert lines[0].split()[0] == "1"  # only proj_caller's edge counted
+
+
+@pytest.fixture
+def stats_graph(tmp_path: Path) -> Path:
+    graph = Graph()
+    graph.nodes["big1"] = Node(symbol="big1", file="src/big.cpp", line=1)
+    graph.nodes["big2"] = Node(symbol="big2", file="src/big.cpp", line=2)
+    graph.add_edge("calls", "big1", "big2", file="src/big.cpp", line=5)
+    graph.add_edge("calls", "big1", "helper", file="src/big.cpp", line=6)
+    for line in (10, 11, 12):
+        graph.add_reference("TYPE", "src/big.cpp", line)
+    graph.nodes["small"] = Node(symbol="small", file="src/small.cpp", line=1)
+    graph.add_edge("calls", "small", "helper", file="src/small.cpp", line=2)
+    graph.nodes["vend"] = Node(symbol="vend", file="vendor/tiny.cpp", line=1)
+    path = tmp_path / "stats.db"
+    write_sqlite(graph, path)
+    return path
+
+
+def test_stats_counts_per_file(stats_graph: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    exit_code = main(["stats", "--graph", str(stats_graph)])
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "top 3 of 3 file(s)" in out
+    lines = [line for line in out.splitlines() if line.startswith("  ")]
+    assert lines[0].split() == ["2", "sym", "2", "edges", "3", "refs", "src/big.cpp"]
+    assert any(line.endswith("src/small.cpp") for line in lines)
+
+
+def test_stats_dir_rollup(stats_graph: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    exit_code = main(["stats", "--graph", str(stats_graph), "--group-by", "dir"])
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "top 2 of 2 dir(s)" in out
+    lines = [line for line in out.splitlines() if line.startswith("  ")]
+    assert lines[0].split() == ["3", "sym", "3", "edges", "3", "refs", "src"]
+    assert lines[1].split()[-1] == "vendor"
+
+
+def test_stats_limit_truncates_and_reports_total(
+    stats_graph: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    exit_code = main(["stats", "--graph", str(stats_graph), "--limit", "1"])
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "top 1 of 3 file(s)" in out
+    assert "... and 2 more" in out
+
+
+def test_stats_exclude_path_scopes_output(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Path-prefix parity test, mirroring the hotspots exclude-path one above:
+    the filter applies to the counted file itself, before aggregation."""
+    graph = Graph()
+    graph.nodes["a"] = Node(symbol="a", file="src/myproject/a.cpp", line=1)
+    graph.nodes["v"] = Node(symbol="v", file="vendor/lib/v.cpp", line=1)
+    path = tmp_path / "pf_stats.db"
+    write_sqlite(graph, path)
+    exit_code = main(["stats", "--graph", str(path), "--exclude-path", "vendor/"])
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "top 1 of 1 file(s)" in out
+    assert "src/myproject/a.cpp" in out
+    assert "vendor/" not in out
 
 
 @pytest.fixture

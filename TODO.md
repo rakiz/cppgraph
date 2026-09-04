@@ -45,10 +45,6 @@ active list. Design detail is in `DESIGN.md`, shipped features in
   already prints the file→symbol upgrade hint (index with a #504 binary / `enrich-refs`);
   add the extra `.graph.db` cost so the user can weigh it. Measure the real delta first
   (same graph with vs without `--attributed-refs`); don't hardcode a guess.
-- **`stats` — aggregate counts by file / directory.** No tool gives a module-level
-  map (symbols, edges, refs per file, rolled up per directory via `dirname`). Exact
-  aggregation over `Node.file`/`Edge.file`; lets an LLM size up an unfamiliar module
-  without reading a file. Works on any graph.
 - **`line_span` — definitions ranked by body extent.** `enclosing_range` (#504)
   carries each definition's exact `(start, end)`; the builder already computes it for
   attribution (`_occurrence_enclosing_range`) but discards the end — `Node` keeps only

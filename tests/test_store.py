@@ -285,6 +285,87 @@ def test_hotspots_unknown_kind_raises(tmp_path: Path) -> None:
         store.hotspots(kind="bogus")
 
 
+# --- stats -------------------------------------------------------------------
+
+
+def _stats_graph() -> Graph:
+    graph = Graph()
+    # src/big.cpp: 2 symbols, 2 `calls` call sites (the `inherits` edge must
+    # not count), 3 ref use sites -> total 7.
+    graph.nodes["big1"] = Node(symbol="big1", file="src/big.cpp", line=1)
+    graph.nodes["big2"] = Node(symbol="big2", file="src/big.cpp", line=2)
+    graph.add_edge("calls", "big1", "big2", file="src/big.cpp", line=5)
+    graph.add_edge("calls", "big1", "helper", file="src/big.cpp", line=6)
+    graph.add_edge("inherits", "big2", "base", file="src/big.cpp", line=9)
+    for line in (10, 11, 12):
+        graph.add_reference("TYPE", "src/big.cpp", line)
+    # src/small.cpp: 1 symbol, 1 call site, no refs -> total 2.
+    graph.nodes["small"] = Node(symbol="small", file="src/small.cpp", line=1)
+    graph.add_edge("calls", "small", "helper", file="src/small.cpp", line=2)
+    # Top level and vendored files: 1 symbol each, nothing else -> total 1.
+    graph.nodes["root"] = Node(symbol="root", file="root.cpp", line=1)
+    graph.nodes["vend"] = Node(symbol="vend", file="vendor/tiny.cpp", line=1)
+    return graph
+
+
+def test_stats_per_file_counts_symbols_calls_edges_and_refs(tmp_path: Path) -> None:
+    store = _store(tmp_path, _stats_graph())
+    groups, total = store.stats(group_by="file")
+    assert total == 4
+    assert groups[0] == {"file": "src/big.cpp", "symbols": 2, "edges": 2, "refs": 3}
+    by_file = {g["file"]: g for g in groups}
+    assert by_file["src/small.cpp"] == {
+        "file": "src/small.cpp",
+        "symbols": 1,
+        "edges": 1,
+        "refs": 0,
+    }
+    assert by_file["root.cpp"] == {"file": "root.cpp", "symbols": 1, "edges": 0, "refs": 0}
+
+
+def test_stats_dir_rollup_sums_per_directory(tmp_path: Path) -> None:
+    store = _store(tmp_path, _stats_graph())
+    groups, total = store.stats(group_by="dir")
+    assert total == 3  # src, vendor, "."
+    assert groups[0] == {"dir": "src", "symbols": 3, "edges": 3, "refs": 3}
+    by_dir = {g["dir"]: g for g in groups}
+    assert by_dir["."] == {"dir": ".", "symbols": 1, "edges": 0, "refs": 0}
+    assert by_dir["vendor"] == {"dir": "vendor", "symbols": 1, "edges": 0, "refs": 0}
+
+
+def test_stats_exclude_paths_drops_vendored_files(tmp_path: Path) -> None:
+    store = _store(tmp_path, _stats_graph())
+    groups, total = store.stats(group_by="file", exclude_paths=["vendor/"])
+    assert total == 3
+    assert {g["file"] for g in groups} == {"src/big.cpp", "src/small.cpp", "root.cpp"}
+
+
+def test_stats_include_paths_keeps_only_scoped_files(tmp_path: Path) -> None:
+    store = _store(tmp_path, _stats_graph())
+    groups, total = store.stats(group_by="file", include_paths=["src/"])
+    assert total == 2
+    assert {g["file"] for g in groups} == {"src/big.cpp", "src/small.cpp"}
+
+
+def test_stats_limit_truncates_but_total_is_full_count(tmp_path: Path) -> None:
+    store = _store(tmp_path, _stats_graph())
+    groups, total = store.stats(group_by="file", limit=1)
+    assert groups == [{"file": "src/big.cpp", "symbols": 2, "edges": 2, "refs": 3}]
+    assert total == 4
+
+
+def test_stats_unknown_group_by_raises(tmp_path: Path) -> None:
+    store = _store(tmp_path, Graph())
+    with pytest.raises(ValueError):
+        store.stats(group_by="bogus")
+
+
+def test_stats_rejects_negative_limit(tmp_path: Path) -> None:
+    store = _store(tmp_path, Graph())
+    with pytest.raises(ValueError):
+        store.stats(limit=-1)
+
+
 # --- inheritance queries ---------------------------------------------------
 
 # --- schema versioning -----------------------------------------------------
