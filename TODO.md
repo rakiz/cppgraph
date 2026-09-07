@@ -45,13 +45,6 @@ active list. Design detail is in `DESIGN.md`, shipped features in
   already prints the file→symbol upgrade hint (index with a #504 binary / `enrich-refs`);
   add the extra `.graph.db` cost so the user can weigh it. Measure the real delta first
   (same graph with vs without `--attributed-refs`); don't hardcode a guess.
-- **`reachable_from(symbols)` — forward transitive reachability.** Complements
-  `impact_of` (reverse): from an entry point, what does it reach? Forward closure over
-  the `calls` adjacency (already built for `shortest_call_path`). Underpins attack-
-  surface mapping ("what can an external handler trigger?") and dependency-migration
-  scope. Per the `DESIGN.md` corollary it is a **lower bound** — static edges only,
-  runtime dispatch not covered — and is worded as "at least these are reachable",
-  never as a set the reader may act on by exclusion. Bounded output (cap + `total`).
 - **`api_surface(module)` — symbols crossing a module boundary.** Which definitions
   inside a directory are called/referenced from outside it — the *actually-used*
   external surface, distinct from what is merely declared public. A boundary query:
@@ -273,8 +266,8 @@ Kept for reference; most may never happen. Promote one back up if it becomes rea
   may reach the change via virtual dispatch the graph can't see), so it can never
   license *skipping* a test — only *adding* the ones known to reach it. The honest,
   additive form ("tests statically known to touch this change, run at least these")
-  is a thin wrapper over `reachable_from` and could live there; the token-saving pitch
-  (replace the full suite) is unsafe and parked.
+  is a thin wrapper over the now-shipped `reachable_from` and could live there;
+  the token-saving pitch (replace the full suite) is unsafe and parked.
 - **Version for non-git installs.** `current_version` derives from `git describe`;
   a non-git install (tarball/PyPI) falls back to the static `pyproject`/`__version__`.
   If we ever publish that way, wire a build-time version from the tag

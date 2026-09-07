@@ -344,7 +344,10 @@ designing the builder so this isn't a later rewrite:
 - CLI: `build`, `update` (incremental), `find`, `callers`, `callees`, `path`,
   `bases` / `subtypes` (direct inheritance neighbours of a type), `impact`
   (reverse blast-radius; `--kind calls` = transitive callers, `--kind inherits`
-  = all transitive subclasses), `references` (exact use sites, present unless the
+  = all transitive subclasses), `reachable-from` (forward reachability from an
+  entry point — a **lower bound** per the corollary below: "at least these are
+  reachable", never a set to act on by exclusion; `--kind inherits` = the
+  transitive base hierarchy above a derived type), `references` (exact use sites, present unless the
   graph was built `--no-references`; `--root` for snippets, else coordinates), `explain`
   (definition + neighbors; pass `--root` to also get a source snippet, omit it
   for coordinates only), `line_span` (definitions ranked by body extent,
@@ -370,8 +373,11 @@ designing the builder so this isn't a later rewrite:
   queries to an LLM, token-budgeted. FastMCP over stdio; the graph store is
   fixed at launch (`--graph <db>`, optional `--root <checkout>`) so tools never
   take — and the LLM never has to guess or repeat — a filesystem path. Tools:
-   `find`, `who_calls`, `what_it_calls`, `base_classes`, `subclasses`,
-   `find_references`, `path`, `impact_of` (`kind` = calls|inherits), `hotspots`
+    `find`, `who_calls`, `what_it_calls`, `base_classes`, `subclasses`,
+    `find_references`, `path`, `impact_of` (`kind` = calls|inherits),
+    `reachable_from` (the forward mirror — everything an entry point
+    transitively reaches, worded as a lower bound per the corollary below),
+    `hotspots`
    (global fan-in/fan-out/edge-count ranking), `dependency_cost`
    (call-site count against a target library — "if I replace X, how many
    call sites change?", the same ranking in its asymmetric `target_paths`
@@ -500,7 +506,8 @@ incompleteness is safe in one direction and dangerous in the other. A tool whose
 error over-reports (a dead-code *candidate* list — some listed symbols are
 actually live) is safe: the reader verifies each addition. A tool whose error
 under-reports is only safe when framed as a lower bound ("at least these are
-reachable" — attack surface), never as a set the reader may act on by *removing*
+reachable" — attack surface; `reachable_from` words every response this way),
+never as a set the reader may act on by *removing*
 the rest. Concretely: a static graph can say "these tests reach your change"
 (a subset worth running), never "you may skip the others" (the skipped test may
 reach the change through a virtual call the graph can't see). When a tool returns

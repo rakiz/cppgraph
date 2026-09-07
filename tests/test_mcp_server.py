@@ -231,6 +231,57 @@ def test_impact_depth_bounds_walk(store: GraphStore) -> None:
     assert names == {"mid"}  # only the direct caller at depth 1
 
 
+def test_reachable_from_transitive_callees(store: GraphStore) -> None:
+    result = mcp_server.reachable_from_report(store, CALLER)
+    names = {r["name"] for r in result["reaches"]}
+    assert names == {"mid", "makeResumeToken"}
+    assert result["total"] == 2
+    assert result["kind"] == "calls"
+
+
+def test_reachable_from_depth_bounds_walk(store: GraphStore) -> None:
+    result = mcp_server.reachable_from_report(store, CALLER, depth=1)
+    names = {r["name"] for r in result["reaches"]}
+    assert names == {"mid"}  # only the direct callee at depth 1
+
+
+def test_reachable_from_limit_truncates(store: GraphStore) -> None:
+    result = mcp_server.reachable_from_report(store, CALLER, limit=1)
+    assert result["total"] == 2
+    assert len(result["reaches"]) == 1
+    assert result["truncated"] is True
+
+
+def test_reachable_from_response_states_lower_bound(store: GraphStore) -> None:
+    """Per the DESIGN.md corollary: a forward-reachability result under-reports
+    runtime reachability, so every response says so — never a set to act on by
+    exclusion."""
+    result = mcp_server.reachable_from_report(store, CALLER)
+    assert "lower bound" in result["note"]
+    assert "at least these are reachable" in result["note"]
+
+
+def test_reachable_from_exclude_tests_drops_test_defined(tmp_path: Path) -> None:
+    entry = "cxx . . $ mongo/handler#run(a1)."
+    prod = "cxx . . $ mongo/Foo#doWork(a2)."
+    helper = "cxx . . $ mongo/Foo#assertState(a3)."
+    graph = Graph()
+    graph.nodes[entry] = Node(symbol=entry, display_name="run", file="handler.cpp", line=1)
+    graph.nodes[prod] = Node(symbol=prod, display_name="doWork", file="foo.cpp", line=2)
+    graph.nodes[helper] = Node(
+        symbol=helper, display_name="assertState", file="foo_test.cpp", line=3
+    )
+    graph.add_edge("calls", entry, prod, file="handler.cpp", line=10)
+    graph.add_edge("calls", entry, helper, file="handler.cpp", line=11)
+    path = tmp_path / "rt.db"
+    write_sqlite(graph, path)
+    st = GraphStore(path)
+    default = mcp_server.reachable_from_report(st, entry)
+    assert {r["name"] for r in default["reaches"]} == {"doWork"}  # test-defined dropped
+    kept = mcp_server.reachable_from_report(st, entry, exclude_tests=False)
+    assert {r["name"] for r in kept["reaches"]} == {"doWork", "assertState"}
+
+
 def test_hotspot_ranking_fan_in_orders_by_incoming_calls(store: GraphStore) -> None:
     # fixture: caller -> mid -> makeResumeToken, so FOO and MID each have
     # exactly one caller (fan_in == 1); this proves the MCP wrapper is driven
@@ -1038,6 +1089,14 @@ def test_impact_over_inherits_gives_all_descendants(hierarchy: GraphStore) -> No
     assert result["kind"] == "inherits"
 
 
+def test_reachable_from_over_inherits_gives_transitive_ancestors(
+    hierarchy: GraphStore,
+) -> None:
+    result = mcp_server.reachable_from_report(hierarchy, LEAF, kind="inherits", full_symbols=True)
+    assert {r["symbol"] for r in result["reaches"]} == {DERIVED, BASE}
+    assert result["kind"] == "inherits"
+
+
 def test_explain_coordinates_only_by_default(store: GraphStore) -> None:
     result = mcp_server.explain(store, FOO)
     assert result["symbol"] == FOO
@@ -1288,6 +1347,21 @@ def test_impact_on_type_redirects_to_references(tmp_path: Path) -> None:
     assert result["total"] == 0
     assert result["reference_sites"] == 2
     assert "find_references" in result["notice"]
+
+
+def test_reachable_from_on_type_redirects_to_methods(tmp_path: Path) -> None:
+    """Forward mirror of the impact redirect: a type makes no calls itself, so
+    `kind="calls"` on one would be a bare 0 that reads as "this class's code
+    reaches nothing" — its reachability lives in its methods."""
+    ty = "cxx . . $ mongo/ResumeTokenData#"
+    graph = Graph()
+    graph.nodes[ty] = Node(symbol=ty, display_name="ResumeTokenData", file="rt.h", line=1)
+    path = tmp_path / "ty.db"
+    write_sqlite(graph, path)
+    result = mcp_server.reachable_from_report(GraphStore(path), ty)
+    assert result["is_type"] is True
+    assert result["total"] == 0
+    assert "class_members" in result["notice"]
 
 
 def test_what_it_calls_hide_trivial(tmp_path: Path) -> None:

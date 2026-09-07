@@ -8,6 +8,35 @@ on-disk store also carries its own `schema_version` for forward-compatibility.
 
 ### Added
 
+- **`reachable_from`**: forward transitive reachability — the exact mirror of
+  `impact_of` (reverse): from an entry point, everything it transitively
+  reaches along `calls` edges ("what can this external handler trigger?" —
+  attack-surface mapping; also dependency-migration scope). Per the
+  `DESIGN.md` corollary the result is a **lower bound** — static
+  compiler-traced edges only; virtual dispatch, function pointers and runtime
+  registration have no static edge, so the true reachable set may be larger —
+  and it is *worded* that way on both surfaces, never as a set the reader may
+  act on by exclusion: a standing `note` on every MCP response and a printed
+  caveat line on the CLI ("at least these are reachable"). Algorithmically a
+  near-direct port of `GraphStore.impact`: the same id-space BFS over the
+  `edges` index, walking `src_id -> dst_id` instead of `dst_id -> src_id`
+  (`ix_src` instead of `ix_dst`), symbol strings materialized only for the
+  final result set. `kind="inherits"` is kept for parity with `impact` and is
+  coherent forward: `inherits` edges run derived -> base, so the forward walk
+  from a derived type is its transitive *base hierarchy* — the mirror of
+  `impact --kind inherits`'s transitive subclasses. One forward-only special
+  case: `kind="calls"` on a *type* returns a notice, not a bare `total: 0` —
+  a type makes no calls itself, so its reachability lives in its methods
+  (pointed at `class_members`), the same "never a misleading zero" rule as
+  `impact_of`'s type redirect to `find_references`. Single-symbol signature
+  (`reachable_from(symbol)`), matching `impact_of`'s shape: attack-surface
+  mapping is naturally one entry point at a time. CLI: `reachable-from
+  <symbol>` with `--depth`/`--kind` and the shared query filters; MCP tool
+  `reachable_from`; both thin wrappers over the same
+  `GraphStore.reachable_from` — bounded output (`limit` + `total` +
+  `truncated`), `exclude_tests` on by default, `include_paths`/
+  `exclude_paths` on the result set.
+
 - **`dependency_cost`**: call-site count against a target library — "if I
   replace/remove this library, how many call sites change?", answered as an
   exact count of `calls` edges whose *callee* is defined under one of the

@@ -1089,6 +1089,41 @@ class GraphStore:
         visited.discard(start_id)
         return set(self._symbols_for_ids(visited).values())
 
+    def reachable_from(
+        self, symbol: str, max_depth: int | None = None, kind: str = "calls"
+    ) -> set[str]:
+        """Symbols `symbol` transitively reaches forward along `kind` edges.
+
+        The exact mirror of `impact`: forward BFS over `ix_src` instead of
+        backward over `ix_dst`; `max_depth` bounds the forward hops (`None` =
+        unbounded). `kind="calls"` is forward call reachability (what an entry
+        point can reach); `kind="inherits"` walks a derived type up its base
+        hierarchy (all transitive ancestors). Walks in id-space, resolving to
+        symbol strings only for the final result set.
+        """
+        start_id = self._symbol_id(symbol)
+        if start_id is None:
+            return set()
+
+        visited = {start_id}
+        frontier = [start_id]
+        depth = 0
+        while frontier and (max_depth is None or depth < max_depth):
+            next_frontier: list[int] = []
+            for node_id in frontier:
+                for (callee_id,) in self._con.execute(
+                    "SELECT dst_id FROM edges WHERE kind = ? AND src_id = ?",
+                    (kind, node_id),
+                ).fetchall():
+                    if callee_id not in visited:
+                        visited.add(callee_id)
+                        next_frontier.append(callee_id)
+            frontier = next_frontier
+            depth += 1
+
+        visited.discard(start_id)
+        return set(self._symbols_for_ids(visited).values())
+
     def hotspots(
         self,
         limit: int | None = 20,

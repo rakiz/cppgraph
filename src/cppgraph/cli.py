@@ -667,6 +667,33 @@ def main(argv: list[str] | None = None) -> int:
     )
     _add_query_filters(p_impact)
 
+    p_reachable = sub.add_parser(
+        "reachable-from",
+        help="forward reachability: everything a symbol transitively calls (a lower bound)",
+    )
+    p_reachable.add_argument(
+        "--graph",
+        required=False,
+        default=None,
+        help="graph store path (default: auto-discovered from the cwd's .cppgraph/)",
+    )
+    p_reachable.add_argument(
+        "symbol",
+        help="a symbol name (resolved via `find`) or an exact SCIP string",
+    )
+    p_reachable.add_argument(
+        "--depth", type=int, default=None, help="max hops to walk forwards (default: unbounded)"
+    )
+    p_reachable.add_argument(
+        "--kind",
+        choices=("calls", "inherits"),
+        default="calls",
+        help="edge kind to walk: 'calls' = forward call reachability from an entry "
+        "point (default); 'inherits' = the transitive base hierarchy above a "
+        "derived type",
+    )
+    _add_query_filters(p_reachable)
+
     p_hotspots = sub.add_parser("hotspots", help="global ranking of symbols by call-edge volume")
     p_hotspots.add_argument(
         "--graph",
@@ -1422,6 +1449,48 @@ def main(argv: list[str] | None = None) -> int:
         verb = "transitively call" if args.kind == "calls" else "transitively inherit from"
         tests_note = " (excluding tests)" if args.exclude_tests else ""
         print(f"[cppgraph] {len(nodes)} symbol(s) {verb} {args.symbol}{tests_note}")
+        shown = nodes[: args.limit] if args.limit is not None else nodes
+        for _sym, node in shown:
+            if node is not None:
+                _print_node(node, full_symbols=args.full_symbols)
+        if len(shown) < len(nodes):
+            print(f"  ... and {len(nodes) - len(shown)} more (raise --limit to see them)")
+        return 0
+
+    if args.command == "reachable-from":
+        store = _open_store_checked(args, parser)
+        args.symbol = _resolve_symbol(store, args.symbol, parser)
+        if args.kind == "calls" and args.symbol.rstrip().endswith("#"):
+            print(
+                f"[cppgraph] {args.symbol} is a type — it makes no calls itself. Its "
+                "call-graph reachability lives in its methods: use `cppgraph "
+                "class-members`, then `reachable-from` on a method (or `--kind "
+                "inherits` for its base hierarchy)."
+            )
+            return 0
+        reached = sorted(store.reachable_from(args.symbol, max_depth=args.depth, kind=args.kind))
+        nodes = [(sym, store.get_node(sym)) for sym in reached]
+        if args.exclude_tests:
+            nodes = [(sym, n) for sym, n in nodes if n is None or not is_test_file(n.file)]
+        if args.include_paths or args.exclude_paths:
+            nodes = [
+                (sym, n)
+                for sym, n in nodes
+                if matches_path_prefix(
+                    n.file if n is not None else None,
+                    include=args.include_paths,
+                    exclude=args.exclude_paths,
+                )
+            ]
+        verb = "transitively reached from"
+        tests_note = " (excluding tests)" if args.exclude_tests else ""
+        print(f"[cppgraph] {len(nodes)} symbol(s) {verb} {args.symbol}{tests_note}")
+        print(
+            "  note: a lower bound — at least these are reachable. Static "
+            "compiler-traced edges only; virtual dispatch, function pointers "
+            "and runtime registration are not captured, so the true reachable "
+            "set may be larger."
+        )
         shown = nodes[: args.limit] if args.limit is not None else nodes
         for _sym, node in shown:
             if node is not None:

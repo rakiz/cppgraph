@@ -828,6 +828,41 @@ def test_impact_lists_transitive_callers(
     assert "caller(a2)." in out
 
 
+def test_reachable_from_lists_transitive_callees(
+    graph_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    exit_code = main(
+        ["reachable-from", "--graph", str(graph_path), "cxx . . $ mongo/Foo#caller(a2)."]
+    )
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "1 symbol(s) transitively reached from" in out
+    assert "makeResumeToken" in out
+    assert "lower bound" in out  # the standing caveat is printed, not just documented
+
+
+def test_reachable_from_depth_bounds(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    graph = Graph()
+    graph.add_edge("calls", "a", "b", file="f.cpp", line=1)
+    graph.add_edge("calls", "b", "c", file="f.cpp", line=2)
+    path = tmp_path / "chain.db"
+    write_sqlite(graph, path)
+    assert main(["reachable-from", "--graph", str(path), "--depth", "1", "a"]) == 0
+    out = capsys.readouterr().out
+    assert "1 symbol(s) transitively reached from a" in out
+
+
+def test_reachable_from_limit_truncates_and_reports_total(
+    hotspots_graph: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # c1 calls hot, warm and cold directly — 3 forward-reachable symbols
+    exit_code = main(["reachable-from", "--graph", str(hotspots_graph), "--limit", "1", "c1"])
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "3 symbol(s) transitively reached from c1" in out
+    assert "... and 2 more" in out
+
+
 @pytest.fixture
 def hotspots_graph(tmp_path: Path) -> Path:
     graph = Graph()
@@ -1613,6 +1648,39 @@ def test_impact_kind_inherits_walks_hierarchy(
     assert "2 symbol(s) transitively inherit from" in out
     assert "mongo/Derived#" in out
     assert "mongo/Leaf#" in out
+
+
+def test_reachable_from_kind_inherits_walks_ancestry(
+    hierarchy_graph: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert (
+        main(
+            [
+                "reachable-from",
+                "--graph",
+                str(hierarchy_graph),
+                "--kind",
+                "inherits",
+                "cxx . . $ mongo/Leaf#",
+            ]
+        )
+        == 0
+    )
+    out = capsys.readouterr().out
+    assert "2 symbol(s) transitively reached from" in out
+    assert "mongo/Derived#" in out
+    assert "mongo/Base#" in out
+
+
+def test_reachable_from_on_type_prints_notice(
+    hierarchy_graph: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert (
+        main(["reachable-from", "--graph", str(hierarchy_graph), "cxx . . $ mongo/Derived#"]) == 0
+    )
+    out = capsys.readouterr().out
+    assert "is a type" in out
+    assert "class-members" in out
 
 
 def test_export_writes_graphify_json(

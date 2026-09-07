@@ -165,6 +165,38 @@ def test_impact_unknown_symbol_returns_empty(tmp_path: Path) -> None:
     assert store.impact("nope") == set()
 
 
+def test_reachable_from_transitive_callees(tmp_path: Path) -> None:
+    graph = Graph()
+    graph.add_edge("calls", "entry", "mid", file="f.cpp", line=1)
+    graph.add_edge("calls", "mid", "target", file="f.cpp", line=2)
+    graph.add_edge("calls", "unrelated", "other", file="f.cpp", line=3)
+    store = _store(tmp_path, graph)
+    assert store.reachable_from("entry") == {"mid", "target"}
+
+
+def test_reachable_from_respects_max_depth(tmp_path: Path) -> None:
+    graph = Graph()
+    graph.add_edge("calls", "entry", "mid", file="f.cpp", line=1)
+    graph.add_edge("calls", "mid", "target", file="f.cpp", line=2)
+    store = _store(tmp_path, graph)
+    assert store.reachable_from("entry", max_depth=1) == {"mid"}
+    assert store.reachable_from("entry", max_depth=2) == {"mid", "target"}
+
+
+def test_reachable_from_cycle_terminates(tmp_path: Path) -> None:
+    graph = Graph()
+    graph.add_edge("calls", "a", "b", file="f.cpp", line=1)
+    graph.add_edge("calls", "b", "a", file="f.cpp", line=2)
+    graph.add_edge("calls", "b", "c", file="f.cpp", line=3)
+    store = _store(tmp_path, graph)
+    assert store.reachable_from("a") == {"b", "c"}
+
+
+def test_reachable_from_unknown_symbol_returns_empty(tmp_path: Path) -> None:
+    store = _store(tmp_path, Graph())
+    assert store.reachable_from("nope") == set()
+
+
 # --- hotspots ----------------------------------------------------------------
 
 
@@ -1368,6 +1400,14 @@ def test_impact_over_inherits_gives_transitive_descendants(tmp_path: Path) -> No
     assert store.impact(BASE, kind="inherits") == {DERIVED, LEAF}
     # calls-space impact of Base is empty (no calls edges into it)
     assert store.impact(BASE) == set()
+
+
+def test_reachable_from_over_inherits_gives_transitive_ancestors(tmp_path: Path) -> None:
+    store = _hierarchy(tmp_path)
+    # the base hierarchy above Leaf (inherits edges run derived -> base)
+    assert store.reachable_from(LEAF, kind="inherits") == {DERIVED, BASE}
+    # calls-space reachability of a type is empty (types make no calls)
+    assert store.reachable_from(BASE) == set()
 
 
 def test_store_persists_and_reopens(tmp_path: Path) -> None:

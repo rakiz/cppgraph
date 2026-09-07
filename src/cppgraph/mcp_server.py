@@ -113,6 +113,18 @@ _SCC_NOTE = (
     "filtered out; a reported component always lists all its members (the "
     "cycle is a fact about the compiled binary)."
 )
+# Standing caveat on every reachable_from response: a static call graph
+# under-reports runtime reachability (virtual dispatch, function pointers,
+# registered factories have no static edge), so per the DESIGN.md corollary
+# the result is a lower bound — "at least these are reachable" — never a set
+# whose absent members are safe to ignore.
+_REACHABLE_NOTE = (
+    "a lower bound on runtime reachability: every symbol listed is reached via "
+    "a compiler-traced static edge, but virtual dispatch, function pointers "
+    "and runtime registration (e.g. factories) have no static edge, so the "
+    "true reachable set may be larger. Read it as 'at least these are "
+    "reachable', never as a set whose absent members are safe to ignore."
+)
 
 
 def _line1(line0: int | None) -> int | None:
@@ -687,6 +699,92 @@ def impact(
         "include_paths": include_paths,
         "exclude_paths": exclude_paths,
         "reached_by": out,
+    }
+
+
+def reachable_from_report(
+    store: GraphStore,
+    symbol: str,
+    depth: int | None = None,
+    limit: int = DEFAULT_LIMIT,
+    kind: str = "calls",
+    full_symbols: bool = False,
+    exclude_tests: bool = True,
+    include_paths: list[str] | None = None,
+    exclude_paths: list[str] | None = None,
+) -> dict[str, Any]:
+    """Forward reachability: everything `symbol` transitively reaches — the
+    exact mirror of `impact` (which reports what reaches the symbol).
+
+    `kind="calls"` (default) is the forward call closure from an entry point
+    ("what can this external handler trigger?" — attack-surface mapping; also
+    migration scope: what world am I pulling in if I keep this dependency's
+    callers?); `kind="inherits"` is the transitive base hierarchy above a
+    derived type. A **lower bound** on runtime reachability: static
+    compiler-traced edges only — virtual dispatch, function pointers and
+    runtime registration are not captured, so the true reachable set may be
+    larger; worded as "at least these are reachable", never as a set the
+    reader may act on by exclusion (see the standing `note`). `depth` bounds
+    the forward hops (None = unbounded). Results are symbols (with their
+    definition site); capped like the other fan-out tools. Symbols defined in
+    test files are dropped by default (`exclude_tests`);
+    `include_paths`/`exclude_paths` further filter by definition-file path
+    prefix (e.g. scope out vendored deps).
+    """
+    symbol, _alt = _resolve(store, symbol)
+    if _alt is not None:
+        return _alt
+
+    # A type makes no calls itself: `kind="calls"` on one would return a bare
+    # `total: 0` that reads as "this class's code reaches nothing" — its
+    # reachability lives in its methods. Redirect explicitly instead of
+    # silently returning 0. (`kind="inherits"` needs no special case: forward
+    # from a derived type walks up its base hierarchy, a coherent question.)
+    if kind == "calls" and _is_type_symbol(symbol):
+        return {
+            "symbol": symbol,
+            "kind": kind,
+            "is_type": True,
+            "reaches": [],
+            "total": 0,
+            "notice": (
+                f"{symbol} is a type, which makes no calls itself — its call-graph "
+                "reachability lives in its methods. Use `class_members` to list "
+                'them, then `reachable_from` on a method (or kind="inherits" for '
+                "its base hierarchy)."
+            ),
+        }
+
+    reached = sorted(store.reachable_from(symbol, max_depth=depth, kind=kind))
+    nodes = [(sym, store.get_node(sym)) for sym in reached]
+    if exclude_tests:
+        nodes = [(sym, n) for sym, n in nodes if n is None or not is_test_file(n.file)]
+    if include_paths or exclude_paths:
+        nodes = [
+            (sym, n)
+            for sym, n in nodes
+            if _matches_path_prefix(
+                n.file if n is not None else None, include=include_paths, exclude=exclude_paths
+            )
+        ]
+    shown, truncated = _capped(nodes, limit)
+    out: list[dict[str, Any]] = [
+        _node_dict(n, full_symbols)
+        if n is not None
+        else {"symbol": sym, "file": None, "line": None}
+        for sym, n in shown
+    ]
+    return {
+        "symbol": symbol,
+        "kind": kind,
+        "depth": depth,
+        "total": len(nodes),
+        "truncated": truncated,
+        "excluded_tests": exclude_tests,
+        "include_paths": include_paths,
+        "exclude_paths": exclude_paths,
+        "reaches": out,
+        "note": _REACHABLE_NOTE,
     }
 
 
@@ -1447,8 +1545,10 @@ def _server_instructions(store: GraphStore | None) -> str:
         "strings, or unrelated code; dedups overloads; returns signatures).\n"
         "- read a symbol's definition -> `explain_symbol` (include_source=true) "
         "rather than grepping or opening the file.\n"
-        "- relationships (callers, callees, call paths, impact, class hierarchy) -> "
-        "`who_calls`/`what_it_calls`/`path`/`impact_of`/`base_classes`/`subclasses`. "
+        "- relationships (callers, callees, call paths, impact, forward reachability, "
+        "class hierarchy) -> "
+        "`who_calls`/`what_it_calls`/`path`/`impact_of`/`reachable_from`/"
+        "`base_classes`/`subclasses`. "
         "Text search cannot resolve overloads or virtual dispatch, or tell a "
         "declaration from a use, so its answers here are noisy and often wrong.\n\n"
         "Keep using your normal read/search tools for: files outside the indexed "
@@ -1680,6 +1780,46 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         to spend fewer tokens, raise it when `truncated`."""
         return _call(
             impact,
+            symbol,
+            depth=depth,
+            limit=limit,
+            kind=kind,
+            full_symbols=full_symbols,
+            exclude_tests=exclude_tests,
+            include_paths=include_paths,
+            exclude_paths=exclude_paths,
+        )
+
+    @mcp.tool()
+    def reachable_from(
+        symbol: str,
+        depth: int | None = None,
+        limit: int = DEFAULT_LIMIT,
+        kind: str = "calls",
+        full_symbols: bool = False,
+        exclude_tests: bool = True,
+        include_paths: list[str] | None = None,
+        exclude_paths: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Forward reachability: everything `symbol` transitively reaches — the
+        exact mirror of `impact_of` (which reports what reaches the symbol).
+        kind="calls" (default) = the forward call closure from an entry point
+        ("what can this external handler trigger?" — attack-surface mapping;
+        also migration scope: what am I pulling in if I keep this dependency's
+        world?); kind="inherits" = the transitive base hierarchy above a
+        derived type. A LOWER BOUND on runtime reachability: static
+        compiler-traced edges only — virtual dispatch, function pointers and
+        runtime registration are not captured, so the true reachable set may
+        be larger; read it as "at least these are reachable", never as a set
+        whose absent members are safe to ignore (the standing `note` says so).
+        `depth` bounds the hops. Compact `name` + `file:line` by default
+        (`full_symbols=True` for raw SCIP); symbols in test files dropped
+        unless `exclude_tests=False`. `include_paths`/`exclude_paths` further
+        filter by definition-file path prefix (e.g. scope out vendored deps).
+        `limit` caps the list (default 40): lower it to spend fewer tokens,
+        raise it when `truncated`."""
+        return _call(
+            reachable_from_report,
             symbol,
             depth=depth,
             limit=limit,
