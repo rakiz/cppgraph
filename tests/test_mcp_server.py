@@ -283,6 +283,83 @@ def test_hotspot_ranking_exclude_paths_matches_store_hotspots_directly(tmp_path:
     assert expected_ranked == [("target", 1)]
 
 
+def _dependency_cost_graph() -> tuple[Path, Graph]:
+    graph = Graph()
+    graph.add_edge("calls", "proj_caller", "lib_hot", file="src/myproject/foo.cpp", line=1)
+    graph.add_edge("calls", "vendor_caller", "lib_hot", file="src/myproject/foo.cpp", line=2)
+    graph.add_edge("calls", "vendor_caller", "lib_warm", file="src/myproject/foo.cpp", line=3)
+    graph.add_edge("calls", "proj_caller", "proj_helper", file="src/myproject/foo.cpp", line=4)
+    graph.nodes["proj_caller"].file = "src/myproject/foo.cpp"
+    graph.nodes["vendor_caller"].file = "vendor/somelib/foo.cpp"
+    graph.nodes["lib_hot"].file = "spirv_cross/hot.cpp"
+    graph.nodes["lib_warm"].file = "spirv_cross/warm.cpp"
+    graph.nodes["proj_helper"].file = "src/myproject/foo.cpp"
+    return graph
+
+
+def _dependency_cost_store(tmp_path: Path, graph: Graph) -> GraphStore:
+    path = tmp_path / "dep_cost.db"
+    write_sqlite(graph, path)
+    return GraphStore(path)
+
+
+def test_dependency_cost_report_counts_call_sites_into_target(tmp_path: Path) -> None:
+    """The report's headline number is the SUM over all target symbols —
+    "if I replace this library, how many call sites change?" — with the
+    per-symbol breakdown as detail. Vendored callers count by default (the
+    asymmetric filter restricts the callee side only)."""
+    st = _dependency_cost_store(tmp_path, _dependency_cost_graph())
+    result = mcp_server.dependency_cost_report(st, target_paths=["spirv_cross/"])
+    assert result["target_paths"] == ["spirv_cross/"]
+    assert result["total_call_sites"] == 3  # 2 into lib_hot + 1 into lib_warm
+    assert result["distinct_target_symbols"] == 2
+    assert result["truncated"] is False
+    counts = {t["name"]: t["count"] for t in result["top_targets"]}
+    assert counts == {"lib_hot": 2, "lib_warm": 1}
+    assert all("proj_helper" != t["name"] for t in result["top_targets"])
+
+
+def test_dependency_cost_report_limit_truncates_but_totals_are_full(tmp_path: Path) -> None:
+    st = _dependency_cost_store(tmp_path, _dependency_cost_graph())
+    result = mcp_server.dependency_cost_report(st, target_paths=["spirv_cross/"], limit=1)
+    assert len(result["top_targets"]) == 1
+    assert result["truncated"] is True
+    # The aggregate answers stay full — never implied by the capped list.
+    assert result["total_call_sites"] == 3
+    assert result["distinct_target_symbols"] == 2
+
+
+def test_dependency_cost_report_exclude_paths_filters_caller_side_only(tmp_path: Path) -> None:
+    st = _dependency_cost_store(tmp_path, _dependency_cost_graph())
+    result = mcp_server.dependency_cost_report(
+        st, target_paths=["spirv_cross/"], exclude_paths=["vendor/"]
+    )
+    assert result["total_call_sites"] == 1  # only proj_caller's edge remains
+    assert result["exclude_paths"] == ["vendor/"]
+
+
+def test_dependency_cost_report_matches_store_hotspots_directly(tmp_path: Path) -> None:
+    """Parity check, same shape as the hotspots ones: the MCP report's
+    breakdown is exactly `store.hotspots(kind='fan_in', target_paths=…,
+    limit=None)`, not a reimplementation."""
+    st = _dependency_cost_store(tmp_path, _dependency_cost_graph())
+    result = mcp_server.dependency_cost_report(st, target_paths=["spirv_cross/"], full_symbols=True)
+    expected_ranked, expected_total = st.hotspots(
+        limit=None, kind="fan_in", target_paths=["spirv_cross/"]
+    )
+    assert result["distinct_target_symbols"] == expected_total
+    assert [(t["symbol"], t["count"]) for t in result["top_targets"]] == expected_ranked
+    assert result["total_call_sites"] == sum(n for _, n in expected_ranked)
+
+
+def test_dependency_cost_report_requires_target_paths(tmp_path: Path) -> None:
+    """An empty target list would silently read as the whole graph's fan-in —
+    reject it explicitly rather than report a number for a different question."""
+    st = _dependency_cost_store(tmp_path, _dependency_cost_graph())
+    with pytest.raises(ValueError):
+        mcp_server.dependency_cost_report(st, target_paths=[])
+
+
 def test_stats_summary_groups_per_file(store: GraphStore) -> None:
     # fixture: every definition and call site lives in foo.cpp — 3 symbols,
     # 2 call edges, no refs. Parity with the CLI via the same GraphStore.stats.

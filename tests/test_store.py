@@ -285,6 +285,121 @@ def test_hotspots_unknown_kind_raises(tmp_path: Path) -> None:
         store.hotspots(kind="bogus")
 
 
+def _target_paths_graph() -> Graph:
+    graph = Graph()
+    # Call sites into the "library" under spirv_cross/ from a project caller
+    # and a vendored caller, plus one project-internal edge — the
+    # asymmetric-filter fixture (callee definition under the target prefix,
+    # callers anywhere).
+    graph.add_edge("calls", "proj_caller", "lib_hot", file="src/myproject/foo.cpp", line=1)
+    graph.add_edge("calls", "vendor_caller", "lib_hot", file="src/myproject/foo.cpp", line=2)
+    graph.add_edge("calls", "vendor_caller", "lib_warm", file="src/myproject/foo.cpp", line=3)
+    graph.add_edge("calls", "proj_caller", "proj_helper", file="src/myproject/foo.cpp", line=4)
+    graph.nodes["proj_caller"].file = "src/myproject/foo.cpp"
+    graph.nodes["vendor_caller"].file = "vendor/somelib/foo.cpp"
+    graph.nodes["lib_hot"].file = "spirv_cross/hot.cpp"
+    graph.nodes["lib_warm"].file = "spirv_cross/warm.cpp"
+    graph.nodes["proj_helper"].file = "src/myproject/foo.cpp"
+    return graph
+
+
+def test_hotspots_target_paths_counts_cross_boundary_call_sites(tmp_path: Path) -> None:
+    """The asymmetric mode: only the callee side is pinned to the target
+    prefix, so cross-boundary call sites (project/vendored code calling INTO
+    the library) are counted — the question symmetric filtering cannot ask."""
+    store = _store(tmp_path, _target_paths_graph())
+    ranked, total = store.hotspots(kind="fan_in", target_paths=["spirv_cross/"])
+    assert ranked == [("lib_hot", 2), ("lib_warm", 1)]
+    assert total == 2  # proj_helper (non-target callee) is not counted
+    # The symmetric mode answers a *different* question: with BOTH endpoints
+    # required under the prefix, no edge survives (none is library-internal) —
+    # which is why TODO.md's "falls out of hotspots + path filtering for free"
+    # needed this real extension to the filter model, not just wiring.
+    sym_ranked, sym_total = store.hotspots(kind="fan_in", include_paths=["spirv_cross/"])
+    assert sym_ranked == []
+    assert sym_total == 0
+
+
+def test_hotspots_target_paths_path_filters_apply_to_caller_side_only(
+    tmp_path: Path,
+) -> None:
+    """In target mode, include/exclude filter the CALLER side only — e.g.
+    "count call sites into the library, but not from other vendored code that
+    also uses it" — never the target side (that's target_paths' job)."""
+    store = _store(tmp_path, _target_paths_graph())
+    # Exclude vendored callers: lib_warm loses its only caller and drops out.
+    ranked, total = store.hotspots(
+        kind="fan_in", target_paths=["spirv_cross/"], exclude_paths=["vendor/"]
+    )
+    assert ranked == [("lib_hot", 1)]
+    assert total == 1
+    # Include only project callers: same answer from the other side.
+    ranked, total = store.hotspots(
+        kind="fan_in", target_paths=["spirv_cross/"], include_paths=["src/myproject/"]
+    )
+    assert ranked == [("lib_hot", 1)]
+    assert total == 1
+
+
+def test_hotspots_target_paths_exclude_tests_drops_test_defined_callers(
+    tmp_path: Path,
+) -> None:
+    """`exclude_tests` keeps its symmetric either-endpoint shape in target
+    mode (a test-DEFINED symbol on either end drops the edge), unchanged from
+    plain hotspots."""
+    graph = _target_paths_graph()
+    graph.add_edge("calls", "test_caller", "lib_hot", file="src/myproject/foo.cpp", line=9)
+    graph.nodes["test_caller"].file = "src/myproject/foo_test.cpp"
+    store = _store(tmp_path, graph)
+    ranked, _total = store.hotspots(kind="fan_in", target_paths=["spirv_cross/"])
+    assert ranked == [("lib_hot", 3), ("lib_warm", 1)]
+    ranked, _total = store.hotspots(
+        kind="fan_in", target_paths=["spirv_cross/"], exclude_tests=True
+    )
+    assert ranked == [("lib_hot", 2), ("lib_warm", 1)]
+
+
+def test_hotspots_target_paths_requires_fan_in_kind(tmp_path: Path) -> None:
+    """`target_paths` counts *incoming* call sites into the library, so the
+    other kinds are a nonsensical combination — rejected explicitly, the same
+    defensive-validation style as the unknown-kind ValueError above."""
+    store = _store(tmp_path, _target_paths_graph())
+    for kind in ("fan_out", "edges"):
+        with pytest.raises(ValueError):
+            store.hotspots(kind=kind, target_paths=["spirv_cross/"])
+
+
+def test_hotspots_target_paths_none_reproduces_symmetric_behavior(
+    tmp_path: Path,
+) -> None:
+    """Backward compatibility: `target_paths=None` (the default) keeps today's
+    symmetric filter semantics exactly — the explicit None is indistinguishable
+    from not passing it, across every filter combination."""
+    store = _store(tmp_path, _target_paths_graph())
+    for kwargs in (
+        {},
+        {"exclude_paths": ["vendor/"]},
+        {"include_paths": ["src/myproject/"]},
+        {"exclude_tests": True},
+        {"kind": "fan_out"},
+        {"kind": "edges"},
+    ):
+        assert store.hotspots(target_paths=None, **kwargs) == store.hotspots(**kwargs)
+    # And a pinned concrete result: symmetric exclude_paths drops every edge
+    # touching the vendored endpoint, whichever side of the edge it is on.
+    ranked, total = store.hotspots(kind="fan_in", exclude_paths=["vendor/"])
+    assert dict(ranked) == {"lib_hot": 1, "proj_helper": 1}
+    assert total == 2
+
+
+def test_hotspots_limit_none_returns_the_full_ranking(tmp_path: Path) -> None:
+    """`limit=None` = no cap, so a caller can aggregate over the whole ranking
+    (dependency_cost sums it) — same rows, same order, just unsliced."""
+    store = _store(tmp_path, _target_paths_graph())
+    ranked, total = store.hotspots(limit=None, kind="fan_in")
+    assert len(ranked) == total == 3
+
+
 # --- stats -------------------------------------------------------------------
 
 

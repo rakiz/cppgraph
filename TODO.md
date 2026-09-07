@@ -59,14 +59,6 @@ active list. Design detail is in `DESIGN.md`, shipped features in
   module-overview use case, replacing N manual `what_it_calls` + `find_references`.
   Generalization of `stats` with a boundary predicate; shares that primitive with
   `boundary_violations`.
-- **`dependency_cost(library)` — call-site count against a set of symbols.** "If I
-  replace library X, how many call sites change?" is an exact fan-in count over edges
-  to X's symbols (a special case of `find_references`/`hotspots` aggregated by target
-  prefix). Factual, works on any graph. Likely **falls out of `hotspots` + path-prefix
-  filtering for free** — fan-in restricted to a target prefix, callers filtered to "my
-  code" — so it should land as a *mode* of `hotspots` once the path-prefix predicate
-  exists, not a standalone tool. Depends on that primitive arriving first; build it
-  after.
 - **Typed-by edges via `Relationship.is_type_definition`.** The builder reads only
   `is_implementation` (inheritance/override); `is_type_definition` gives the exact
   variable/field → its-type relationship, unused today. Promote it to a traversable edge

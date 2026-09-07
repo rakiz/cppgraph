@@ -744,6 +744,72 @@ def hotspot_ranking(
     }
 
 
+def dependency_cost_report(
+    store: GraphStore,
+    target_paths: list[str],
+    limit: int = DEFAULT_LIMIT,
+    exclude_tests: bool = False,
+    full_symbols: bool = False,
+    include_paths: list[str] | None = None,
+    exclude_paths: list[str] | None = None,
+) -> dict[str, Any]:
+    """Call-site count against a target library — "if I replace/remove this
+    library, how many call sites change?", answered as an exact count of real
+    `calls` edges whose *callee* is defined under one of the `target_paths`
+    path prefixes.
+
+    A measured fact, never a risk assessment: it says nothing about API
+    compatibility, migration difficulty, or whether the replacement is a good
+    idea — and, like every static call graph, it counts compiler-bound call
+    sites only, so dispatch the index cannot bind (e.g. an unresolvable
+    function pointer) is not in the number.
+
+    `target_paths` restricts the callee side; `include_paths`/`exclude_paths`
+    filter the *caller* side only — e.g. `exclude_paths=["vendor/"]` = "count
+    call sites from my code, not other vendored users of the same library" —
+    and `exclude_tests` keeps its symmetric either-endpoint shape. Backed by
+    `GraphStore.hotspots(kind="fan_in", target_paths=…)` — the same primitive
+    as `hotspots`, in its asymmetric-filter mode (see that docstring for why
+    this is a mode of the same ranking, not a standalone tool). `limit` caps
+    `top_targets`, the per-symbol breakdown heaviest-first; `total_call_sites`
+    and `distinct_target_symbols` always report the full counts, so a capped
+    list never under-states the headline number.
+    """
+    if not target_paths:
+        raise ValueError("target_paths must be a non-empty list of path prefixes")
+    ranked, total = store.hotspots(
+        limit=None,
+        kind="fan_in",
+        exclude_tests=exclude_tests,
+        include_paths=include_paths,
+        exclude_paths=exclude_paths,
+        target_paths=target_paths,
+    )
+    shown = ranked[:limit]
+    items: list[dict[str, Any]] = []
+    for symbol, count in shown:
+        node = store.get_node(symbol)
+        item = (
+            _node_dict(node, full_symbols)
+            if node is not None
+            else {"name": _short_label(symbol), "file": None, "line": None}
+        )
+        if full_symbols:
+            item["symbol"] = symbol
+        item["count"] = count
+        items.append(item)
+    return {
+        "target_paths": target_paths,
+        "total_call_sites": sum(n for _, n in ranked),
+        "distinct_target_symbols": total,
+        "truncated": total > len(shown),
+        "excluded_tests": exclude_tests,
+        "include_paths": include_paths,
+        "exclude_paths": exclude_paths,
+        "top_targets": items,
+    }
+
+
 def stats_summary(
     store: GraphStore,
     group_by: str = "file",
@@ -1647,6 +1713,37 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
             hotspot_ranking,
             limit=limit,
             kind=kind,
+            exclude_tests=exclude_tests,
+            full_symbols=full_symbols,
+            include_paths=include_paths,
+            exclude_paths=exclude_paths,
+        )
+
+    @mcp.tool()
+    def dependency_cost(
+        target_paths: list[str],
+        limit: int = DEFAULT_LIMIT,
+        exclude_tests: bool = False,
+        full_symbols: bool = False,
+        include_paths: list[str] | None = None,
+        exclude_paths: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Call-site count against a target library — "if I replace/remove this
+        library, how many call sites change?", the exact number of real `calls`
+        edges whose callee is defined under one of the `target_paths` prefixes
+        (e.g. ["spirv_cross/"]). A fact, not a risk assessment: it judges
+        nothing about API compatibility or migration difficulty. `include_paths`/
+        `exclude_paths` filter the CALLER side only (e.g. exclude_paths=["vendor/"]
+        = "call sites from my code, not other vendored users of the same
+        library"); pass `exclude_tests=True` to drop edges touching test-defined
+        symbols. Response: `total_call_sites` (the headline "N call sites"
+        answer), `distinct_target_symbols`, and `top_targets` — which symbols
+        in the library are hit hardest, bounded by `limit` (raise it when
+        `truncated`; the totals are always full)."""
+        return _call(
+            dependency_cost_report,
+            target_paths=target_paths,
+            limit=limit,
             exclude_tests=exclude_tests,
             full_symbols=full_symbols,
             include_paths=include_paths,

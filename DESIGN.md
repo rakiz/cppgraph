@@ -359,15 +359,24 @@ designing the builder so this isn't a later rewrite:
    and needs no #504), `strongly-connected-components` (the SCCs of the
    `calls` subgraph with >1 member — maximal sets of symbols that can all
    reach each other, the exact primitive behind "circular dependencies"; a
-   graph fact, never a verdict, since mutual recursion is often legitimate),
-   `status` (source commit + drift check).
+    graph fact, never a verdict, since mutual recursion is often legitimate),
+    `dependency-cost` (call-site count against a target library — "if I
+    replace/remove X, how many call sites change?", the `hotspots` fan-in
+    ranking in its asymmetric-filter mode: callees pinned to `--target-path`
+    prefixes, `--include-path`/`--exclude-path` filtering the *caller* side
+    only, plus the summed total call sites over the per-symbol breakdown),
+    `status` (source commit + drift check).
 - MCP server (`cppgraph-mcp`, `src/cppgraph/mcp_server.py`): exposes the same
   queries to an LLM, token-budgeted. FastMCP over stdio; the graph store is
   fixed at launch (`--graph <db>`, optional `--root <checkout>`) so tools never
   take — and the LLM never has to guess or repeat — a filesystem path. Tools:
    `find`, `who_calls`, `what_it_calls`, `base_classes`, `subclasses`,
    `find_references`, `path`, `impact_of` (`kind` = calls|inherits), `hotspots`
-   (global fan-in/fan-out/edge-count ranking), `stats` (per-file/per-directory
+   (global fan-in/fan-out/edge-count ranking), `dependency_cost`
+   (call-site count against a target library — "if I replace X, how many
+   call sites change?", the same ranking in its asymmetric `target_paths`
+   mode: callees pinned to the prefix, path filters on the caller side only,
+   `total_call_sites` + per-symbol breakdown), `stats` (per-file/per-directory
    aggregate counts: symbols, call edges, refs — a module "how big/dense" view),
    `line_span` (definitions ranked by body extent) and `no_incoming_calls`
    (zero-incoming-calls definitions — a fact, never a "dead" verdict), both
@@ -418,8 +427,13 @@ designing the builder so this isn't a later rewrite:
       (where the filter drops whole components from the output rather than
       their members — see the CHANGELOG entry for the compiled-binary
       reasoning). `boundary_violations` matches its
-      layering-rule prefixes against each endpoint's definition file with the
-      same segment-boundary semantics. These filter
+     layering-rule prefixes against each endpoint's definition file with the
+       same segment-boundary semantics. `dependency_cost` is the one
+       **asymmetric** use of the primitive: its `target_paths` (CLI
+       `--target-path`) pins the *callee* side to the target prefix while
+       `include_paths`/`exclude_paths` apply to the *caller* side only —
+       a mode of `hotspots`, whose symmetric both-endpoints semantics cannot
+       express a cross-boundary count (see the CHANGELOG entry). These filter
     primitives live in `cppgraph.filters` and drive **both** surfaces — the MCP
     tools and the CLI query commands (`callers`/`callees`/`impact`, with
     `--limit`, `--exclude-tests`/`--no-exclude-tests`, `--hide-trivial`,

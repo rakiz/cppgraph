@@ -8,6 +8,43 @@ on-disk store also carries its own `schema_version` for forward-compatibility.
 
 ### Added
 
+- **`dependency_cost`**: call-site count against a target library — "if I
+  replace/remove this library, how many call sites change?", answered as an
+  exact count of `calls` edges whose *callee* is defined under one of the
+  given path prefixes (e.g. `spirv_cross/`). A fact, never a risk assessment:
+  it says nothing about API compatibility or migration difficulty, and — like
+  every static call graph — it counts compiler-bound call sites only. Landed
+  as a *mode* of `hotspots`, per the TODO's intent, but **not** "for free" as
+  the TODO optimistically assumed: `hotspots`' path filtering was symmetric
+  (an edge counts only if *both* endpoints' definition files pass the same
+  prefix), which cannot express "callee inside the prefix, caller anywhere" —
+  symmetric `include_paths=["spirv_cross/"]` counts only *library-internal*
+  fan-in (and there is none: no edge has both endpoints there), a different
+  question. So `GraphStore.hotspots` gained `target_paths`: the callee side
+  is pinned to symbols defined under the prefixes (`cpg_target_ok`, the same
+  registered-`matches_path_prefix` SQL pattern as `cpg_path_ok`), while
+  `include_paths`/`exclude_paths` switch to the **caller side only** —
+  "call sites into `spirv_cross/` from my code, not from other vendored users
+  of it" (`exclude_paths=["vendor/"]`; vendored callers count by default).
+  `kind` must be `fan_in` there (the mode *is* an incoming-call-site count;
+  anything else raises `ValueError`, matching `hotspots`' existing defensive
+  validation), `exclude_tests` keeps its symmetric either-endpoint shape, and
+  `target_paths=None` (the default) preserves today's symmetric semantics
+  exactly — a fully backward-compatible additive change (pinned by a
+  dedicated regression test). `hotspots` also accepts `limit=None` now (the
+  uncapped ranking, for callers that aggregate over it). The headline number
+  is added only at the presentation layer: the pure
+  `dependency_cost_report` / the `dependency-cost` CLI subcommand report
+  `total_call_sites` (the summed "N call sites" answer) and
+  `distinct_target_symbols` alongside `top_targets` (the per-symbol
+  breakdown, heaviest first, bounded by `limit`; the totals are always the
+  full counts, so a capped list never under-states the headline) — both
+  surfaces backed by the same `GraphStore.hotspots(kind="fan_in",
+  target_paths=…)`, no duplicated SQL. CLI: `dependency-cost --target-path
+  PREFIX` (repeatable, required) with `--limit`/`--exclude-tests`/
+  `--full-symbols` and the caller-side `--include-path`/`--exclude-path`;
+  MCP tool `dependency_cost` takes `target_paths` as a list.
+
 - **`strongly_connected_components`**: the cycles of the call graph —
   strongly-connected components of the `calls` subgraph with more than one
   member, i.e. maximal sets of symbols that can all reach each other, the

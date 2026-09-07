@@ -915,6 +915,89 @@ def test_hotspots_exclude_path_drops_edges_touching_a_vendored_symbol(
 
 
 @pytest.fixture
+def dependency_cost_graph(tmp_path: Path) -> Path:
+    graph = Graph()
+    graph.add_edge("calls", "proj_caller", "lib_hot", file="src/myproject/foo.cpp", line=1)
+    graph.add_edge("calls", "vendor_caller", "lib_hot", file="src/myproject/foo.cpp", line=2)
+    graph.add_edge("calls", "vendor_caller", "lib_warm", file="src/myproject/foo.cpp", line=3)
+    graph.add_edge("calls", "proj_caller", "proj_helper", file="src/myproject/foo.cpp", line=4)
+    graph.nodes["proj_caller"].file = "src/myproject/foo.cpp"
+    graph.nodes["vendor_caller"].file = "vendor/somelib/foo.cpp"
+    graph.nodes["lib_hot"].file = "spirv_cross/hot.cpp"
+    graph.nodes["lib_warm"].file = "spirv_cross/warm.cpp"
+    graph.nodes["proj_helper"].file = "src/myproject/foo.cpp"
+    path = tmp_path / "dep_cost.db"
+    write_sqlite(graph, path)
+    return path
+
+
+def test_dependency_cost_reports_total_call_sites(
+    dependency_cost_graph: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    exit_code = main(
+        ["dependency-cost", "--graph", str(dependency_cost_graph), "--target-path", "spirv_cross/"]
+    )
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "3 call site(s) into spirv_cross/ from 2 target symbol(s)" in out
+    lines = [line for line in out.splitlines() if line.startswith("  ")]
+    assert lines[0].split()[0] == "2"  # lib_hot: project + vendored callers
+    assert "lib_hot" in lines[0]
+    assert lines[1].split()[0] == "1"
+    assert "lib_warm" in lines[1]
+
+
+def test_dependency_cost_exclude_path_filters_caller_side_only(
+    dependency_cost_graph: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`--exclude-path` stays caller-side in dependency-cost (the asymmetric
+    mode): vendored callers of the library drop out, the library's symbols
+    stay in scope."""
+    exit_code = main(
+        [
+            "dependency-cost",
+            "--graph",
+            str(dependency_cost_graph),
+            "--target-path",
+            "spirv_cross/",
+            "--exclude-path",
+            "vendor/",
+        ]
+    )
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "1 call site(s) into spirv_cross/ from 1 target symbol(s)" in out
+
+
+def test_dependency_cost_limit_truncates_but_total_stays_full(
+    dependency_cost_graph: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    exit_code = main(
+        [
+            "dependency-cost",
+            "--graph",
+            str(dependency_cost_graph),
+            "--target-path",
+            "spirv_cross/",
+            "--limit",
+            "1",
+        ]
+    )
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "3 call site(s)" in out  # the aggregate is never capped by --limit
+    assert "... and 1 more" in out
+
+
+def test_dependency_cost_requires_target_path(
+    dependency_cost_graph: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(SystemExit):
+        main(["dependency-cost", "--graph", str(dependency_cost_graph)])
+    assert "usage:" in capsys.readouterr().err
+
+
+@pytest.fixture
 def stats_graph(tmp_path: Path) -> Path:
     graph = Graph()
     graph.nodes["big1"] = Node(symbol="big1", file="src/big.cpp", line=1)

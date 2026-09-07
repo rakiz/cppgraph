@@ -1091,11 +1091,12 @@ class GraphStore:
 
     def hotspots(
         self,
-        limit: int = 20,
+        limit: int | None = 20,
         kind: str = "fan_in",
         exclude_tests: bool = False,
         include_paths: list[str] | None = None,
         exclude_paths: list[str] | None = None,
+        target_paths: list[str] | None = None,
     ) -> tuple[list[tuple[str, int]], int]:
         """Rank symbols by call-edge volume across the whole graph.
 
@@ -1103,7 +1104,9 @@ class GraphStore:
         `"fan_out"` by outgoing edges (most-calling); `"edges"` sums both per
         symbol — including a self-recursive symbol's own edge to itself *twice*
         (once as the caller, once as the callee), the usual graph-degree
-        convention for a self-loop, not a double-counting bug.
+        convention for a self-loop, not a double-counting bug. `limit=None`
+        returns the full ranking uncapped (for callers that aggregate over it,
+        e.g. `dependency_cost`'s total); the default 20 slices it.
 
         Aggregated entirely in SQL (`GROUP BY` + `ORDER BY` + `LIMIT`) over the
         `edges` index, in id-space until the final `LIMIT` rows are resolved to
@@ -1117,11 +1120,37 @@ class GraphStore:
         itself defined in a test file (via its own definition site, like
         `cppgraph.filters.drop_test_edges` — not the call site, which is a
         different, unrelated file). Symmetric because this is a global ranking
-        with no single "far endpoint" the way a per-symbol query has one.
-        `include_paths`/`exclude_paths` apply the same way, via
+        with no single "far endpoint" the way a per-symbol query has one — and
+        it keeps that symmetric either-endpoint shape in `target_paths` mode
+        too. `include_paths`/`exclude_paths` apply the same way, via
         `cppgraph.filters.matches_path_prefix` registered as a SQL function
         (`cpg_path_ok`) — an edge counts only if *both* endpoints' definition
         files pass the prefix filter.
+
+        `target_paths` switches that path filtering to an **asymmetric** mode:
+        the ranked (callee) side is pinned to symbols *defined* under one of
+        the `target_paths` prefixes (a `cpg_target_ok` match on the destination
+        endpoint's definition file), while `include_paths`/`exclude_paths`
+        apply to the **caller** side *only* instead of both sides. That answers
+        "how many call sites point into this library?" — counting
+        cross-boundary edges (callers anywhere calling INTO the prefix), which
+        the symmetric mode cannot express (it would require the caller to be
+        inside the prefix too, i.e. library-internal fan-in — a different
+        question). E.g. `target_paths=["spirv_cross/"],
+        exclude_paths=["vendor/"]` = "call sites into `spirv_cross/` from my
+        code, not from other vendored users of it". `kind` must be `"fan_in"`
+        there — the mode *is* an incoming-call-site count, so `"fan_out"`/
+        `"edges"` are a nonsensical combination and raise `ValueError` (same
+        defensive-validation style as the unknown-kind one). An empty list is
+        treated as not given, matching `matches_path_prefix`'s convention.
+        With `target_paths=None` (the default) the symmetric semantics above
+        apply exactly as before — a fully backward-compatible additive mode.
+
+        NOTE for readers arriving from TODO.md's original wording ("likely
+        falls out of hotspots + path-prefix filtering for free"): it did not —
+        the symmetric `cpg_path_ok`-on-both-endpoints semantics cannot restrict
+        the callee side alone, so this mode is a real extension of the filter
+        model, not just wiring a prefix into the existing parameters.
 
         Returns `(ranked, total)`: `ranked` is the top `limit` `(symbol, count)`
         pairs in descending order, `total` is how many distinct symbols have at
@@ -1130,8 +1159,13 @@ class GraphStore:
         """
         if kind not in ("fan_in", "fan_out", "edges"):
             raise ValueError(f"unknown hotspots kind: {kind!r}")
-        if limit < 0:
-            raise ValueError(f"limit must be >= 0, got {limit}")
+        if limit is not None and limit < 0:
+            raise ValueError(f"limit must be >= 0 or None, got {limit}")
+        if target_paths and kind != "fan_in":
+            raise ValueError(
+                "target_paths counts incoming call sites into the target prefix(es), "
+                f"so it requires kind='fan_in', got {kind!r}"
+            )
 
         self._con.create_function("cpg_is_test_file", 1, is_test_file, deterministic=True)
         test_clause = (
@@ -1140,7 +1174,23 @@ class GraphStore:
             else ""
         )
         path_clause = ""
-        if include_paths or exclude_paths:
+        if target_paths:
+
+            def _target_ok(path: str | None) -> bool:
+                return matches_path_prefix(path, include=target_paths, exclude=None)
+
+            self._con.create_function("cpg_target_ok", 1, _target_ok, deterministic=True)
+            # Asymmetric mode: the callee side is pinned by cpg_target_ok, and
+            # include/exclude (if given) constrain the caller side ONLY.
+            path_clause = "AND cpg_target_ok(f_dst.path)"
+            if include_paths or exclude_paths:
+
+                def _path_ok(path: str | None) -> bool:
+                    return matches_path_prefix(path, include=include_paths, exclude=exclude_paths)
+
+                self._con.create_function("cpg_path_ok", 1, _path_ok, deterministic=True)
+                path_clause += " AND cpg_path_ok(f_src.path)"
+        elif include_paths or exclude_paths:
 
             def _path_ok(path: str | None) -> bool:
                 return matches_path_prefix(path, include=include_paths, exclude=exclude_paths)

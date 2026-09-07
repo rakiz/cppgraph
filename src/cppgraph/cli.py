@@ -695,6 +695,47 @@ def main(argv: list[str] | None = None) -> int:
     )
     _add_path_filters(p_hotspots)
 
+    p_dep_cost = sub.add_parser(
+        "dependency-cost",
+        help="call-site count against a target library — 'if I replace/remove this "
+        "library, how many call sites change?' (exact count of calls edges into it)",
+    )
+    p_dep_cost.add_argument(
+        "--graph",
+        required=False,
+        default=None,
+        help="graph store path (default: auto-discovered from the cwd's .cppgraph/)",
+    )
+    p_dep_cost.add_argument(
+        "--target-path",
+        action="append",
+        dest="target_paths",
+        metavar="PREFIX",
+        required=True,
+        help="count call sites whose callee is defined under PREFIX (repeatable)",
+    )
+    p_dep_cost.add_argument(
+        "--limit",
+        type=int,
+        default=20,
+        help="max target symbols to show in the breakdown (default: 20)",
+    )
+    p_dep_cost.add_argument(
+        "--exclude-tests",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="drop edges where either endpoint symbol is itself defined in a test file "
+        "(default: off)",
+    )
+    p_dep_cost.add_argument(
+        "--full-symbols",
+        action="store_true",
+        help="print the raw SCIP symbol strings instead of readable labels",
+    )
+    # Caller-side only here (--target-path owns the callee side): the
+    # asymmetric-filter mode of hotspots.
+    _add_path_filters(p_dep_cost)
+
     p_stats = sub.add_parser(
         "stats", help="aggregate counts (symbols, call edges, refs) per file or directory"
     )
@@ -1410,6 +1451,37 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  {count:>6}  {label}  ({loc})")
         if total > len(ranked):
             print(f"  ... and {total - len(ranked)} more (raise --limit to see them)")
+        return 0
+
+    if args.command == "dependency-cost":
+        store = _open_store_checked(args, parser)
+        # limit=None: the aggregate must sum over the full ranking, --limit
+        # caps only the displayed breakdown (same shape as the MCP report).
+        ranked, total = store.hotspots(
+            limit=None,
+            kind="fan_in",
+            exclude_tests=args.exclude_tests,
+            include_paths=args.include_paths,
+            exclude_paths=args.exclude_paths,
+            target_paths=args.target_paths,
+        )
+        shown = ranked[: args.limit]
+        total_call_sites = sum(n for _, n in ranked)
+        tests_note = " (excluding tests)" if args.exclude_tests else ""
+        print(
+            f"[cppgraph] {total_call_sites} call site(s) into "
+            f"{', '.join(args.target_paths)} from {total} target symbol(s){tests_note}"
+        )
+        for symbol, count in shown:
+            node = store.get_node(symbol)
+            label = symbol if args.full_symbols else short_label(symbol)
+            if node is not None and node.file is not None and node.line is not None:
+                loc = f"{node.file}:{node.line + 1}"
+            else:
+                loc = "?"
+            print(f"  {count:>6}  {label}  ({loc})")
+        if total > len(shown):
+            print(f"  ... and {total - len(shown)} more (raise --limit to see them)")
         return 0
 
     if args.command == "stats":
