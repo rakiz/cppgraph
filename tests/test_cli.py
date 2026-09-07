@@ -1334,6 +1334,96 @@ def test_class_members_zero_members_prints_note(
     assert "no members recorded on this type" in out
 
 
+# --- strongly-connected-components -------------------------------------------
+
+
+@pytest.fixture
+def scc_graph(tmp_path: Path) -> Path:
+    """A 3-cycle (x->y->z->x) and a 2-cycle (a<->b); `spur` calls into a cycle
+    without joining it, `selfrec` is direct self-recursion (out of scope)."""
+    graph = Graph()
+    graph.add_edge("calls", "a", "b", file="src/a.cpp", line=1)
+    graph.add_edge("calls", "b", "a", file="src/a.cpp", line=2)
+    graph.add_edge("calls", "x", "y", file="src/x.cpp", line=1)
+    graph.add_edge("calls", "y", "z", file="src/x.cpp", line=2)
+    graph.add_edge("calls", "z", "x", file="src/x.cpp", line=3)
+    graph.add_edge("calls", "spur", "x", file="src/a.cpp", line=3)
+    graph.add_edge("calls", "selfrec", "selfrec", file="src/s.cpp", line=1)
+    for symbol, file, line in (
+        ("a", "src/a.cpp", 10),
+        ("b", "src/a.cpp", 11),
+        ("x", "src/x.cpp", 20),
+        ("y", "src/x.cpp", 21),
+        ("z", "src/x.cpp", 22),
+        ("spur", "src/a.cpp", 5),
+        ("selfrec", "src/s.cpp", 30),
+    ):
+        graph.nodes[symbol].file = file
+        graph.nodes[symbol].line = line
+    path = tmp_path / "scc.db"
+    write_sqlite(graph, path)
+    return path
+
+
+def test_strongly_connected_components_prints_cycles(
+    scc_graph: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    exit_code = main(["strongly-connected-components", "--graph", str(scc_graph)])
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "2 of 2 cyclic group(s) of 2+ symbols" in out
+    assert "component of 3 symbol(s)" in out
+    assert "component of 2 symbol(s)" in out
+    assert "x  (src/x.cpp:21)" in out
+    # neither the acyclic caller nor the self-loop surfaces as a component
+    assert "spur" not in out
+    assert "selfrec" not in out
+    # the facts-not-judgments caveat prints with the answer
+    assert "mutual recursion" in out
+
+
+def test_strongly_connected_components_limit_truncates_and_reports_total(
+    scc_graph: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    exit_code = main(["strongly-connected-components", "--graph", str(scc_graph), "--limit", "1"])
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "1 of 2 cyclic group(s)" in out
+    assert "... and 1 more" in out
+
+
+def test_strongly_connected_components_exclude_tests_drops_test_only_cycle(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Filters drop a component only when every member is test-defined: the
+    production cycle survives `--exclude-tests`, the test-only one doesn't."""
+    graph = Graph()
+    graph.add_edge("calls", "prod1", "prod2", file="src/p.cpp", line=1)
+    graph.add_edge("calls", "prod2", "prod1", file="src/p.cpp", line=2)
+    graph.add_edge("calls", "t1", "t2", file="src/t.cpp", line=1)
+    graph.add_edge("calls", "t2", "t1", file="src/t.cpp", line=2)
+    for symbol, file, line in (
+        ("prod1", "src/p.cpp", 10),
+        ("prod2", "src/p.cpp", 11),
+        ("t1", "src/handler_test.cpp", 1),
+        ("t2", "src/handler_test.cpp", 2),
+    ):
+        graph.nodes[symbol].file = file
+        graph.nodes[symbol].line = line
+    path = tmp_path / "mix.db"
+    write_sqlite(graph, path)
+    exit_code = main(["strongly-connected-components", "--graph", str(path), "--exclude-tests"])
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "1 of 1 cyclic group(s)" in out
+    assert "t1" not in out
+
+
+def test_strongly_connected_components_rejects_negative_limit(scc_graph: Path) -> None:
+    with pytest.raises(SystemExit):
+        main(["strongly-connected-components", "--graph", str(scc_graph), "--limit", "-1"])
+
+
 @pytest.fixture
 def refs_graph(tmp_path: Path) -> Path:
     graph = Graph()

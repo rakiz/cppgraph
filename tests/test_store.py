@@ -685,6 +685,169 @@ def test_class_members_of_singly_nested_class_excludes_doubly_nested_members(
     assert INNERMOST_METHOD not in symbols
 
 
+# --- strongly_connected_components -------------------------------------------
+
+
+def _scc_graph() -> Graph:
+    """Two disjoint cycles — a<->b (2 nodes) and x->y->z->x (3 nodes) — plus a
+    one-way bridge a->x (must NOT merge them: x cannot reach back to a), an
+    acyclic caller of a cycle, and a directly self-recursive symbol (a
+    degenerate 1-node cycle, out of this tool's scope)."""
+    graph = Graph()
+    graph.add_edge("calls", "a", "b", file="src/a.cpp", line=1)
+    graph.add_edge("calls", "b", "a", file="src/a.cpp", line=2)
+    graph.add_edge("calls", "x", "y", file="src/x.cpp", line=1)
+    graph.add_edge("calls", "y", "z", file="src/x.cpp", line=2)
+    graph.add_edge("calls", "z", "x", file="src/x.cpp", line=3)
+    graph.add_edge("calls", "a", "x", file="src/a.cpp", line=3)  # one-way bridge
+    graph.add_edge("calls", "spur", "x", file="src/a.cpp", line=4)  # acyclic caller
+    graph.add_edge("calls", "selfrec", "selfrec", file="src/s.cpp", line=1)
+    for symbol, file, line in (
+        ("a", "src/a.cpp", 10),
+        ("b", "src/a.cpp", 11),
+        ("x", "src/x.cpp", 20),
+        ("y", "src/x.cpp", 21),
+        ("z", "src/x.cpp", 22),
+        ("spur", "src/a.cpp", 5),
+        ("selfrec", "src/s.cpp", 30),
+    ):
+        graph.nodes[symbol].file = file
+        graph.nodes[symbol].line = line
+    return graph
+
+
+def test_strongly_connected_components_reports_cycles_biggest_first(
+    tmp_path: Path,
+) -> None:
+    """Both cycles found, sorted biggest first; the one-way bridge between
+    them does not merge two SCCs into one (x cannot reach a); members are
+    sorted by definition file:line; neither the acyclic caller nor the
+    self-loop surfaces as a component."""
+    store = _store(tmp_path, _scc_graph())
+    components, total = store.strongly_connected_components()
+    assert components == [["x", "y", "z"], ["a", "b"]]
+    assert total == 2
+
+
+def test_strongly_connected_components_no_cycles_is_empty(tmp_path: Path) -> None:
+    graph = Graph()
+    graph.add_edge("calls", "a", "b", file="f.cpp", line=1)
+    graph.add_edge("calls", "b", "c", file="f.cpp", line=2)
+    store = _store(tmp_path, graph)
+    assert store.strongly_connected_components() == ([], 0)
+
+
+def test_strongly_connected_components_self_loop_is_not_a_reportable_component(
+    tmp_path: Path,
+) -> None:
+    """Direct self-recursion is a degenerate 1-node cycle: per the tool's spec
+    (components of size > 1) it is out of scope, not conflated into a
+    'component' — `hotspots`' `edges` kind already surfaces self-loops."""
+    graph = Graph()
+    graph.add_edge("calls", "selfrec", "selfrec", file="f.cpp", line=1)
+    store = _store(tmp_path, graph)
+    assert store.strongly_connected_components() == ([], 0)
+
+
+def test_strongly_connected_components_exclude_tests_drops_all_test_cycle(
+    tmp_path: Path,
+) -> None:
+    """Filters apply to the OUTPUT, not the edges Tarjan sees: a component is
+    dropped only when every member is defined in a test file — a test-only
+    cycle is still a real cycle, but not one this filtered view reports."""
+    graph = _scc_graph()
+    graph.add_edge("calls", "t1", "t2", file="src/t.cpp", line=1)
+    graph.add_edge("calls", "t2", "t1", file="src/t.cpp", line=2)
+    graph.nodes["t1"].file = "src/handler_test.cpp"
+    graph.nodes["t1"].line = 1
+    graph.nodes["t2"].file = "src/handler_test.cpp"
+    graph.nodes["t2"].line = 2
+    store = _store(tmp_path, graph)
+    components, total = store.strongly_connected_components(exclude_tests=True)
+    assert components == [["x", "y", "z"], ["a", "b"]]
+    assert total == 2
+
+
+def test_strongly_connected_components_reports_a_mixed_component_whole(
+    tmp_path: Path,
+) -> None:
+    """A cycle with a MIX of test and production members is still a real cycle
+    in the compiled binary: it is reported (at least one member survives the
+    filter) and reported WHOLE — redacting the filtered member would
+    misrepresent the actual dependency."""
+    graph = Graph()
+    graph.add_edge("calls", "prod", "twin", file="src/core.cpp", line=1)
+    graph.add_edge("calls", "twin", "prod", file="src/t.cpp", line=2)
+    graph.nodes["prod"].file = "src/core.cpp"
+    graph.nodes["prod"].line = 10
+    graph.nodes["twin"].file = "src/handler_test.cpp"
+    graph.nodes["twin"].line = 3
+    store = _store(tmp_path, graph)
+    components, total = store.strongly_connected_components(exclude_tests=True)
+    assert components == [["prod", "twin"]]  # core.cpp:10 before handler_test.cpp:3
+    assert total == 1
+
+
+def test_strongly_connected_components_exclude_paths_drops_vendored_cycle(
+    tmp_path: Path,
+) -> None:
+    graph = _scc_graph()
+    graph.add_edge("calls", "v1", "v2", file="v.cpp", line=1)
+    graph.add_edge("calls", "v2", "v1", file="v.cpp", line=2)
+    graph.nodes["v1"].file = "vendor/lib/v.cpp"
+    graph.nodes["v1"].line = 1
+    graph.nodes["v2"].file = "vendor/lib/v.cpp"
+    graph.nodes["v2"].line = 2
+    store = _store(tmp_path, graph)
+    components, total = store.strongly_connected_components(exclude_paths=["vendor/"])
+    assert components == [["x", "y", "z"], ["a", "b"]]
+    assert total == 2
+
+
+def test_strongly_connected_components_include_paths_keeps_only_project_cycles(
+    tmp_path: Path,
+) -> None:
+    graph = _scc_graph()
+    graph.add_edge("calls", "v1", "v2", file="v.cpp", line=1)
+    graph.add_edge("calls", "v2", "v1", file="v.cpp", line=2)
+    graph.nodes["v1"].file = "vendor/lib/v.cpp"
+    graph.nodes["v1"].line = 1
+    graph.nodes["v2"].file = "vendor/lib/v.cpp"
+    graph.nodes["v2"].line = 2
+    store = _store(tmp_path, graph)
+    components, total = store.strongly_connected_components(include_paths=["src/"])
+    assert components == [["x", "y", "z"], ["a", "b"]]
+    assert total == 2
+
+
+def test_strongly_connected_components_limit_truncates_but_total_is_full_count(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path, _scc_graph())
+    components, total = store.strongly_connected_components(limit=1)
+    assert components == [["x", "y", "z"]]
+    assert total == 2
+
+
+def test_strongly_connected_components_rejects_negative_limit(tmp_path: Path) -> None:
+    store = _store(tmp_path, _scc_graph())
+    with pytest.raises(ValueError):
+        store.strongly_connected_components(limit=-1)
+
+
+def test_strongly_connected_components_deep_chain_does_not_recursion_error(
+    tmp_path: Path,
+) -> None:
+    """Tarjan runs iteratively: a 3000-deep edge chain (deeper than Python's
+    ~1000 default recursion limit) must not raise RecursionError — the reason
+    the textbook recursive form is not used here."""
+    graph = Graph()
+    for i in range(3000):
+        graph.add_edge("calls", f"n{i}", f"n{i + 1}", file="deep.cpp", line=i)
+    store = _store(tmp_path, graph)
+    assert store.strongly_connected_components() == ([], 0)
+
+
 # --- line_span / no_incoming_calls (enclosing-range gated) -------------------
 
 BIG = "cxx . . $ app/big(b1)."

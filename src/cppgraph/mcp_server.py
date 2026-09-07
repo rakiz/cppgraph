@@ -100,6 +100,19 @@ _BOUNDARY_NOTE = (
     "you (the project's declared layering); the graph stores no intended "
     "architecture of its own."
 )
+# Standing caveat on every strongly_connected_components response: component
+# membership is a graph fact (these symbols can all reach each other), never a
+# verdict — mutual recursion is often legitimate architecture, and the reader
+# judges which cycles, if any, are a problem.
+_SCC_NOTE = (
+    "each component is a graph fact — these symbols can all reach each other "
+    "via calls edges — not a verdict. Mutual recursion is often completely "
+    "legitimate architecture (a visitor pattern, a recursive-descent parser's "
+    "mutually-recursive rules); which cycles, if any, are actually a problem "
+    "is your judgment. Filters drop a component only when every member is "
+    "filtered out; a reported component always lists all its members (the "
+    "cycle is a fact about the compiled binary)."
+)
 
 
 def _line1(line0: int | None) -> int | None:
@@ -1021,6 +1034,59 @@ def class_members_report(
     return out
 
 
+def scc_report(
+    store: GraphStore,
+    limit: int = DEFAULT_LIMIT,
+    exclude_tests: bool = False,
+    full_symbols: bool = False,
+    include_paths: list[str] | None = None,
+    exclude_paths: list[str] | None = None,
+) -> dict[str, Any]:
+    """The cycles of the call graph: strongly-connected components of the
+    `calls` subgraph with more than one member — maximal sets of symbols that
+    can all reach each other, the exact primitive behind "circular
+    dependencies", reported as a graph fact (see the standing `note`), never a
+    verdict: mutual recursion is often legitimate architecture, and the LLM
+    decides which cycles, if any, are actually a problem.
+
+    Components are sorted biggest first, members by definition `file:line`.
+    `exclude_tests`/`include_paths`/`exclude_paths` filter which components
+    are REPORTED — a component is dropped only when every member is filtered
+    out; a reported one always lists all its members (the cycle is a fact
+    about the compiled binary). `limit` caps the number of components (default
+    40), never a partial one; `total` always reports the full count.
+    """
+    components, total = store.strongly_connected_components(
+        limit=limit,
+        exclude_tests=exclude_tests,
+        include_paths=include_paths,
+        exclude_paths=exclude_paths,
+    )
+    out: list[list[dict[str, Any]]] = []
+    for comp in components:
+        items: list[dict[str, Any]] = []
+        for symbol in comp:
+            node = store.get_node(symbol)
+            item = (
+                _node_dict(node, full_symbols)
+                if node is not None
+                else {"name": _short_label(symbol), "file": None, "line": None}
+            )
+            if full_symbols:
+                item["symbol"] = symbol
+            items.append(item)
+        out.append(items)
+    return {
+        "total": total,
+        "truncated": total > len(components),
+        "excluded_tests": exclude_tests,
+        "include_paths": include_paths,
+        "exclude_paths": exclude_paths,
+        "note": _SCC_NOTE,
+        "components": out,
+    }
+
+
 def explain(
     store: GraphStore,
     symbol: str,
@@ -1735,6 +1801,38 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         the list (default 40): raise it when `truncated` — `total` always
         reports the full count."""
         return _call(class_members_report, symbol, limit=limit, full_symbols=full_symbols)
+
+    @mcp.tool()
+    def strongly_connected_components(
+        limit: int = DEFAULT_LIMIT,
+        exclude_tests: bool = False,
+        full_symbols: bool = False,
+        include_paths: list[str] | None = None,
+        exclude_paths: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Cycles in the call graph: the strongly-connected components of the
+        `calls` subgraph with more than one member — maximal sets of symbols
+        that can all reach each other, the exact primitive behind "circular
+        dependencies". A graph FACT, not a verdict: mutual recursion is often
+        completely legitimate (a visitor pattern, a recursive-descent parser's
+        mutually-recursive rules) — you decide which cycles, if any, are
+        actually a problem. Components are sorted biggest first, members by
+        definition file:line; compact `name` + `file:line` by default
+        (`full_symbols=True` for raw SCIP). `exclude_tests` and
+        `include_paths`/`exclude_paths` filter which components are REPORTED:
+        a component is dropped only when every member is filtered out, and a
+        reported one always lists all its members (the cycle is a fact about
+        the compiled binary). `limit` caps the number of components (default
+        40), never a partial one — `total` always reports the full count,
+        `truncated` says if more exist."""
+        return _call(
+            scc_report,
+            limit=limit,
+            exclude_tests=exclude_tests,
+            full_symbols=full_symbols,
+            include_paths=include_paths,
+            exclude_paths=exclude_paths,
+        )
 
     @mcp.tool()
     def explain_symbol(

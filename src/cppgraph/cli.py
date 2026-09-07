@@ -843,6 +843,32 @@ def main(argv: list[str] | None = None) -> int:
         help="print the raw SCIP symbol strings instead of readable labels",
     )
 
+    p_scc = sub.add_parser(
+        "strongly-connected-components",
+        help="cycles in the calls graph: groups of 2+ symbols that can all "
+        "reach each other (a fact, not a bad-architecture verdict)",
+    )
+    p_scc.add_argument(
+        "--graph",
+        required=False,
+        default=None,
+        help="graph store path (default: auto-discovered from the cwd's .cppgraph/)",
+    )
+    p_scc.add_argument("--limit", type=int, default=40, help="max components to show (default: 40)")
+    p_scc.add_argument(
+        "--exclude-tests",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="drop components whose every member is defined in test files "
+        "(default: off; a mixed component is reported whole)",
+    )
+    p_scc.add_argument(
+        "--full-symbols",
+        action="store_true",
+        help="print the raw SCIP symbol strings instead of readable labels",
+    )
+    _add_path_filters(p_scc)
+
     p_status = sub.add_parser(
         "status",
         help="show the graph's source commit and, with --root, whether the checkout has drifted",
@@ -1542,6 +1568,41 @@ def main(argv: list[str] | None = None) -> int:
             )
         if total > len(members):
             print(f"  ... and {total - len(members)} more (raise --limit to see them)")
+        return 0
+
+    if args.command == "strongly-connected-components":
+        store = _open_store_checked(args, parser)
+        try:
+            components, total = store.strongly_connected_components(
+                limit=args.limit,
+                exclude_tests=args.exclude_tests,
+                include_paths=args.include_paths,
+                exclude_paths=args.exclude_paths,
+            )
+        except ValueError as e:
+            parser.error(str(e))
+        tests_note = " (excluding tests)" if args.exclude_tests else ""
+        print(
+            f"[cppgraph] {len(components)} of {total} cyclic group(s) of 2+ symbols, "
+            f"biggest first{tests_note}"
+        )
+        print(
+            "  note: a cycle is a graph fact, not a bad-architecture verdict — mutual "
+            "recursion is often legitimate (a visitor, a recursive-descent parser's "
+            "mutually recursive rules)"
+        )
+        for comp in components:
+            print(f"  component of {len(comp)} symbol(s):")
+            for symbol in comp:
+                node = store.get_node(symbol)
+                label = symbol if args.full_symbols else short_label(symbol)
+                if node is not None and node.file is not None and node.line is not None:
+                    loc = f"{node.file}:{node.line + 1}"
+                else:
+                    loc = "?"
+                print(f"    {label}  ({loc})")
+        if total > len(components):
+            print(f"  ... and {total - len(components)} more (raise --limit to see them)")
         return 0
 
     if args.command == "status":

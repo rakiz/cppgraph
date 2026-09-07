@@ -24,7 +24,7 @@ import json
 import sqlite3
 import subprocess
 from collections import deque
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from importlib import metadata as importlib_metadata
@@ -620,6 +620,69 @@ def enrich_references(path: str | Path, index: scip_pb2.Index) -> tuple[int, int
         return attributed, total
     finally:
         con.close()
+
+
+def _tarjan_sccs(adjacency: dict[int, list[int]]) -> list[list[int]]:
+    """Tarjan's strongly-connected components over an id-space adjacency
+    (`src_id -> [dst_id, …]`), **iterative** on purpose: a call graph has
+    thousands of nodes and the textbook recursive form would overflow Python's
+    ~1000-frame default recursion limit on a deep DFS chain (the same
+    scale-first reasoning as builder.py's iterative containment sweep). Each
+    explicit frame is `(node, iterator over its successors)` — resuming the
+    iterator is the recursive call's return point.
+
+    Returns every component, singletons included; filtering to the reportable
+    ones is the caller's job. A self-loop leaves its node a singleton (its own
+    index never lowers its lowlink). Only nodes with outgoing edges are used
+    as DFS roots — a member of a bigger component always has one, so nothing
+    reportable is missed.
+    """
+    index: dict[int, int] = {}
+    lowlink: dict[int, int] = {}
+    on_stack: set[int] = set()
+    stack: list[int] = []
+    components: list[list[int]] = []
+    counter = 0
+
+    for root in adjacency:
+        if root in index:
+            continue
+        index[root] = lowlink[root] = counter
+        counter += 1
+        stack.append(root)
+        on_stack.add(root)
+        frames: list[tuple[int, Iterator[int]]] = [(root, iter(adjacency[root]))]
+        while frames:
+            v, successors = frames[-1]
+            pushed = False
+            for w in successors:
+                if w not in index:
+                    index[w] = lowlink[w] = counter
+                    counter += 1
+                    stack.append(w)
+                    on_stack.add(w)
+                    frames.append((w, iter(adjacency.get(w, ()))))
+                    pushed = True
+                    break
+                if w in on_stack and index[w] < lowlink[v]:
+                    lowlink[v] = index[w]
+            if pushed:
+                continue
+            frames.pop()
+            if frames:
+                parent = frames[-1][0]
+                if lowlink[v] < lowlink[parent]:
+                    lowlink[parent] = lowlink[v]
+            if lowlink[v] == index[v]:
+                component: list[int] = []
+                while True:
+                    w = stack.pop()
+                    on_stack.discard(w)
+                    component.append(w)
+                    if w == v:
+                        break
+                components.append(component)
+    return components
 
 
 class GraphStore:
@@ -1537,6 +1600,91 @@ class GraphStore:
             if _is_direct_member(r[0][prefix_len:])
         ]
         return members[:limit], len(members)
+
+    def strongly_connected_components(
+        self,
+        limit: int = 40,
+        exclude_tests: bool = False,
+        include_paths: list[str] | None = None,
+        exclude_paths: list[str] | None = None,
+    ) -> tuple[list[list[str]], int]:
+        """The cycles of the call graph: strongly-connected components of the
+        `calls` subgraph with more than one member — maximal sets of symbols
+        that can all reach each other, the exact primitive behind "circular
+        dependencies", stated as a graph fact, never a verdict (mutual
+        recursion is often completely legitimate — a visitor pattern, a
+        recursive-descent parser's mutually-recursive rules; the surfaces
+        above this carry that caveat as a standing note).
+
+        Unlike the SQL-aggregated ranking tools this is a whole-graph
+        traversal: Tarjan's algorithm (`_tarjan_sccs`) over the `calls`
+        edges' id-space — all `(src_id, dst_id)` pairs fetched in one scan,
+        adjacency walked as integers, symbol strings resolved only for the
+        components actually returned (the same "hot topology all-integer,
+        cold payload materialized late" discipline as `hotspots`).
+
+        `exclude_tests`/`include_paths`/`exclude_paths` filter the *output*,
+        not the edges Tarjan sees: a cycle that genuinely involves test-only
+        or excluded-path symbols is still a real cycle in the compiled binary,
+        and dropping its edges first could split or hide it. A component is
+        dropped only when *every* member's own definition file is filtered
+        out, and a reported component always lists all its members —
+        redacting the filtered ones would misrepresent the actual compiled
+        dependency. Singletons (size 1) are never reported: direct
+        self-recursion is a degenerate one-node cycle, out of this tool's
+        scope by spec (components of size > 1).
+
+        Components are sorted biggest first (ties by the first member's
+        symbol, for determinism), members by definition `file:line` then
+        symbol. Returns `(components, total)`: at most `limit` components
+        (never a partial one), `total` the full post-filter count. Raises
+        ValueError on a negative `limit`.
+        """
+        if limit < 0:
+            raise ValueError(f"limit must be >= 0, got {limit}")
+
+        adjacency: dict[int, list[int]] = {}
+        for src_id, dst_id in self._con.execute(
+            "SELECT src_id, dst_id FROM edges WHERE kind = 'calls'"
+        ).fetchall():
+            adjacency.setdefault(src_id, []).append(dst_id)
+        big = [comp for comp in _tarjan_sccs(adjacency) if len(comp) > 1]
+        if not big:
+            return [], 0
+
+        # Resolve late: only the members of size>1 components touch the cold
+        # payload tables — symbol strings + definition sites, needed for the
+        # output filter and the result itself. (Edge ids always have a
+        # symbols row: write_sqlite interns both from the same graph.)
+        ids = sorted({sid for comp in big for sid in comp})
+        info: dict[int, tuple[str, str | None, int | None]] = {}
+        for start in range(0, len(ids), _ID_CHUNK):
+            chunk = ids[start : start + _ID_CHUNK]
+            placeholders = ",".join("?" * len(chunk))
+            for sid, symbol, path, line in self._con.execute(
+                f"""
+                SELECT s.id, s.symbol, f.path, s.line
+                FROM symbols s LEFT JOIN files f ON f.id = s.file_id
+                WHERE s.id IN ({placeholders})
+                """,
+                chunk,
+            ):
+                info[sid] = (symbol, path, line)
+
+        def _kept(path: str | None) -> bool:
+            return not (exclude_tests and is_test_file(path)) and matches_path_prefix(
+                path, include=include_paths, exclude=exclude_paths
+            )
+
+        reported: list[list[str]] = []
+        for comp in big:
+            members = [info[sid] for sid in comp]
+            if not any(_kept(path) for _symbol, path, _line in members):
+                continue
+            members.sort(key=lambda m: (m[1] or "", m[2] if m[2] is not None else -1, m[0]))
+            reported.append([symbol for symbol, _path, _line in members])
+        reported.sort(key=lambda ms: (-len(ms), ms))
+        return reported[:limit], len(reported)
 
     def subgraph(
         self, symbol: str, depth: int = 2, direction: str = "both"

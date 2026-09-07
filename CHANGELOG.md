@@ -8,6 +8,32 @@ on-disk store also carries its own `schema_version` for forward-compatibility.
 
 ### Added
 
+- **`strongly_connected_components`**: the cycles of the call graph —
+  strongly-connected components of the `calls` subgraph with more than one
+  member, i.e. maximal sets of symbols that can all reach each other, the
+  exact primitive behind "circular dependencies". A graph fact, never a
+  verdict: mutual recursion is often completely legitimate (a visitor
+  pattern, a recursive-descent parser's mutually-recursive rules), and the
+  standing `note` says so — the LLM decides which cycles, if any, matter.
+  Algorithmically the first whole-graph traversal among the ranking tools:
+  iterative Tarjan over the `calls` edges in id-space (all `(src_id, dst_id)`
+  pairs fetched in one scan, adjacency walked as integers, symbol strings
+  resolved only for the components actually returned — the same
+  "hot topology all-integer, cold payload materialized late" discipline as
+  `hotspots`; iterative because a call graph has thousands of nodes and the
+  recursive form would overflow Python's ~1000-frame limit on a deep chain).
+  `exclude_tests`/path filters apply to the *output*, not the edges Tarjan
+  sees — a cycle genuinely involving test-only or vendored symbols is still a
+  real cycle in the compiled binary, and pre-filtering edges could split or
+  hide one — so a component is dropped only when *every* member is filtered
+  out, and a reported component always lists all its members (redacting
+  members would misrepresent the compiled dependency). Direct self-recursion
+  (a degenerate 1-node cycle) is out of scope by spec: components of
+  size > 1 only. On the CLI (`strongly-connected-components`) and as an MCP
+  tool, both backed by the same `GraphStore.strongly_connected_components`;
+  components sorted biggest first, members by definition `file:line`; bounded
+  output (`limit` caps components, `total` the full count).
+
 - **`outline` / `class_members`**: list definitions by container — two facets
   of one primitive, both exact and available on any graph (no #504 needed),
   no judgment, structure not interpretation. `outline(file)` is the outline

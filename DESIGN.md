@@ -353,10 +353,14 @@ designing the builder so this isn't a later rewrite:
   conformance — rules supplied per query as `--rule FROM:FORBIDDEN`; every
   hit is a real edge, zero false positives), `outline <file>` (every symbol
   defined in a file, sorted by line — the file's contents as a compact symbol
-  list, replacing a `Read`), `class-members <symbol>` (members declared on a
-  class/struct — methods, fields, nested types — by SCIP container nesting:
-  a member's symbol string starts with its class's, so the boundary is exact
-  and needs no #504), `status` (source commit + drift check).
+   list, replacing a `Read`), `class-members <symbol>` (members declared on a
+   class/struct — methods, fields, nested types — by SCIP container nesting:
+   a member's symbol string starts with its class's, so the boundary is exact
+   and needs no #504), `strongly-connected-components` (the SCCs of the
+   `calls` subgraph with >1 member — maximal sets of symbols that can all
+   reach each other, the exact primitive behind "circular dependencies"; a
+   graph fact, never a verdict, since mutual recursion is often legitimate),
+   `status` (source commit + drift check).
 - MCP server (`cppgraph-mcp`, `src/cppgraph/mcp_server.py`): exposes the same
   queries to an LLM, token-budgeted. FastMCP over stdio; the graph store is
   fixed at launch (`--graph <db>`, optional `--root <checkout>`) so tools never
@@ -373,11 +377,14 @@ designing the builder so this isn't a later rewrite:
    query by the caller, the graph stores no intended architecture; every hit
    is a real edge, zero false positives, and 0 hits a lower bound, never a
     conformance verdict), `outline` (every symbol defined in one file, sorted
-    by line — a compact symbol list that replaces reading the file) and
+    by line — a compact symbol list that replaces reading the file),
     `class_members` (every member declared on a class/struct, by the same
     SCIP container nesting — members that *exist*, a fact, since SCIP encodes
-    no visibility), `explain_symbol`, `status`,
-    `visualize`. Each symbol-taking tool accepts a plain
+    no visibility) and `strongly_connected_components` (the SCCs of the
+    `calls` subgraph with >1 member — maximal sets of symbols that can all
+    reach each other, the exact primitive behind "circular dependencies"; a
+    graph fact, never a verdict, since mutual recursion is often legitimate),
+    `explain_symbol`, `status`, `visualize`. Each symbol-taking tool accepts a plain
   name as well as an exact SCIP string, through the shared `GraphStore.resolve`
   (also behind the CLI): a unique name resolves, `Class::method` maps to
   `Class#method`, an ambiguous name returns candidates, and no symbol is guessed.
@@ -407,7 +414,10 @@ designing the builder so this isn't a later rewrite:
     (`include_paths`/`exclude_paths`, simple prefix match) scopes a query to
       "my code, not vendored deps" the same way, on `find`/`who_calls`/
       `what_it_calls`/`find_references`/`impact_of`/`hotspots`/`stats`/
-      `line_span`/`no_incoming_calls`. `boundary_violations` matches its
+      `line_span`/`no_incoming_calls`/`strongly_connected_components`
+      (where the filter drops whole components from the output rather than
+      their members — see the CHANGELOG entry for the compiled-binary
+      reasoning). `boundary_violations` matches its
       layering-rule prefixes against each endpoint's definition file with the
       same segment-boundary semantics. These filter
     primitives live in `cppgraph.filters` and drive **both** surfaces — the MCP

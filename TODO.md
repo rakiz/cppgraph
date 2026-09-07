@@ -45,11 +45,6 @@ active list. Design detail is in `DESIGN.md`, shipped features in
   already prints the file→symbol upgrade hint (index with a #504 binary / `enrich-refs`);
   add the extra `.graph.db` cost so the user can weigh it. Measure the real delta first
   (same graph with vs without `--attributed-refs`); don't hardcode a guess.
-- **`strongly_connected_components` — call-graph cycles.** The exact primitive behind
-  "circular deps": SCC membership on the `calls` subgraph (Tarjan), not a "bad
-  architecture" verdict — mutual recursion is often legitimate. Returns the components
-  of size > 1 as a fact; the LLM decides which matter. Bounded output (cap + `total`,
-  like the fan-out tools).
 - **`reachable_from(symbols)` — forward transitive reachability.** Complements
   `impact_of` (reverse): from an entry point, what does it reach? Forward closure over
   the `calls` adjacency (already built for `shortest_call_path`). Underpins attack-

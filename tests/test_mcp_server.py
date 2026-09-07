@@ -768,6 +768,99 @@ def test_class_members_tool_registered_and_routes_through_call(tmp_path: Path) -
     ]
 
 
+PARSE = "cxx . . $ src/parse(r1)."
+LEX = "cxx . . $ src/lex(r2)."
+PEEK = "cxx . . $ src/peek(r3)."
+ENTER = "cxx . . $ src/enter(r4)."
+EXIT = "cxx . . $ src/exit(r5)."
+SELFREC = "cxx . . $ src/selfrec(r6)."
+
+
+@pytest.fixture
+def scc_store(tmp_path: Path) -> GraphStore:
+    """A 3-cycle (parse->lex->peek->parse) and a 2-cycle (enter<->exit), plus
+    a directly self-recursive symbol that must NOT surface as a component."""
+    graph = Graph()
+    for src, dst, line in (
+        (PARSE, LEX, 1),
+        (LEX, PEEK, 2),
+        (PEEK, PARSE, 3),
+        (ENTER, EXIT, 4),
+        (EXIT, ENTER, 5),
+        (SELFREC, SELFREC, 6),
+    ):
+        graph.add_edge("calls", src, dst, file="src/parser.cpp", line=line)
+    for symbol, line in (
+        (PARSE, 10),
+        (LEX, 11),
+        (PEEK, 12),
+        (ENTER, 20),
+        (EXIT, 21),
+        (SELFREC, 30),
+    ):
+        graph.nodes[symbol].file = "src/parser.cpp"
+        graph.nodes[symbol].line = line
+    path = tmp_path / "scc.db"
+    write_sqlite(graph, path)
+    return GraphStore(path)
+
+
+def test_scc_report_lists_components_biggest_first(scc_store: GraphStore) -> None:
+    result = mcp_server.scc_report(scc_store)
+    assert result["total"] == 2
+    assert result["truncated"] is False
+    names = [[d["name"] for d in comp] for comp in result["components"]]
+    assert names == [
+        ["src/parse(r1).", "src/lex(r2).", "src/peek(r3)."],
+        ["src/enter(r4).", "src/exit(r5)."],
+    ]
+    # members are node dicts: 1-indexed definition line like every other tool
+    assert result["components"][0][0]["file"] == "src/parser.cpp"
+    assert result["components"][0][0]["line"] == 11
+
+
+def test_scc_report_states_fact_not_verdict(scc_store: GraphStore) -> None:
+    """The standing note carries the facts-not-judgments caveat: mutual
+    recursion is often legitimate, the reader judges which cycles matter."""
+    result = mcp_server.scc_report(scc_store)
+    assert "fact" in result["note"]
+    assert "legitimate" in result["note"]
+
+
+def test_scc_report_limit_truncates(scc_store: GraphStore) -> None:
+    result = mcp_server.scc_report(scc_store, limit=1)
+    assert result["total"] == 2
+    assert len(result["components"]) == 1
+    assert result["truncated"] is True
+
+
+def test_scc_report_matches_store_directly(scc_store: GraphStore) -> None:
+    """Parity check, same shape as the other report/store pairs: the MCP
+    components are exactly `store.strongly_connected_components`, not a
+    reimplementation."""
+    result = mcp_server.scc_report(scc_store, full_symbols=True)
+    expected, expected_total = scc_store.strongly_connected_components()
+    assert result["total"] == expected_total
+    assert [[d["symbol"] for d in comp] for comp in result["components"]] == expected
+
+
+def test_scc_tool_registered_and_routes_through_call(tmp_path: Path) -> None:
+    """The `@mcp.tool()` wrapper exists and delegates to `scc_report` (the
+    pure function is covered directly; this covers the wiring)."""
+    from cppgraph.mcp_server import build_server
+
+    graph = Graph()
+    graph.add_edge("calls", "a", "b", file="src/a.cpp", line=1)
+    graph.add_edge("calls", "b", "a", file="src/a.cpp", line=2)
+    path = tmp_path / "g.db"
+    write_sqlite(graph, path)
+    server = build_server(str(path))
+    tool = server._tool_manager._tools["strongly_connected_components"].fn
+    result = tool()
+    assert result["total"] == 1
+    assert [d["name"] for d in result["components"][0]] == ["a", "b"]
+
+
 BASE = "cxx . . $ mongo/Base#"
 DERIVED = "cxx . . $ mongo/Derived#"
 LEAF = "cxx . . $ mongo/Leaf#"
