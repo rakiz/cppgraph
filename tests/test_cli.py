@@ -1189,6 +1189,84 @@ def test_no_incoming_calls_unavailable_returns_nonzero(
     assert "phantom caller" in out
 
 
+# --- global_init_references (attributed-refs gated) ---------------------------
+
+G_A = "cxx . . $ app/g_a."
+G_B = "cxx . . $ app/g_b."
+HELPER = "cxx . . $ app/helper(h1)."
+
+
+@pytest.fixture
+def globals_graph(tmp_path: Path) -> Path:
+    """`int g_a = helper(); static int g_b = g_a + 1;` — g_b's initializer reads
+    g_a; g_a's region use is a callable call, not a global read."""
+    graph = Graph()
+    graph.nodes[G_A] = Node(symbol=G_A, file="src/g.cpp", line=1, end_line=1)
+    graph.nodes[G_B] = Node(symbol=G_B, file="src/g.cpp", line=2, end_line=2)
+    graph.add_reference(HELPER, "src/g.cpp", line=1, enclosing_symbol=G_A)
+    graph.add_reference(G_A, "src/g.cpp", line=2, enclosing_symbol=G_B)
+    path = tmp_path / "globals.db"
+    write_sqlite(graph, path)
+    return path
+
+
+def test_global_init_references_lists_referenced_globals(
+    globals_graph: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    exit_code = main(["global_init_references", "--graph", str(globals_graph), G_B])
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "1 of 1 global(s) referenced by" in out
+    assert "g_a" in out
+    assert "(src/g.cpp:3)" in out
+    # the fact-not-verdict caveat is printed with the answer
+    assert "not a verdict" in out
+
+
+def test_global_init_references_empty_for_callable_only_region_uses(
+    globals_graph: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    exit_code = main(["global_init_references", "--graph", str(globals_graph), G_A])
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "0 of 0 global(s) referenced by" in out
+
+
+def test_global_init_references_unavailable_returns_nonzero(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A stock graph (no attributed refs) gets the explicit unavailable message
+    with the rebuild pointer — not an empty list."""
+    graph = Graph()
+    graph.nodes[G_A] = Node(symbol=G_A, file="src/g.cpp", line=1)
+    stock = tmp_path / "stock.db"
+    write_sqlite(graph, stock)
+    exit_code = main(["global_init_references", "--graph", str(stock), G_A])
+    out = capsys.readouterr().out
+    assert exit_code == 1
+    assert "unavailable" in out
+    assert "--attributed-refs" in out
+
+
+def test_global_init_references_non_term_is_an_error(
+    globals_graph: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A callable has no initializer region: bad input, an error (exit 2 via
+    parser.error), never an empty list."""
+    with pytest.raises(SystemExit) as exc:
+        main(["global_init_references", "--graph", str(globals_graph), HELPER])
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert "not a global" in err
+
+
+def test_global_init_references_unknown_symbol_is_an_error(
+    globals_graph: Path,
+) -> None:
+    with pytest.raises(SystemExit):
+        main(["global_init_references", "--graph", str(globals_graph), "missing_xyz"])
+
+
 @pytest.fixture
 def boundary_graph(tmp_path: Path) -> Path:
     """One legal downward edge (`platform/` may call `common/`) and one that

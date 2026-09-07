@@ -7,7 +7,12 @@ the attribution logic itself, independent of scip-clang's specific quirks
 
 from __future__ import annotations
 
-from cppgraph.builder import _is_direct_member, build_graph, is_callable_symbol
+from cppgraph.builder import (
+    _is_direct_member,
+    build_graph,
+    is_callable_symbol,
+    is_term_symbol,
+)
 from cppgraph.proto import scip_pb2
 
 DEFINITION = scip_pb2.SymbolRole.Definition
@@ -49,6 +54,19 @@ def test_is_direct_member_rejects_nested_container_members() -> None:
 def test_is_direct_member_edge_cases() -> None:
     assert not _is_direct_member("")  # nothing left after stripping the prefix
     assert not _is_direct_member("garbage")  # no recognized terminator at all
+
+
+def test_is_term_symbol_descriptor_check() -> None:
+    """A term is a `.`-terminated descriptor that is not a method's `).` —
+    globals, fields, static data members. Locals (and function-scope statics)
+    are `local <id>` symbols, MEASURED to carry enclosing data too on the #504
+    binary — they must be excluded by construction, never by a scope guess."""
+    assert is_term_symbol("cxx . . $ mongo/g_a.")  # file-scope global
+    assert is_term_symbol("cxx . . $ mongo/Foo#field.")  # field / static member
+    assert not is_term_symbol("cxx . . $ mongo/Foo#method(m1).")  # callable
+    assert not is_term_symbol("cxx . . $ mongo/Foo#")  # type
+    assert not is_term_symbol("cxx . . $ mongo/namespace/")
+    assert not is_term_symbol("local 0")  # local/static-local: has enclosing data
 
 
 def test_over_capture_two_distinct_makeresumetoken_symbols() -> None:
@@ -309,6 +327,118 @@ def test_references_unattributed_on_stock_binary() -> None:
     graph = build_graph(scip_pb2.Index(documents=[doc]), attribute_references=True)
 
     assert [r.enclosing_symbol for r in graph.references_of(typ)] == [None]
+
+
+def test_global_initializer_reads_attribute_to_the_global() -> None:
+    """#504 emits `enclosing_range` on term (global) definitions too, spanning
+    the whole declaration including the initializer (saveVarDecl, measured on
+    the #504 binary). So a global's read of another global inside its
+    initializer attributes to it — the `global_init_references` fact — and a
+    callable used in an initializer attributes to the global in the usage view
+    (it was a bare unattributed location before term intervals were collected).
+    Mirrors the measured fixture: `int g_a = helper(); static int g_b = g_a+1;`
+    """
+    helper = "cxx . . $ pkg/helper(h1)."
+    g_a = "cxx . . $ pkg/g_a."
+    g_b = "cxx . . $ pkg/g_b."
+
+    doc = scip_pb2.Document(relative_path="globals.cpp")
+    doc.occurrences.extend(
+        [
+            _def_with_body(helper, line=0, end_line=0),  # int helper() {...}
+            _def_with_body(g_a, line=1, end_line=1),  # int g_a = helper();
+            _occurrence(helper, line=1),  # the call in g_a's initializer
+            _def_with_body(g_b, line=2, end_line=2),  # static int g_b = g_a + 1;
+            _occurrence(g_a, line=2),  # the read of g_a in g_b's initializer
+        ]
+    )
+    graph = build_graph(scip_pb2.Index(documents=[doc]), attribute_references=True)
+
+    assert [r.enclosing_symbol for r in graph.references_of(g_a)] == [g_b]
+    assert [r.enclosing_symbol for r in graph.references_of(helper)] == [g_a]
+
+
+def test_term_interval_is_not_a_call_attribution_boundary() -> None:
+    """Term intervals feed the usage/reference sweep only, never
+    `callable_intervals`: a call inside a global's initializer region stays an
+    uncontained call site on a #504 doc (dropped by the declaration rule, as
+    before) — it must not fabricate a `calls` edge with the global as caller.
+    The call's *reference* record still attributes to the global."""
+    helper = "cxx . . $ pkg/helper(h1)."
+    g_a = "cxx . . $ pkg/g_a."
+
+    doc = scip_pb2.Document(relative_path="globals.cpp")
+    doc.occurrences.extend(
+        [
+            _def_with_body(helper, line=0, end_line=0),
+            _def_with_body(g_a, line=1, end_line=1),  # int g_a = helper();
+            _occurrence(helper, line=1),  # the call in g_a's initializer
+        ]
+    )
+    graph = build_graph(scip_pb2.Index(documents=[doc]), attribute_references=True)
+
+    assert graph.callers_of(helper) == []  # no phantom calls edge from the global
+    assert [r.enclosing_symbol for r in graph.references_of(helper)] == [g_a]
+
+
+def test_read_inside_lambda_in_global_initializer_attributes_to_the_global() -> None:
+    """MEASURED on the #504 binary (scratch fixture, 2026-09-07): a lambda
+    inside a global's initializer gets NO symbol and NO enclosing_range of its
+    own — there is no narrower interval for innermost-wins to pick — so a read
+    inside the lambda body attributes to the global. Pinned as the known
+    limitation it is: the TODO hoped containment would attribute such reads to
+    the lambda; it can't, because scip-clang emits no lambda interval there.
+    The tool states the region fact; whether the read runs at initialization
+    (this lambda runs inside compute() during init; a stored std::function
+    closure would run lazily) is the reader's judgment."""
+    compute = "cxx . . $ pkg/compute(c1)."
+    other = "cxx . . $ pkg/other_global."
+    g = "cxx . . $ pkg/g_lambda."
+
+    doc = scip_pb2.Document(relative_path="lambda.cpp")
+    doc.occurrences.extend(
+        [
+            _def_with_body(other, line=0, end_line=0),  # int other_global = 7;
+            _def_with_body(compute, line=1, end_line=1),  # int compute(int (*f)()){...}
+            # int g = compute([]() {        <- line 2
+            #     return other_global;     <- line 3, inside the lambda body
+            # });                          <- line 4
+            _def_with_body(g, line=2, end_line=4),  # the var decl spans lines 2..4
+            _occurrence(other, line=3),  # the read inside the lambda body
+        ]
+    )
+    graph = build_graph(scip_pb2.Index(documents=[doc]), attribute_references=True)
+
+    assert [r.enclosing_symbol for r in graph.references_of(other)] == [g]
+
+
+def test_local_variable_enclosing_data_never_hijacks_attribution() -> None:
+    """MEASURED: local variables (including function-scope statics) DO carry
+    `enclosing_range` data on their `local <id>` definition occurrences — but
+    the term descriptor check excludes those symbols, so a read on a local's
+    declaration line (where the local's own interval would be innermost)
+    attributes to the enclosing *function*, exactly as before. Without the
+    descriptor exclusion, local-variable intervals would steal references from
+    their enclosing functions."""
+    fn = "cxx . . $ pkg/fn(f1)."
+    other = "cxx . . $ pkg/other_global."
+
+    doc = scip_pb2.Document(relative_path="locals.cpp")
+    doc.occurrences.extend(
+        [
+            _def_with_body(other, line=0, end_line=0),
+            _def_with_body(fn, line=1, end_line=4),  # int fn() { ... } spans 1..4
+            # int fn() {
+            #     int local_var = other_global + 2;   <- line 2: local DEF + a read
+            #     return local_var;                   <- line 3
+            # }
+            _def_with_body("local 0", line=2, end_line=2),  # the local's own range
+            _occurrence(other, line=2),  # read on the local's declaration line
+        ]
+    )
+    graph = build_graph(scip_pb2.Index(documents=[doc]), attribute_references=True)
+
+    assert [r.enclosing_symbol for r in graph.references_of(other)] == [fn]
 
 
 def test_duplicate_occurrences_from_header_merge_are_deduped() -> None:

@@ -125,7 +125,19 @@ which aren't callable definitions. It powers the
 symbol-granularity **usage view** (`export --mode usage`): `symbol → enclosing
 definition` ("the *functions* that use this type", not just the files), falling
 back to file granularity for any reference left unattributed — always exact
-either way. The same `enclosing_range`, on the `calls` side, gives exact caller
+either way. The same containment sweep also takes **term** intervals (a
+global's/field's `enclosing_range` spans its whole declaration *including the
+initializer* — the #504 `saveVarDecl` patch, verified empirically), so a
+global initializer's read of another global attributes to its global: the fact
+behind **`global_init_references`** ("static initialization order fiasco" — a
+reference, never a verdict, since a `constexpr`/`constinit` init is safe).
+Terms are identified by SCIP descriptor (`.` but not a method's `).`), which is
+also what excludes locals — measured, local variables carry `enclosing_range`
+data too, but as `local <id>` symbols, so they never steal a reference from
+their enclosing function. Known limit, measured: a lambda inside a global's
+initializer gets no interval of its own, so a read inside its body attributes
+to the global (it may run lazily — the tool states the region fact). The same
+`enclosing_range`, on the `calls` side, gives exact caller
 attribution (replacing the nearest-preceding heuristic when present), and each
 definition's body extent is persisted on the node (`end_line`) — powering
 `line_span` (rank by body size) and gating `no_incoming_calls` (a zero-caller
@@ -352,7 +364,9 @@ designing the builder so this isn't a later rewrite:
   (definition + neighbors; pass `--root` to also get a source snippet, omit it
   for coordinates only), `line_span` (definitions ranked by body extent,
   #504-gated), `no_incoming_calls` (zero-caller definitions — a fact, never a
-  "dead" verdict; #504-gated), `boundary-violations` (declared-layering
+  "dead" verdict; #504-gated), `global_init_references <symbol>` (the globals a
+  global's initializer references — the static-init-order fact, never a verdict;
+  gated on `has_attributed_refs`), `boundary-violations` (declared-layering
   conformance — rules supplied per query as `--rule FROM:FORBIDDEN`; every
   hit is a real edge, zero false positives), `api-surface <prefix>` (the
   actually-used external surface of a module — definitions inside the prefix
@@ -388,10 +402,13 @@ designing the builder so this isn't a later rewrite:
    mode: callees pinned to the prefix, path filters on the caller side only,
    `total_call_sites` + per-symbol breakdown), `stats` (per-file/per-directory
    aggregate counts: symbols, call edges, refs — a module "how big/dense" view),
-   `line_span` (definitions ranked by body extent) and `no_incoming_calls`
-   (zero-incoming-calls definitions — a fact, never a "dead" verdict), both
-   gated on the store's enclosing-range data (#504) and reporting
-   unavailability with the reason on a stock-binary graph,
+    `line_span` (definitions ranked by body extent) and `no_incoming_calls`
+    (zero-incoming-calls definitions — a fact, never a "dead" verdict), both
+    gated on the store's enclosing-range data (#504) and reporting
+    unavailability with the reason on a stock-binary graph,
+    `global_init_references` (the globals a global's initializer references —
+    the static-init-order fact, never a verdict; gated on `has_attributed_refs`
+    and reporting unavailability with the rebuild pointer on anything less),
     `boundary_violations` (declared-layering conformance — rules supplied per
     query by the caller, the graph stores no intended architecture; every hit
     is a real edge, zero false positives, and 0 hits a lower bound, never a

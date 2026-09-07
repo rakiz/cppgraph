@@ -37,6 +37,7 @@ from cppgraph.builder import (
     _is_direct_member,
     build_graph,
     is_callable_symbol,
+    is_term_symbol,
     is_type_symbol,
 )
 from cppgraph.export import is_test_file
@@ -1561,6 +1562,68 @@ class GraphStore:
         ).fetchall()
         symbols = [row[0] for row in rows]
         return symbols[:limit], len(symbols)
+
+    def global_init_references(
+        self, symbol: str, limit: int = 40
+    ) -> tuple[list[Reference], int] | None:
+        """The term (global/field) symbols referenced within `symbol`'s
+        initializer region — the graph fact behind the "static initialization
+        order fiasco" question: global A's initializer references global B
+        (across translation units, initialization order is unspecified, so the
+        read may see an uninitialized B). A fact, never a verdict: a
+        `constexpr`/`constinit` initializer is constant-initialized and safe,
+        and a read inside a lambda body in the region may run lazily rather
+        than at initialization (scip-clang emits no separate interval for such
+        a lambda, so it cannot be split out — measured). The tool reports the
+        reference; the hazard judgment is the reader's.
+
+        The region is the definition's `enclosing_range` (spanning the
+        declaration including the initializer, #504 `saveVarDecl`), and each
+        use it contains was attributed to `symbol` at build time by the
+        containment sweep — so this is a lookup over the attributed refs:
+        `refs.enclosing_id = symbol` where the referenced symbol is itself a
+        term. One row per referenced global (a global read twice is one row,
+        at its first use site), ordered by first use site. Non-term uses in
+        the region (a call to a function) are not global reads and are
+        excluded.
+
+        Returns **None** when the store carries no attributed references
+        (stock binary, or built without `--attributed-refs`/`enrich-refs`) —
+        explicitly unavailable, never an empty list that would read as
+        "references nothing"; the gate dominates the input checks below (on
+        such a store nothing is answerable). Raises ValueError on a negative
+        `limit` (checked first, like `line_span`), or — on a gated store — an
+        unknown symbol or a known non-term symbol (a callable has no
+        initializer region): bad input, distinct from both None and empty.
+        """
+        if limit < 0:
+            raise ValueError(f"limit must be >= 0, got {limit}")
+        if self.meta().get("has_attributed_refs") != "true":
+            return None
+        if not is_term_symbol(symbol):
+            raise ValueError(
+                f"{symbol} is not a global/term symbol (its SCIP descriptor does "
+                "not end in '.'): global_init_references reports what a global's "
+                "initializer region references"
+            )
+        sym_id = self._symbol_id(symbol)
+        if sym_id is None:
+            raise ValueError(f"unknown symbol {symbol!r}")
+        self._con.create_function("cpg_is_term", 1, is_term_symbol, deterministic=True)
+        rows = self._con.execute(
+            """
+            SELECT dst.symbol, f.path, MIN(r.line) AS first_line
+            FROM refs r
+            JOIN symbols dst ON dst.id = r.symbol_id
+            LEFT JOIN files f ON f.id = r.file_id
+            WHERE r.enclosing_id = ? AND cpg_is_term(dst.symbol)
+            GROUP BY dst.id
+            ORDER BY first_line, dst.symbol
+            """,
+            (sym_id,),
+        ).fetchall()
+        refs = [Reference(symbol=r[0], file=r[1], line=r[2], enclosing_symbol=symbol) for r in rows]
+        return refs[:limit], len(refs)
 
     def boundary_violations(
         self,

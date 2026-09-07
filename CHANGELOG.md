@@ -8,6 +8,48 @@ on-disk store also carries its own `schema_version` for forward-compatibility.
 
 ### Added
 
+- **`global_init_references`**: which globals a global's initializer references
+  — the graph fact behind the "static initialization order fiasco" (global A's
+  initializer reads global B; across translation units the initialization
+  order is unspecified, so the read may see an uninitialized B). A fact, never
+  a verdict, per the house rule: a `constexpr`/`constinit` initializer is
+  constant-initialized and safe — the tool reports the reference and the LLM
+  judges the hazard (a standing `note` on every response, both surfaces). The
+  builder change is one `elif`: term (global/field) definitions now also feed
+  their `enclosing_range` intervals into the SAME `usage_intervals` the
+  reference-attribution containment sweep already used for callables/types —
+  a #504 `saveVarDecl` extent spans the whole declaration *including the
+  initializer* (verified empirically on the locally-built #504 binary), so an
+  initializer's read of another global is attributed to its global with zero
+  new machinery. Terms are identified by SCIP descriptor (`.` but not the
+  method `).`) — `is_term_symbol`, the same grammar
+  `is_callable_symbol`/`is_type_symbol`/`_is_direct_member` already read —
+  which is also what excludes locals: MEASURED, local variables (and
+  function-scope statics) DO carry `enclosing_range` data, but as `local <id>`
+  symbols, so the descriptor check keeps them from ever stealing a reference
+  from their enclosing function. Term intervals feed the *usage* sweep only,
+  never `callable_intervals`: a call inside a global's initializer stays an
+  uncontained call site (dropped by the #504 declaration rule, as before) —
+  its *reference* record, though, now attributes to the global, so the usage
+  view gains "used by <global>" rows it previously left at file granularity
+  (as it does for field declaration lines, which now attribute to the field —
+  the innermost container — instead of the class). One honest limitation,
+  measured and pinned as a test rather than assumed away: a lambda inside a
+  global's initializer gets NO symbol and NO interval of its own from
+  scip-clang, so a read inside the lambda body attributes to the global (the
+  TODO hoped innermost-wins would pick the lambda; there is no lambda interval
+  to win) — the note says such a read may run lazily or never, and the tool
+  states the region fact. The query is `GraphStore.global_init_references`
+  (lookup over the attributed refs: `refs.enclosing_id = <global>` where the
+  referenced symbol is itself a term; one row per referenced global at its
+  first use site; callable uses in the region are not global reads), gated on
+  `has_attributed_refs` like the other attribution-dependent features —
+  `None`/`available: false` with the exact rebuild pointer (a #504 index AND
+  `--attributed-refs`/`enrich-refs`) on anything less, never a silently empty
+  list; unknown/non-global symbol is an error, the `class_members` contract.
+  Pure fn + `@mcp.tool()` in the MCP server, `global_init_references`
+  subcommand in the CLI — same layering as `line_span`/`no_incoming_calls`.
+
 - **`file:line` symbol resolution**: every symbol-taking tool now accepts a
   definition location (`"who calls the function at foo.cpp:120?"` works
   without knowing its name). Implemented in the one shared resolution step,
@@ -247,6 +289,19 @@ on-disk store also carries its own `schema_version` for forward-compatibility.
   rollup in Python); bounded output (`limit` + `total`), and the same
   `include_paths`/`exclude_paths` prefix filters as `hotspots`, applied to the
   counted file before aggregation.
+- **Per-query staleness flag (`stale`), no auto-update**: every query tool's
+  response (MCP) and every query command's stderr (CLI) now carries a cheap
+  "has this graph drifted from its source commit?" signal — a single `git
+  diff` against the recorded commit (reusing `changed_files_since`/dirty
+  fingerprints), never a rebuild. MCP's `_call` attaches `stale` best-effort
+  (a failure to compute it never crashes an otherwise-successful query); the
+  CLI's `_open_store_checked` prints a one-line warning, resolving `root` from
+  the store's own recorded `project_root` (falling back to `discover_graph`)
+  so an explicit `--graph` pointing at another project never diffs the wrong
+  checkout. External validation of the same pattern: a competing tool, Graft
+  (nanonets/graft), runs an equivalent structural freshness check before every
+  query — independent evidence this is worth doing cheaply rather than only
+  on an explicit `status` call.
 - **`hotspots`**: ranks symbols by fan-in, fan-out, or total edge count across the
   whole graph — one call instead of N manual `who_calls`/`what_it_calls` queries.
   On the CLI and as an MCP tool, both backed by the same `GraphStore.hotspots`.

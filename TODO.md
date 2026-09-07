@@ -41,12 +41,6 @@ active list. Design detail is in `DESIGN.md`, shipped features in
   already prints the file→symbol upgrade hint (index with a #504 binary / `enrich-refs`);
   add the extra `.graph.db` cost so the user can weigh it. Measure the real delta first
   (same graph with vs without `--attributed-refs`); don't hardcode a guess.
-- **Typed-by edges via `Relationship.is_type_definition`.** The builder reads only
-  `is_implementation` (inheritance/override); `is_type_definition` gives the exact
-  variable/field → its-type relationship, unused today. Promote it to a traversable edge
-  kind ("typed-by") so `impact_of`/`path` cover "who has a field of this type?" — the
-  type-change blast radius, complementing the attributed-`uses`-edges item above. Exact,
-  no #504, no new source data (already in every `.scip`).
 - **Audit which SCIP fields scip-clang actually populates (on a #504 binary).** Several
   schema fields go unused because they're suspected empty — the builder header already
   notes `SymbolInformation.kind` comes back `UnspecifiedKind`. Before relying on any,
@@ -56,23 +50,6 @@ active list. Design detail is in `DESIGN.md`, shipped features in
   confirmed — the #504 `saveVarDecl` patch emits it — so it's not in this list.) Cheap;
   gates the `scip-clang (upstream)` section below. Same "verify before promising" lesson
   as `line_span`.
-- **`global_init_references` — references between globals' initializer regions.**
-  States a fact behind the "static init order fiasco": global A's initializer
-  references global B. Not a verdict (a `constexpr`/`constinit` init is safe) — per
-  the facts-not-judgments rule it reports the reference, the LLM judges the hazard.
-  Needs a builder change: today a global is a SCIP *term* (suffix `.`), so its
-  `enclosing_range` interval isn't collected (only callable/type are) and its
-  initializer's read of another global lands as a bare `Reference` with
-  `enclosing_symbol=None`. Collect term intervals too, then attribute reads by the
-  existing containment sweep. The data is confirmed present on a #504 build: the patch's
-  `saveVarDecl` passes `varDecl.getSourceRange()` (which spans the initializer) as the
-  enclosing range for `isFileVarDecl()`/`isStaticDataMember()`, so a global's definition
-  already carries an interval covering its initializer — the gap is purely that our
-  builder doesn't collect term intervals. Two properties fall out: (a) containment
-  attributes a read inside a lambda body to the *lambda* (its own inner `enclosing_range`),
-  not to A — so only direct init-expression reads surface, correctly excluding lazily-run
-  reads; (b) the tool gates on the data like ref attribution / `line_span` do — present on
-  a #504 graph, unavailable on a stock one (report unavailable rather than a partial answer).
 - **Project-scope default for path-prefix filtering.** Per-query `exclude_paths`/
   `include_paths` are done (a `Node.file`-prefix predicate in `cppgraph.filters`,
   `matches_path_prefix`/`filter_by_path`, wired into `who_calls`, `what_it_calls`,

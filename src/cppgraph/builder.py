@@ -32,7 +32,10 @@ does emit it (a #504-built scip-clang). Specifically:
 - Definition sites are recorded for every defined symbol (types/fields too,
   not just callables), so `find`/`explain`/`bases`/`subtypes` can locate any
   symbol. Only *callable* definitions act as caller-attribution boundaries for
-  `calls`.
+  `calls`; term (global/field) extents feed the reference-attribution sweep
+  only (measured on the #504 binary: `saveVarDecl` emits them spanning the
+  initializer, locals carry the same data but as `local <id>` symbols, which
+  the term descriptor check excludes).
 """
 
 from __future__ import annotations
@@ -90,6 +93,27 @@ def is_type_symbol(symbol: str) -> bool:
     reliable discriminator is the descriptor kind of the two endpoints.
     """
     return symbol.endswith("#")
+
+
+def is_term_symbol(symbol: str) -> bool:
+    """True if the SCIP symbol's last descriptor is a term (a variable/field).
+
+    Per the SCIP symbol grammar, `<term> ::= <name> '.'` — the descriptor kind
+    ending in `.`. A method/constructor descriptor also ends in a `.`, but as
+    the two-character `).`, so this excludes callables explicitly (and every
+    other descriptor kind: `#` type, `/` namespace, `:` meta, `!` macro — the
+    same terminator classification `_is_direct_member` uses).
+
+    scip-clang emits local variables (and function-scope statics) as
+    `local <id>` symbols, which end in neither: MEASURED on the #504 binary,
+    those occurrences do carry `enclosing_range` data, so excluding them by
+    descriptor — never by a scope guess — is what keeps local-variable
+    intervals from stealing references from their enclosing functions. The
+    terms that DO carry an enclosing range are file-scope/static-storage
+    variables and fields (the #504 `saveVarDecl` patch), whose range spans the
+    whole declaration including the initializer — powering
+    `global_init_references`."""
+    return symbol.endswith(".") and not symbol.endswith(").")
 
 
 _SINGLE_CHAR_TERMINATORS = "/#.:!"  # namespace, type, term, meta, macro
@@ -236,11 +260,15 @@ def build_graph(
     by *containment*: `enclosing_range` is emitted on **definitions** (their own
     body extent, per the SCIP spec), so each use site is attributed to the
     innermost definition whose interval contains it — not by reading
-    `enclosing_range` off the reference, which never carries it. Needs a binary
-    that emits `enclosing_range` (#504); with a stock binary there are no
-    intervals, so references keep `enclosing_symbol = None` and degrade to file
-    granularity. Opt-in because it is exact but larger. No effect unless
-    `include_references` is also on.
+    `enclosing_range` off the reference, which never carries it. The containers
+    are callables, types, and terms (a global's/field's extent spans its
+    declaration including the initializer, so an initializer's read of another
+    global attributes to it — `global_init_references`); locals are excluded by
+    the term descriptor check (see `is_term_symbol`). Needs a binary that emits
+    `enclosing_range` (#504); with a stock binary there are no intervals, so
+    references keep `enclosing_symbol = None` and degrade to file granularity.
+    Opt-in because it is exact but larger. No effect unless `include_references`
+    is also on.
     """
     graph = Graph()
 
@@ -266,9 +294,15 @@ def build_graph(
         # callable definitions used as the nearest-preceding fallback, and collect
         # the `enclosing_range` intervals — each definition's own body extent —
         # that drive *exact* attribution by containment. Two interval sets: calls
-        # attribute to the enclosing *callable*; the usage view also allows a
-        # *type* container (a field's type is "used by" its class), but never a
-        # namespace (too coarse to be a useful "user").
+        # attribute to the enclosing *callable* only (a term interval is never a
+        # call-attribution boundary — a call inside a global's initializer is not
+        # attributed to the global); the usage view allows a *type* container (a
+        # field's type is "used by" its class — or, when the field itself carries
+        # an extent, by the field, the innermost container) and a *term* container
+        # (a global's/field's `enclosing_range` spans its declaration including
+        # the initializer, so an initializer's read of another global attributes
+        # to it — `global_init_references`), but never a namespace (too coarse to
+        # be a useful "user").
         callable_defs: list[tuple[int, str]] = []
         callable_intervals: list[tuple[int, int, str]] = []
         usage_intervals: list[tuple[int, int, str]] = []
@@ -298,6 +332,8 @@ def build_graph(
                     callable_intervals.append(interval)
                     usage_intervals.append(interval)
                 elif is_type_symbol(occ.symbol):
+                    usage_intervals.append(interval)
+                elif is_term_symbol(occ.symbol):
                     usage_intervals.append(interval)
         callable_defs.sort()
         boundary_lines = [line for line, _ in callable_defs]

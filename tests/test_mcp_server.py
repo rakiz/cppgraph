@@ -600,6 +600,122 @@ def test_no_incoming_calls_tool_registered_and_routes_through_call(
     assert tool()["available"] is False  # stock-binary store: refused, not guessed
 
 
+# --- global_init_references (attributed-refs gated) ---------------------------
+
+
+G_A = "cxx . . $ app/g_a."
+G_B = "cxx . . $ app/g_b."
+HELPER = "cxx . . $ app/helper(h1)."
+
+
+@pytest.fixture
+def globals_store(tmp_path: Path) -> GraphStore:
+    """`int g_a = helper(); static int g_b = g_a + 1;` — g_b's initializer reads
+    g_a (term -> term); g_a's region use is a callable call, not a global read."""
+    graph = Graph()
+    graph.nodes[G_A] = Node(symbol=G_A, display_name="g_a", file="src/g.cpp", line=1, end_line=1)
+    graph.nodes[G_B] = Node(symbol=G_B, display_name="g_b", file="src/g.cpp", line=2, end_line=2)
+    graph.add_reference(HELPER, "src/g.cpp", line=1, enclosing_symbol=G_A)
+    graph.add_reference(G_A, "src/g.cpp", line=2, enclosing_symbol=G_B)
+    path = tmp_path / "globals.db"
+    write_sqlite(graph, path)
+    return GraphStore(path)
+
+
+def test_global_init_references_report_lists_referenced_globals(
+    globals_store: GraphStore,
+) -> None:
+    result = mcp_server.global_init_references_report(globals_store, G_B)
+    assert result["symbol"] == G_B
+    assert result["total"] == 1
+    assert result["truncated"] is False
+    assert [r["name"] for r in result["references"]] == ["g_a"]
+    assert result["references"][0]["file"] == "src/g.cpp"
+    assert result["references"][0]["line"] == 3  # 0-indexed 2 -> 1-indexed
+
+
+def test_global_init_references_report_resolves_a_plain_name(
+    globals_store: GraphStore,
+) -> None:
+    """The shared resolve step: `g_b` (a unique name) works in one call."""
+    result = mcp_server.global_init_references_report(globals_store, "g_b")
+    assert result["total"] == 1
+
+
+def test_global_init_references_report_states_fact_not_verdict(
+    globals_store: GraphStore,
+) -> None:
+    """Every response carries the caveat: a constexpr/constinit init is safe —
+    the tool reports the reference, the LLM judges the hazard."""
+    result = mcp_server.global_init_references_report(globals_store, G_B)
+    assert "constexpr" in result["note"]
+    assert "not a verdict" in result["note"]
+
+
+def test_global_init_references_report_empty_for_callable_only_region_uses(
+    globals_store: GraphStore,
+) -> None:
+    """g_a's initializer calls a function — no global reads, an honest empty
+    list (not None: the store carries attributed refs)."""
+    result = mcp_server.global_init_references_report(globals_store, G_A)
+    assert result["total"] == 0
+    assert result["references"] == []
+
+
+def test_global_init_references_report_unavailable_reports_reason(
+    store: GraphStore,
+) -> None:
+    """The default fixture store carries no attributed refs: `available: false`
+    with the rebuild pointer — never a silently empty list."""
+    result = mcp_server.global_init_references_report(store, FOO)
+    assert result["available"] is False
+    assert "attributed" in result["reason"]
+    assert "--attributed-refs" in result["reason"]
+
+
+def test_global_init_references_report_non_term_is_error_dict(
+    globals_store: GraphStore,
+) -> None:
+    """A callable has no initializer region: an error dict, the class_members
+    contract — bad input, never an empty list that would read as 'references
+    nothing'."""
+    result = mcp_server.global_init_references_report(globals_store, HELPER)
+    assert "error" in result
+    assert "not a global" in result["error"]
+
+
+def test_global_init_references_report_unknown_symbol_is_error_dict(
+    store: GraphStore,
+) -> None:
+    result = mcp_server.global_init_references_report(store, "missing_symbol_xyz")
+    assert "error" in result
+
+
+def test_global_init_references_report_matches_store_directly(
+    globals_store: GraphStore,
+) -> None:
+    """Parity check: the MCP tool's answer is exactly
+    `store.global_init_references`, not a reimplementation."""
+    result = mcp_server.global_init_references_report(globals_store, G_B, full_symbols=True)
+    expected, expected_total = globals_store.global_init_references(G_B)
+    assert result["total"] == expected_total
+    assert [r["symbol"] for r in result["references"]] == [r.symbol for r in expected]
+
+
+def test_global_init_references_tool_registered_and_routes_through_call(
+    tmp_path: Path,
+) -> None:
+    from cppgraph.mcp_server import build_server
+
+    graph = Graph()
+    graph.add_node("cxx . . $ app/g.")
+    path = tmp_path / "g.db"
+    write_sqlite(graph, path)
+    server = build_server(str(path))
+    tool = server._tool_manager._tools["global_init_references"].fn
+    assert tool("g")["available"] is False  # no attributed refs: refused, not guessed
+
+
 # --- boundary_violations -----------------------------------------------------
 
 

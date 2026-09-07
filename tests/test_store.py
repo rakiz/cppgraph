@@ -1270,6 +1270,122 @@ def test_no_incoming_calls_rejects_negative_limit(tmp_path: Path) -> None:
         store.no_incoming_calls(limit=-1)
 
 
+# --- global_init_references (attributed-refs gated) ---------------------------
+
+
+G_A = "cxx . . $ app/g_a."
+G_B = "cxx . . $ app/g_b."
+HELPER = "cxx . . $ app/helper(h1)."
+
+
+def _globals_graph() -> Graph:
+    """A #504-shaped attributed graph mirroring the measured fixture
+    (`int g_a = helper(); static int g_b = g_a + 1;`): g_b's initializer reads
+    g_a (term -> term, the global_init_references fact); g_a's initializer
+    calls helper (a callable use in the region, not a global read)."""
+    graph = Graph()
+    graph.nodes[G_A] = Node(symbol=G_A, file="src/g.cpp", line=1, end_line=1)
+    graph.nodes[G_B] = Node(symbol=G_B, file="src/g.cpp", line=2, end_line=2)
+    graph.add_reference(HELPER, "src/g.cpp", line=1, enclosing_symbol=G_A)
+    graph.add_reference(G_A, "src/g.cpp", line=2, enclosing_symbol=G_B)
+    return graph
+
+
+def test_global_init_references_finds_globals_read_in_the_initializer(
+    tmp_path: Path,
+) -> None:
+    """g_b's initializer reads g_a -> listed with the use site; g_a's
+    initializer calls a function -> not a global read, an honest empty list."""
+    store = _store(tmp_path, _globals_graph())
+    assert store.meta().get("has_attributed_refs") == "true"  # the gate flipped
+
+    refs, total = store.global_init_references(G_B)
+    assert [(r.symbol, r.file, r.line, r.enclosing_symbol) for r in refs] == [
+        (G_A, "src/g.cpp", 2, G_B)
+    ]
+    assert total == 1
+
+    refs, total = store.global_init_references(G_A)
+    assert refs == []  # helper is a callable use, not a term read
+    assert total == 0
+
+
+def test_global_init_references_dedupes_a_global_read_twice(tmp_path: Path) -> None:
+    """Two reads of the same global in one initializer (e.g. `g_a + g_a`) are
+    one referenced-global row, with the first use site."""
+    graph = _globals_graph()
+    graph.add_reference(G_A, "src/g.cpp", line=3, enclosing_symbol=G_B)
+    store = _store(tmp_path, graph)
+
+    refs, total = store.global_init_references(G_B)
+    assert [r.symbol for r in refs] == [G_A]
+    assert refs[0].line == 2  # the first site
+    assert total == 1
+
+
+def test_global_init_references_empty_not_none_for_a_global_with_no_reads(
+    tmp_path: Path,
+) -> None:
+    """A known global whose initializer references no other global: `([], 0)`,
+    distinct from the None that means 'data unavailable'."""
+    graph = _globals_graph()
+    graph.nodes[G_A].end_line = None  # even an extent-less term is queryable
+    store = _store(tmp_path, graph)
+    refs, total = store.global_init_references(G_A)  # its region use is a callable
+    assert refs == []
+    assert total == 0
+
+
+def test_global_init_references_unavailable_without_attributed_refs(
+    tmp_path: Path,
+) -> None:
+    """A store whose references carry no enclosing attribution (stock binary,
+    or built without --attributed-refs): None — explicitly unavailable, never
+    an empty list that would read as 'references nothing'."""
+    graph = Graph()
+    graph.nodes[G_B] = Node(symbol=G_B, file="src/g.cpp", line=2)
+    graph.add_reference(G_A, "src/g.cpp", line=2)  # unattributed location
+    store = _store(tmp_path, graph)
+    assert store.meta().get("has_attributed_refs") is None
+    assert store.global_init_references(G_B) is None
+
+
+def test_global_init_references_unknown_symbol_raises(tmp_path: Path) -> None:
+    """Unknown symbol is bad input, not an empty answer."""
+    store = _store(tmp_path, _globals_graph())
+    with pytest.raises(ValueError, match="unknown"):
+        store.global_init_references("cxx . . $ app/missing.")
+
+
+def test_global_init_references_non_term_symbol_raises(tmp_path: Path) -> None:
+    """A callable has no initializer region — bad input, distinct from the
+    None that means 'data unavailable' (the class_members contract)."""
+    store = _store(tmp_path, _globals_graph())
+    with pytest.raises(ValueError, match="not a global"):
+        store.global_init_references(HELPER)
+
+
+def test_global_init_references_limit_truncates_but_total_is_full_count(
+    tmp_path: Path,
+) -> None:
+    """g_b already reads g_a (1 row from the fixture); three more globals make
+    4 referenced terms, of which `limit=2` shows 2."""
+    graph = _globals_graph()
+    for i in range(3):
+        other = f"cxx . . $ app/g_{i}."
+        graph.add_reference(other, "src/g.cpp", line=4 + i, enclosing_symbol=G_B)
+    store = _store(tmp_path, graph)
+    refs, total = store.global_init_references(G_B, limit=2)
+    assert len(refs) == 2
+    assert total == 4
+
+
+def test_global_init_references_rejects_negative_limit(tmp_path: Path) -> None:
+    store = _store(tmp_path, _globals_graph())
+    with pytest.raises(ValueError):
+        store.global_init_references(G_B, limit=-1)
+
+
 def test_update_upgrades_a_v2_store_adding_end_line(tmp_path: Path) -> None:
     """An older (schema v2) store has no `end_line` column; an incremental
     update from a #504 partial must add it on demand (the same ALTER pattern

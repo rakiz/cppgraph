@@ -87,6 +87,27 @@ _STOCK_ATTRIBUTION_UNRELIABLE = (
     "this tool must get right. Index with a #504-built scip-clang and rebuild "
     "the store to enable it"
 )
+# Degrade-cleanly response for the attributed-refs-gated tool: same convention,
+# naming the exact rebuild path (a #504 index AND --attributed-refs/enrich-refs).
+_NO_ATTRIBUTED_REFS = (
+    "this graph carries no attributed references: initializer-region attribution "
+    "needs a #504-built scip-clang AND a store built with `--attributed-refs` "
+    "(or `cppgraph enrich-refs` on an existing one). Without it an initializer's "
+    "reads are plain locations, and an empty list here would read as "
+    "'references nothing', which is wrong"
+)
+# Standing caveat on every global_init_references response, both halves of the
+# facts-not-judgments rule: the reference is a fact (constant-initialized inits
+# are safe), and a read inside a lambda body in the region may run lazily — the
+# measured limitation that scip-clang emits no separate lambda interval there.
+_GLOBAL_INIT_NOTE = (
+    "each entry is a graph fact — this global's initializer region references "
+    "that symbol — not a verdict: a `constexpr`/`constinit` initializer is "
+    "constant-initialized (safe), and a read inside a lambda body in the region "
+    "may run lazily or never rather than at initialization (scip-clang emits no "
+    "separate interval for such a lambda, so it cannot be split out). The tool "
+    "reports the reference; the hazard judgment is yours."
+)
 # Standing caveat on every boundary_violations response, both directions of the
 # facts-not-judgments rule: a listed violation is exact (an edge that exists),
 # while an empty list is a lower bound (the static graph under-reports runtime
@@ -1049,6 +1070,61 @@ def no_incoming_calls_report(
             "states the fact; the judgment is yours."
         ),
         "definitions": items,
+    }
+
+
+def global_init_references_report(
+    store: GraphStore,
+    symbol: str,
+    limit: int = DEFAULT_LIMIT,
+    full_symbols: bool = False,
+) -> dict[str, Any]:
+    """The globals referenced by one global's initializer region — the graph
+    fact behind the "static initialization order fiasco" question: global A's
+    initializer references global B, and across translation units the
+    initialization order is unspecified (the read may see an uninitialized B).
+    A fact, never a verdict (see the standing `note`): a `constexpr`/
+    `constinit` init is actually safe — the tool reports the reference, the
+    LLM judges the hazard.
+
+    `symbol` is a name or an exact SCIP string (a unique name resolves
+    automatically). One entry per referenced global, at its first use site;
+    callable uses in the region (a function call in the initializer) are not
+    global reads. Refuses (`available: false` + reason, the `line_span`
+    convention) on a graph without attributed references — a #504-built
+    scip-clang AND `--attributed-refs`/`enrich-refs` — never a silently empty
+    list. An unknown or non-global symbol comes back as an error dict (bad
+    input). `limit` caps the list (default 40); `total` always reports the
+    full count.
+    """
+    symbol, _alt = _resolve(store, symbol)
+    if _alt is not None:
+        return _alt
+    try:
+        result = store.global_init_references(symbol, limit=limit)
+    except ValueError as e:
+        return {"error": str(e)}
+    if result is None:
+        return {"available": False, "reason": _NO_ATTRIBUTED_REFS}
+    refs, total = result
+    items: list[dict[str, Any]] = []
+    for ref in refs:
+        # The use site (where in the region it's read) — the referenced
+        # global's own definition is one `find`/`explain_symbol` away.
+        item: dict[str, Any] = {
+            "name": _label(ref.symbol, store.get_node(ref.symbol)),
+            "file": ref.file,
+            "line": _line1(ref.line),
+        }
+        if full_symbols:
+            item["symbol"] = ref.symbol
+        items.append(item)
+    return {
+        "symbol": symbol,
+        "total": total,
+        "truncated": total > len(refs),
+        "note": _GLOBAL_INIT_NOTE,
+        "references": items,
     }
 
 
@@ -2051,6 +2127,35 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
             full_symbols=full_symbols,
             include_paths=include_paths,
             exclude_paths=exclude_paths,
+        )
+
+    @mcp.tool()
+    def global_init_references(
+        symbol: str,
+        limit: int = DEFAULT_LIMIT,
+        full_symbols: bool = False,
+    ) -> dict[str, Any]:
+        """Which globals does this global's initializer reference — the graph
+        fact behind the "static initialization order fiasco": global A's
+        initializer reads global B, and across translation units the
+        initialization order is unspecified (the read may see an uninitialized
+        B). NOT a verdict: a `constexpr`/`constinit` initializer is
+        constant-initialized and safe, and a read inside a lambda body in the
+        region may run lazily rather than at initialization — the tool reports
+        the reference (a standing `note` on every response), the LLM judges
+        the hazard. `symbol` is a name or an exact SCIP string (a unique name
+        resolves automatically); each entry names the referenced global and
+        its first use site in the region. Needs a graph with attributed
+        references (a #504-built scip-clang AND `--attributed-refs` /
+        `enrich-refs`): on anything less the tool returns `available: false`
+        with the rebuild pointer instead of a silently empty list; an unknown
+        or non-global symbol is an error dict. `limit` caps the list (default
+        40) — `total` always reports the full count."""
+        return _call(
+            global_init_references_report,
+            symbol,
+            limit=limit,
+            full_symbols=full_symbols,
         )
 
     @mcp.tool()

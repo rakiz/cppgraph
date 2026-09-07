@@ -834,6 +834,29 @@ def main(argv: list[str] | None = None) -> int:
     )
     _add_path_filters(p_no_incoming)
 
+    p_gir = sub.add_parser(
+        "global_init_references",
+        help="globals referenced by one global's initializer region (the fact "
+        "behind the static-init-order question, not a verdict); needs a "
+        "#504-built graph with --attributed-refs",
+    )
+    p_gir.add_argument(
+        "--graph",
+        required=False,
+        default=None,
+        help="graph store path (default: auto-discovered from the cwd's .cppgraph/)",
+    )
+    p_gir.add_argument(
+        "symbol",
+        help="the global: a plain name or an exact SCIP symbol string",
+    )
+    p_gir.add_argument("--limit", type=int, default=40, help="max rows to show (default: 40)")
+    p_gir.add_argument(
+        "--full-symbols",
+        action="store_true",
+        help="print the raw SCIP symbol strings instead of readable labels",
+    )
+
     p_boundary = sub.add_parser(
         "boundary-violations",
         help="declared-layering conformance: list calls/inherits edges that "
@@ -1669,6 +1692,40 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"  {symbol if args.full_symbols else short_label(symbol)}  (?)")
         if total > len(symbols):
             print(f"  ... and {total - len(symbols)} more (raise --limit to see them)")
+        return 0
+
+    if args.command == "global_init_references":
+        store = _open_store_checked(args, parser)
+        args.symbol = _resolve_symbol(store, args.symbol, parser)
+        try:
+            result = store.global_init_references(args.symbol, limit=args.limit)
+        except ValueError as e:
+            parser.error(str(e))
+        if result is None:
+            print(
+                "[cppgraph] global_init_references unavailable: this graph carries "
+                "no attributed references — it needs a #504-built scip-clang AND "
+                "a store built with --attributed-refs (or `cppgraph enrich-refs`). "
+                "Rebuild to enable it"
+            )
+            return 1
+        refs, total = result
+        print(
+            f"[cppgraph] {len(refs)} of {total} global(s) referenced by "
+            f"{args.symbol}'s initializer region"
+        )
+        print(
+            "  note: a reference is a fact, not a verdict — a constexpr/constinit "
+            "initializer is constant-initialized (safe), and a read inside a "
+            "lambda body in the region may run lazily rather than at initialization"
+        )
+        for ref in refs:
+            label = ref.symbol if args.full_symbols else short_label(ref.symbol)
+            line = ref.line + 1 if ref.line is not None else "?"
+            site = f"{ref.file}:{line}" if ref.file is not None else "?"
+            print(f"  {label}  ({site})")
+        if total > len(refs):
+            print(f"  ... and {total - len(refs)} more (raise --limit to see them)")
         return 0
 
     if args.command == "boundary-violations":
