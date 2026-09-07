@@ -8,6 +8,33 @@ on-disk store also carries its own `schema_version` for forward-compatibility.
 
 ### Added
 
+- **`file:line` symbol resolution**: every symbol-taking tool now accepts a
+  definition location (`"who calls the function at foo.cpp:120?"` works
+  without knowing its name). Implemented in the one shared resolution step,
+  `GraphStore.resolve` — the single name->symbol funnel the CLI's
+  `_resolve_symbol` and the MCP `_resolve` both already call — so `who_calls`,
+  `callers`, `callees`, `path`, `impact_of`, `explain_symbol`, … all gain it
+  with zero per-tool changes (CLI/MCP parity by construction, not by
+  duplication). The trailing `:<positive integer>` shape is recognized first:
+  neither a SCIP symbol string (it always ends in a descriptor — `.`, `#` or
+  `)`) nor a C++ name (a lone `:` is not an identifier character) can have it,
+  so the recognition is unambiguous and never hijacks e.g. an
+  anonymous-namespace symbol embedding `path:line:col`. The LAST colon splits
+  (a Windows drive-letter path carries a `:` of its own), the file is matched
+  exactly against the recorded path — `outline`'s convention, backslashes
+  normalized, no fuzzy/suffix matching — and the line is 1-indexed (editor
+  convention; the store keeps 0-indexed, converted once on input — the inverse
+  of the `+1` every display path applies). Two-tier lookup through the same
+  three-outcome contract as names: a definition whose own start line is
+  exactly that line; then — only on a `has_enclosing_ranges` (#504) store —
+  the innermost (narrowest-span) definition whose `[line, end_line]` contains
+  the requested line, so a line inside a function body resolves to that
+  function, not its enclosing class. Several symbols sharing the exact line,
+  or tying on the narrowest containing span, return the ambiguous
+  candidates-outcome; a body line on a stock store is an honest no-match,
+  never a nearest-definition guess (the confidently-wrong failure mode
+  cppgraph exists to avoid).
+
 - **`api_surface`**: the actually-used external surface of a module — which
   definitions under a directory prefix are called or referenced from *outside*
   it. The observed surface, not the declared one: SCIP encodes no C++

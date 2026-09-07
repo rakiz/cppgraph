@@ -1866,6 +1866,21 @@ def test_exact_scip_symbol_still_accepted(
     assert exit_code == 0
 
 
+def test_callers_resolves_file_line(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """`file:line` resolves through the same shared `resolve` step, so every
+    symbol-taking tool accepts it — end-to-end smoke via `callers`."""
+    callee = "cxx . . $ mongo/Foo#makeResumeToken(a1)."
+    graph = Graph()
+    graph.nodes[callee] = Node(symbol=callee, file="foo.cpp", line=11)  # 1-indexed 12
+    graph.add_edge("calls", "cxx . . $ mongo/Foo#caller(a2).", callee, file="foo.cpp", line=9)
+    path = tmp_path / "g.db"
+    write_sqlite(graph, path)
+    exit_code = main(["callers", "--graph", str(path), "foo.cpp:12"])
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "mongo/Foo#caller(a2)." in out
+
+
 # --- graph auto-discovery: --graph optional when run from inside a project ---
 
 

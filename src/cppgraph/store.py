@@ -21,6 +21,7 @@ Two halves:
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import subprocess
 from collections import deque
@@ -101,6 +102,14 @@ CREATE INDEX ix_refs ON refs(symbol_id);  -- references_of a symbol
 # SQLite caps host-variable count per statement (default 999 historically).
 # Chunk `IN (...)` id lists well under that.
 _ID_CHUNK = 900
+
+# A `file:line` query: the LAST `:` splits off a 1-indexed line, so the file
+# part may itself contain `:` (a Windows drive letter). No valid input to the
+# name-resolution path has this shape — a SCIP symbol string always ends in a
+# descriptor (`.`, `#` or `)`), and a C++ name never contains a lone `:` — so
+# recognizing it first is unambiguous. Line 0 or a leading zero is not the
+# form (1-indexed lines start at 1) and falls through to name matching.
+_FILE_LINE_RE = re.compile(r"^(.+):([1-9][0-9]*)$")
 
 # On-disk store format version, stamped into `meta.schema_version` at build.
 # Bump when the schema changes incompatibly (new/renamed tables or columns);
@@ -869,18 +878,39 @@ class GraphStore:
         name->symbol step behind both the CLI and the MCP tools (so they stay
         equivalent).
 
-        An exact symbol string is returned as-is. Otherwise `query` is a name: a
-        plain substring match, then — if that misses — `Class::method` normalized
-        to SCIP's `Class#method`, then a case/separator-insensitive fuzzy match.
-        The three outcomes are encoded in the return:
+        A `file:line` query is recognized first (trailing `:<positive
+        integer>`, a shape neither a SCIP symbol string nor a C++ name can
+        have): the file is matched exactly against the recorded (relative)
+        path — `outline`'s convention, backslashes normalized, no fuzzy or
+        suffix matching, so the caller must pass the path form the graph
+        recorded — and the line is **1-indexed** (editor convention; the store
+        keeps 0-indexed lines, converted once on the way in). Lookup is
+        two-tier: a definition whose own start line is exactly that line;
+        then, only on a store with body extents (`has_enclosing_ranges`,
+        #504-built binaries), the innermost (narrowest-span) definition whose
+        `[line, end_line]` contains the requested line — a line inside a
+        function body, not on its first line. On a stock store a body line is
+        an honest no-match, never a nearest-definition guess.
 
-        - `(symbol, [])`     — exact hit, or a name matching exactly one symbol;
-        - `(None, [n1, n2])` — ambiguous: the distinct candidate nodes to pick from;
+        Otherwise an exact symbol string is returned as-is, and `query` is a
+        name: a plain substring match, then — if that misses —
+        `Class::method` normalized to SCIP's `Class#method`, then a
+        case/separator-insensitive fuzzy match. The three outcomes are encoded
+        in the return:
+
+        - `(symbol, [])`     — exact hit, or a name/location matching exactly
+                                 one symbol;
+        - `(None, [n1, n2])` — ambiguous: the distinct candidate nodes to pick
+                                 from (several symbols sharing the exact line,
+                                 or the same narrowest containing span);
         - `(None, [])`       — no match.
 
         It never picks one of several candidates: a wrong guess would be a
         confidently-wrong answer, the failure mode cppgraph exists to avoid.
         """
+        loc = _FILE_LINE_RE.match(query)
+        if loc:
+            return self._resolve_location(loc.group(1), int(loc.group(2)))
         if self.has_symbol(query):
             return query, []
         matches = self.find(query)
@@ -897,6 +927,52 @@ class GraphStore:
         if len(distinct) == 1:
             return distinct[0].symbol, []
         return None, distinct
+
+    def _resolve_location(self, file: str, line1: int) -> tuple[str | None, list[Node]]:
+        """The `file:line` arm of `resolve`. `line1` is the 1-indexed line the
+        user means; the store records 0-indexed lines (what every display path
+        adds 1 back onto), so convert once here — an off-by-one would resolve
+        a confidently-wrong symbol."""
+        file = file.replace("\\", "/")
+        line0 = line1 - 1
+        rows = self._con.execute(
+            """
+            SELECT s.symbol, s.display_name, f.path, s.line
+            FROM symbols s JOIN files f ON f.id = s.file_id
+            WHERE f.path = ? AND s.line = ?
+            """,
+            (file, line0),
+        ).fetchall()
+        if len(rows) == 1:
+            return rows[0][0], []
+        if len(rows) > 1:
+            nodes = [Node(symbol=r[0], display_name=r[1] or "", file=r[2], line=r[3]) for r in rows]
+            return None, nodes
+        # No definition *starts* on that line. With body extents (#504) the
+        # line may sit inside one: the innermost containing definition, i.e.
+        # the narrowest `[line, end_line]` span (a method beats its class).
+        # Ordered narrowest-first, all rows sharing the narrowest span are
+        # kept — a tie is ambiguous, never a pick.
+        if self._has_enclosing_ranges():
+            spans = self._con.execute(
+                """
+                SELECT s.symbol, s.display_name, f.path, s.line,
+                       (s.end_line - s.line) AS span
+                FROM symbols s JOIN files f ON f.id = s.file_id
+                WHERE f.path = ? AND s.line <= ? AND s.end_line >= ?
+                ORDER BY span ASC, s.symbol ASC
+                """,
+                (file, line0, line0),
+            ).fetchall()
+            if spans:
+                narrowest = spans[0][4]
+                tied = [r for r in spans if r[4] == narrowest]
+                if len(tied) == 1:
+                    return tied[0][0], []
+                return None, [
+                    Node(symbol=r[0], display_name=r[1] or "", file=r[2], line=r[3]) for r in tied
+                ]
+        return None, []
 
     def callers_of(self, symbol: str) -> list[Edge]:
         dst_id = self._symbol_id(symbol)

@@ -2010,3 +2010,108 @@ def test_resolve_falls_back_to_fuzzy(tmp_path: Path) -> None:
     resolved, candidates = _multi(tmp_path).resolve("makeresumetoken")
     assert resolved == METHOD
     assert candidates == []
+
+
+# --- resolve: `file:line` input form (definition-site resolution) ------------
+
+WIDGET_T = "cxx . . $ app/Widget#"
+WIDGET_M = "cxx . . $ app/Widget#paint(p1)."
+HELPER_F = "cxx . . $ app/helper(h1)."
+TERM_A = "cxx . . $ app/a(a1)."
+TERM_B = "cxx . . $ app/b(b1)."
+LIB_OTHER = "cxx . . $ lib/other(o1)."
+ANON_SYM = "cxx . . $ src/app.cpp:14:2/helper()."
+
+
+def _located_graph() -> Graph:
+    """#504-shaped, nested extents in `src/app.cpp` (0-indexed lines, as the
+    store records them): a class [9, 39] containing a method [14, 29], a free
+    function [50, 59], two terms sharing start line 70, and a same-line symbol
+    in another file (must never leak into an `src/app.cpp` query)."""
+    graph = Graph()
+    graph.nodes[WIDGET_T] = Node(symbol=WIDGET_T, file="src/app.cpp", line=9, end_line=39)
+    graph.nodes[WIDGET_M] = Node(symbol=WIDGET_M, file="src/app.cpp", line=14, end_line=29)
+    graph.nodes[HELPER_F] = Node(symbol=HELPER_F, file="src/app.cpp", line=50, end_line=59)
+    graph.nodes[TERM_A] = Node(symbol=TERM_A, file="src/app.cpp", line=70)
+    graph.nodes[TERM_B] = Node(symbol=TERM_B, file="src/app.cpp", line=70)
+    graph.nodes[LIB_OTHER] = Node(symbol=LIB_OTHER, file="src/lib.cpp", line=14, end_line=20)
+    return graph
+
+
+def test_resolve_file_line_exact_start_line(tmp_path: Path) -> None:
+    """1-indexed input 15 -> stored 0-indexed line 14; the same stored line in
+    another file (lib/other) must not leak into the answer."""
+    store = _store(tmp_path, _located_graph())
+    assert store.resolve("src/app.cpp:15") == (WIDGET_M, [])
+
+
+def test_resolve_file_line_inside_body_is_innermost_definition(tmp_path: Path) -> None:
+    """Line 21 (1-indexed) sits inside both the method [15, 30] and its class
+    [10, 40] (1-indexed, ends inclusive): the innermost definition wins."""
+    store = _store(tmp_path, _located_graph())
+    assert store.resolve("src/app.cpp:21") == (WIDGET_M, [])
+
+
+def test_resolve_file_line_stock_graph_refuses_body_lines(tmp_path: Path) -> None:
+    """Without body extents (stock binary) an exact start line still resolves,
+    but a body line is an honest no-match — never a nearest-definition guess."""
+    graph = _located_graph()
+    for node in graph.nodes.values():
+        node.end_line = None
+    store = _store(tmp_path, graph)
+    assert store.meta().get("has_enclosing_ranges") is None
+    assert store.resolve("src/app.cpp:15") == (WIDGET_M, [])
+    assert store.resolve("src/app.cpp:21") == (None, [])
+
+
+def test_resolve_file_line_no_symbol_at_line_is_no_match(tmp_path: Path) -> None:
+    store = _store(tmp_path, _located_graph())
+    assert store.resolve("src/app.cpp:80") == (None, [])
+
+
+def test_resolve_file_line_same_line_multiple_symbols_is_ambiguous(tmp_path: Path) -> None:
+    store = _store(tmp_path, _located_graph())
+    resolved, candidates = store.resolve("src/app.cpp:71")
+    assert resolved is None
+    assert {n.symbol for n in candidates} == {TERM_A, TERM_B}
+
+
+def test_resolve_file_line_tied_innermost_spans_are_ambiguous(tmp_path: Path) -> None:
+    """Two definitions with the same narrowest containing span are candidates
+    to pick from, not a guess."""
+    graph = _located_graph()
+    graph.nodes[TERM_A].end_line = 74
+    graph.nodes[TERM_B].end_line = 74
+    store = _store(tmp_path, graph)
+    resolved, candidates = store.resolve("src/app.cpp:73")  # inside both [70, 74]
+    assert resolved is None
+    assert {n.symbol for n in candidates} == {TERM_A, TERM_B}
+
+
+def test_resolve_file_line_unknown_file_is_no_match(tmp_path: Path) -> None:
+    store = _store(tmp_path, _located_graph())
+    assert store.resolve("src/missing.cpp:15") == (None, [])
+
+
+def test_resolve_file_line_backslashes_normalized(tmp_path: Path) -> None:
+    store = _store(tmp_path, _located_graph())
+    assert store.resolve("src\\app.cpp:15") == (WIDGET_M, [])
+
+
+def test_resolve_file_line_windows_drive_letter_path(tmp_path: Path) -> None:
+    """A drive-letter path carries a `:` of its own: only the LAST colon splits
+    the line off, and backslash normalization matches the stored forward
+    slashes."""
+    graph = _located_graph()
+    graph.nodes[WIDGET_M].file = "C:/proj/src/app.cpp"
+    store = _store(tmp_path, graph)
+    assert store.resolve("C:\\proj\\src\\app.cpp:15") == (WIDGET_M, [])
+
+
+def test_resolve_scip_symbol_with_colons_not_treated_as_file_line(tmp_path: Path) -> None:
+    """An anonymous-namespace SCIP symbol embeds `path:line:col` but ends in a
+    descriptor — the `file:line` shape must not hijack it."""
+    graph = _located_graph()
+    graph.nodes[ANON_SYM] = Node(symbol=ANON_SYM, file="src/app.cpp", line=13)
+    store = _store(tmp_path, graph)
+    assert store.resolve(ANON_SYM) == (ANON_SYM, [])

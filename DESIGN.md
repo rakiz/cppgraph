@@ -411,6 +411,18 @@ designing the builder so this isn't a later rewrite:
   name as well as an exact SCIP string, through the shared `GraphStore.resolve`
   (also behind the CLI): a unique name resolves, `Class::method` maps to
   `Class#method`, an ambiguous name returns candidates, and no symbol is guessed.
+  The same step also accepts a `file:line` (1-indexed, editor convention —
+  the store keeps 0-indexed lines; the trailing `:<positive integer>` shape
+  belongs to neither a SCIP symbol string nor a C++ name, so recognizing it
+  first is unambiguous): the file is matched exactly against the recorded
+  path (`outline`'s convention, backslashes normalized), the line first
+  against definition start lines exactly, then — gated on
+  `has_enclosing_ranges` (#504) — against the innermost (narrowest-span)
+  `[line, end_line]` extent containing it, so a line inside a function body
+  resolves to that function and not its enclosing class. Multiple symbols on
+  the exact line (or tying on the narrowest span) are ambiguous candidates;
+  a body line on a stock store is no-match, never a guess — the same
+  three-outcome contract as names, so no caller had to change.
   On connect, the `initialize` `instructions` steer the model to these tools for
   in-scope code and to plain read/grep elsewhere, carrying the graph's scope and a
   `status` freshness pointer. The intended loop: `status` tells the LLM whether the graph is

@@ -29,10 +29,6 @@ active list. Design detail is in `DESIGN.md`, shipped features in
   ETA) on a TTY, one line every few percent or every N seconds under a pipe. That is a
   real progress indicator for the human without flooding the LLM path, and it needs no
   parsing beyond counting lines. Do it after the entry-point item, not with it.
-- **Resolve a `file:line` to a symbol in the query tools.** The tools take a symbol
-  or a plain name (unique resolves, ambiguous lists candidates) but not a `file:line`.
-  Add it so "who calls the function at `foo.cpp:120`?" works without a name — needs a
-  store lookup by definition location (`symbols.file_id`/`line`).
 - **Attributed references as first-class `uses` edges.** `impact_of`/`path` traverse
   `calls`/`inherits` only, so a *type* has no reachable callers — "what breaks if I
   change this struct?" isn't answerable transitively; the answer lives in
