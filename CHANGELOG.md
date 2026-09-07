@@ -6,6 +6,10 @@ on-disk store also carries its own `schema_version` for forward-compatibility.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [0.2.0] - 2026-09-04
+
 ### Added
 
 - **`no_incoming_calls`**: callable definitions with zero incoming `calls`
@@ -30,7 +34,8 @@ on-disk store also carries its own `schema_version` for forward-compatibility.
   both backed by the same `GraphStore.line_span`; bounded output (`limit` +
   `total`) and the same `exclude_tests`/path-prefix filters as `hotspots`.
   Persists `Node.end_line` in the store — **schema v3**: older stores keep
-  working (an incremental `update` adds the column on demand), and an older
+  working (a store rebuild, or an incremental `update` that actually touches
+  affected files, adds the column on demand), and an older
   cppgraph refuses a v3 store with the usual upgrade/rebuild error.
 - **`stats`**: module-level aggregate counts per file (`--group-by file`) or
   rolled up per directory via `dirname` (`--group-by dir`) — symbols defined,

@@ -5,13 +5,19 @@
     "version": "0.4.0",
     "rebuild": "reindex"
   },
-  "latest": "0.1.0",
+  "latest": "0.2.0",
   "releases": [
     {
       "version": "0.1.0",
       "rebuild": "none",
       "notes": "First release. No store/schema change — safe to update in place.",
       "url": "https://github.com/rakiz/cppgraph/releases/tag/v0.1.0"
+    },
+    {
+      "version": "0.2.0",
+      "rebuild": "store",
+      "notes": "Store schema v3 (`symbols.end_line`, powers `line_span`/`no_incoming_calls`): v2 stores keep working but the migration is not automatic — `update` short-circuits with 'nothing changed' and never migrates — so rebuild the store from the existing .scip (`cppgraph build`); `enrich-refs` migrates the schema in place but does not backfill the `end_line` extents the features read.",
+      "url": "https://github.com/rakiz/cppgraph/releases/tag/v0.2.0"
     }
   ]
 }
