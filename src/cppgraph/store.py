@@ -1332,6 +1332,123 @@ class GraphStore:
         symbols = [row[0] for row in rows]
         return symbols[:limit], len(symbols)
 
+    def boundary_violations(
+        self,
+        rules: list[tuple[str, str]],
+        edge_kinds: tuple[str, ...] = ("calls", "inherits"),
+        limit: int = 40,
+    ) -> tuple[list[dict[str, str | int | None]], int]:
+        """`calls`/`inherits` edges that cross a caller-declared layering rule.
+
+        A rule is `(from_prefix, forbidden_prefix)`: "no edge whose *source*
+        symbol is defined under `from_prefix` may point at a symbol defined
+        under `forbidden_prefix`" — e.g. `("common/", "platform/")` means
+        `common/` must not call `platform/`. The rules come from the caller
+        (the project's declared architecture, which the graph doesn't know),
+        and each reported violation *is* a real compiler-traced edge, so there
+        are no false positives by construction. The converse direction is a
+        lower bound: an empty result means no *statically indexed* edge
+        crosses the rules (runtime dispatch — virtual calls, function
+        pointers — can cross a boundary with no static edge), never a proof of
+        conformance.
+
+        Directory membership is the endpoint's own definition file, matched on
+        a path-segment boundary via `cppgraph.filters.matches_path_prefix`
+        (registered as the SQL function `cpg_under_prefix`, the same pattern
+        as `hotspots`' `cpg_path_ok`): `"common"` matches `common/util.cpp`
+        and `common/` itself, never `commons/util.cpp`. A symbol with no
+        recorded definition site belongs to no layer and can match neither
+        side of a rule.
+
+        Each rule is one SQL query (edge kinds + both prefixes bound per
+        rule); an edge matching several rules yields one record per rule, each
+        naming the rule it broke, ordered rule-major (the caller's rule
+        order), then by call site. Returns `(violations, total)`: `violations`
+        is at most `limit` dicts (`{"kind", "src", "dst", "file", "line",
+        "rule"}` — `file`/`line` is the call/inheritance site, `rule` is
+        `"from -> forbidden"`), `total` the full record count across all
+        rules.
+
+        Raises ValueError on an empty `rules` list, a malformed rule (not a
+        pair of strings, an empty prefix — which would match nothing —, or
+        `from == forbidden`, a layer forbidden to itself), an empty
+        `edge_kinds`, an unknown edge kind (a typo must not silently read as
+        "layering holds"), or a negative `limit`.
+        """
+        if not rules:
+            raise ValueError(
+                "boundary_violations needs at least one (from_prefix, forbidden_prefix) rule"
+            )
+        if limit < 0:
+            raise ValueError(f"limit must be >= 0, got {limit}")
+        if not edge_kinds:
+            raise ValueError("edge_kinds must not be empty (it would match nothing)")
+        unknown = sorted(set(edge_kinds) - {"calls", "inherits", "implements"})
+        if unknown:
+            raise ValueError(f"unknown edge kind(s): {', '.join(unknown)}")
+
+        def _norm(prefix: str) -> str:
+            # The same normalization `matches_path_prefix` applies: forward
+            # slashes, trailing separator trimmed. Empty after trimming (""
+            # or "/") matches no path, so it is rejected as a rule below.
+            return prefix.replace("\\", "/").rstrip("/")
+
+        for rule in rules:
+            if not isinstance(rule, (list, tuple)) or len(rule) != 2:
+                raise ValueError(
+                    f"malformed rule {rule!r}: expected (from_prefix, forbidden_prefix)"
+                )
+            from_prefix, forbidden_prefix = rule
+            if not isinstance(from_prefix, str) or not isinstance(forbidden_prefix, str):
+                raise ValueError(f"malformed rule {rule!r}: prefixes must be strings")
+            if not _norm(from_prefix) or not _norm(forbidden_prefix):
+                raise ValueError(
+                    f"malformed rule {from_prefix!r} -> {forbidden_prefix!r}: "
+                    "a prefix must be non-empty (an empty one matches nothing)"
+                )
+            if _norm(from_prefix) == _norm(forbidden_prefix):
+                raise ValueError(
+                    f"malformed rule {from_prefix!r} -> {forbidden_prefix!r}: "
+                    "from and forbidden prefixes are the same layer"
+                )
+
+        def _under_prefix(path: str | None, prefix: str) -> bool:
+            return matches_path_prefix(path, include=[prefix], exclude=None)
+
+        self._con.create_function("cpg_under_prefix", 2, _under_prefix, deterministic=True)
+        kind_ph = ",".join("?" * len(edge_kinds))
+        violations: list[dict[str, str | int | None]] = []
+        for from_prefix, forbidden_prefix in rules:
+            rows = self._con.execute(
+                f"""
+                SELECT e.kind, s_src.symbol, s_dst.symbol, f_edge.path, e.line
+                FROM edges e
+                JOIN symbols s_src ON s_src.id = e.src_id
+                JOIN symbols s_dst ON s_dst.id = e.dst_id
+                JOIN files f_src ON f_src.id = s_src.file_id
+                JOIN files f_dst ON f_dst.id = s_dst.file_id
+                LEFT JOIN files f_edge ON f_edge.id = e.file_id
+                WHERE e.kind IN ({kind_ph})
+                  AND cpg_under_prefix(f_src.path, ?)
+                  AND cpg_under_prefix(f_dst.path, ?)
+                ORDER BY f_edge.path, e.line, s_src.symbol
+                """,
+                (*edge_kinds, from_prefix, forbidden_prefix),
+            ).fetchall()
+            rule_label = f"{from_prefix} -> {forbidden_prefix}"
+            violations.extend(
+                {
+                    "kind": kind,
+                    "src": src,
+                    "dst": dst,
+                    "file": site_path,
+                    "line": site_line,
+                    "rule": rule_label,
+                }
+                for kind, src, dst, site_path, site_line in rows
+            )
+        return violations[:limit], len(violations)
+
     def subgraph(
         self, symbol: str, depth: int = 2, direction: str = "both"
     ) -> tuple[list[Node], list[Edge]]:

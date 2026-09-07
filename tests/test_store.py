@@ -366,6 +366,153 @@ def test_stats_rejects_negative_limit(tmp_path: Path) -> None:
         store.stats(limit=-1)
 
 
+# --- boundary_violations -----------------------------------------------------
+
+
+def _layered_graph() -> Graph:
+    """A layering that conforms: `common/` is the base, `platform/` builds on
+    it, `projects/` on that — calls only point down toward the base, so the
+    rules "common must not call platform/projects, platform must not call
+    projects" all hold."""
+    graph = Graph()
+    graph.add_edge("calls", "platform_fn", "common_fn", file="platform/io.cpp", line=1)
+    graph.add_edge("calls", "projects_fn", "platform_fn", file="projects/main.cpp", line=2)
+    graph.nodes["common_fn"].file = "common/util.cpp"
+    graph.nodes["platform_fn"].file = "platform/io.cpp"
+    graph.nodes["projects_fn"].file = "projects/main.cpp"
+    return graph
+
+
+def test_boundary_violations_clean_layering_reports_none(tmp_path: Path) -> None:
+    """Every edge points the allowed way (down toward the base); all three
+    forbidden-direction rules hold, so the tool reports exactly nothing."""
+    store = _store(tmp_path, _layered_graph())
+    rules = [("common/", "platform/"), ("platform/", "projects/"), ("common/", "projects/")]
+    violations, total = store.boundary_violations(rules)
+    assert (violations, total) == ([], 0)
+
+
+def test_boundary_violations_reports_an_edge_that_crosses(tmp_path: Path) -> None:
+    graph = _layered_graph()
+    graph.add_edge("calls", "common_fn", "platform_secret", file="common/util.cpp", line=9)
+    graph.nodes["platform_secret"].file = "platform/hidden.cpp"
+    store = _store(tmp_path, graph)
+    violations, total = store.boundary_violations([("common/", "platform/")])
+    assert violations == [
+        {
+            "kind": "calls",
+            "src": "common_fn",
+            "dst": "platform_secret",
+            "file": "common/util.cpp",
+            "line": 9,
+            "rule": "common/ -> platform/",
+        }
+    ]
+    assert total == 1
+
+
+def test_boundary_violations_prefix_matches_on_segment_boundaries(tmp_path: Path) -> None:
+    """The `matches_path_prefix` contract: `common/` never matches a sibling
+    directory that merely shares characters (`commons/`), so an edge out of
+    `commons/` is not an edge out of `common/`."""
+    graph = Graph()
+    graph.add_edge("calls", "sibling_fn", "plat_fn", file="commons/util.cpp", line=1)
+    graph.nodes["sibling_fn"].file = "commons/util.cpp"
+    graph.nodes["plat_fn"].file = "platform/io.cpp"
+    store = _store(tmp_path, graph)
+    violations, total = store.boundary_violations([("common/", "platform/")])
+    assert (violations, total) == ([], 0)  # commons/ is not under common/
+    # the exact sibling prefix does fire, proving the zero above is the prefix
+    # semantics, not a dead query
+    violations, total = store.boundary_violations([("commons/", "platform/")])
+    assert total == 1
+
+
+def test_boundary_violations_ignores_symbols_without_definition_file(tmp_path: Path) -> None:
+    """A symbol with no recorded definition site belongs to no layer: it can
+    be neither the from- nor the forbidden-side of a violation."""
+    graph = _layered_graph()
+    graph.add_edge("calls", "nodef_src", "platform_fn", file="common/util.cpp", line=5)
+    graph.add_edge("calls", "common_fn", "nodef_dst", file="common/util.cpp", line=6)
+    store = _store(tmp_path, graph)
+    violations, total = store.boundary_violations([("common/", "platform/")])
+    assert (violations, total) == ([], 0)
+
+
+def test_boundary_violations_inherits_edges_checked_by_default(tmp_path: Path) -> None:
+    graph = _layered_graph()
+    graph.add_edge("inherits", "CommonWidget", "PlatformBase", file="common/widget.h", line=3)
+    graph.nodes["CommonWidget"].file = "common/widget.h"
+    graph.nodes["PlatformBase"].file = "platform/base.h"
+    store = _store(tmp_path, graph)
+    violations, total = store.boundary_violations([("common/", "platform/")])
+    assert total == 1
+    assert violations[0]["kind"] == "inherits"
+    # edge_kinds restricts what is checked
+    calls_only, calls_total = store.boundary_violations(
+        [("common/", "platform/")], edge_kinds=("calls",)
+    )
+    assert (calls_only, calls_total) == ([], 0)
+
+
+def test_boundary_violations_edge_matching_two_rules_reported_once_per_rule(
+    tmp_path: Path,
+) -> None:
+    """A general rule and a stricter sub-layer rule both fire on the same edge:
+    one record per rule, each naming the rule it broke (rule-major order)."""
+    graph = Graph()
+    graph.add_edge("calls", "sub_fn", "plat_fn", file="common/sub/util.cpp", line=4)
+    graph.nodes["sub_fn"].file = "common/sub/util.cpp"
+    graph.nodes["plat_fn"].file = "platform/io.cpp"
+    store = _store(tmp_path, graph)
+    violations, total = store.boundary_violations(
+        [("common/", "platform/"), ("common/sub/", "platform/")]
+    )
+    assert total == 2
+    assert [v["rule"] for v in violations] == [
+        "common/ -> platform/",
+        "common/sub/ -> platform/",
+    ]
+    assert {v["src"] for v in violations} == {"sub_fn"}
+    assert {v["dst"] for v in violations} == {"plat_fn"}
+
+
+def test_boundary_violations_limit_truncates_but_total_is_full_count(tmp_path: Path) -> None:
+    graph = _layered_graph()
+    for i in range(3):
+        graph.add_edge(
+            "calls", f"common_fn{i}", "platform_secret", file="common/util.cpp", line=10 + i
+        )
+        graph.nodes[f"common_fn{i}"].file = "common/util.cpp"
+    graph.nodes["platform_secret"].file = "platform/hidden.cpp"
+    store = _store(tmp_path, graph)
+    violations, total = store.boundary_violations([("common/", "platform/")], limit=2)
+    assert len(violations) == 2
+    assert total == 3
+
+
+def test_boundary_violations_rejects_bad_input(tmp_path: Path) -> None:
+    """Defensive validation in the `hotspots` unknown-kind style: a malformed
+    rule must raise, not silently match nothing (a false 'layering holds')."""
+    store = _store(tmp_path, _layered_graph())
+    with pytest.raises(ValueError):  # no rules at all
+        store.boundary_violations([])
+    with pytest.raises(ValueError):  # a layer forbidden to itself
+        store.boundary_violations([("common/", "common/")])
+    with pytest.raises(ValueError):  # same after prefix normalization
+        store.boundary_violations([("common", "common/")])
+    with pytest.raises(ValueError):  # empty prefix matches nothing
+        store.boundary_violations([("", "platform/")])
+    with pytest.raises(ValueError):  # not a (from, forbidden) pair
+        store.boundary_violations([("common/",)])
+    with pytest.raises(ValueError):
+        store.boundary_violations([("common/", "platform/")], limit=-1)
+    with pytest.raises(ValueError):  # empty kinds would silently match nothing
+        store.boundary_violations([("common/", "platform/")], edge_kinds=())
+    with pytest.raises(ValueError):  # a typo'd kind must not read as "clean"
+        store.boundary_violations([("common/", "platform/")], edge_kinds=("telepathy",))
+
+
 # --- line_span / no_incoming_calls (enclosing-range gated) -------------------
 
 BIG = "cxx . . $ app/big(b1)."

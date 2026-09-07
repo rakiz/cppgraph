@@ -472,6 +472,116 @@ def test_no_incoming_calls_tool_registered_and_routes_through_call(
     assert tool()["available"] is False  # stock-binary store: refused, not guessed
 
 
+# --- boundary_violations -----------------------------------------------------
+
+
+@pytest.fixture
+def boundary_store(tmp_path: Path) -> GraphStore:
+    """One legal downward edge (`platform/` may call `common/`) and one that
+    crosses the declared rule (`common/` must not call `platform/`)."""
+    graph = Graph()
+    graph.add_edge("calls", "platform_fn", "common_fn", file="platform/io.cpp", line=1)
+    graph.add_edge("calls", "common_fn", "platform_secret", file="common/util.cpp", line=9)
+    graph.nodes["common_fn"].file = "common/util.cpp"
+    graph.nodes["platform_fn"].file = "platform/io.cpp"
+    graph.nodes["platform_secret"].file = "platform/hidden.cpp"
+    path = tmp_path / "boundary.db"
+    write_sqlite(graph, path)
+    return GraphStore(path)
+
+
+def test_boundary_violation_report_lists_violations_with_rule(
+    boundary_store: GraphStore,
+) -> None:
+    result = mcp_server.boundary_violation_report(boundary_store, [["common/", "platform/"]])
+    assert result["total"] == 1
+    assert result["truncated"] is False
+    v = result["violations"][0]
+    assert v["rule"] == "common/ -> platform/"
+    assert v["kind"] == "calls"
+    assert v["src"] == "common_fn"
+    assert v["dst"] == "platform_secret"
+    assert v["file"] == "common/util.cpp"
+    assert v["line"] == 10  # 0-indexed 9 -> 1-indexed
+
+
+def test_boundary_violation_report_zero_is_a_lower_bound_not_conformance(
+    boundary_store: GraphStore,
+) -> None:
+    """The standing note frames both directions: each hit is a real edge (zero
+    false positives), and 0 hits means no *statically indexed* edge crosses —
+    never a proof the layering holds (facts, not judgments)."""
+    result = mcp_server.boundary_violation_report(boundary_store, [["platform/", "projects/"]])
+    assert result["total"] == 0
+    assert result["violations"] == []
+    assert "zero false positives" in result["note"]
+    assert "statically indexed" in result["note"]
+
+
+def test_boundary_violation_report_limit_truncates(boundary_store: GraphStore) -> None:
+    result = mcp_server.boundary_violation_report(
+        boundary_store, [["common/", "platform/"]], limit=0
+    )
+    assert result["total"] == 1
+    assert result["violations"] == []
+    assert result["truncated"] is True
+
+
+def test_boundary_violation_report_edge_kinds_restrict(boundary_store: GraphStore) -> None:
+    result = mcp_server.boundary_violation_report(
+        boundary_store, [["common/", "platform/"]], edge_kinds=["inherits"]
+    )
+    assert result["total"] == 0  # the violating edge is a call, not an inheritance
+
+
+def test_boundary_violation_report_matches_store_directly(boundary_store: GraphStore) -> None:
+    """Parity check, same shape as the hotspots/stats ones: the MCP report is
+    exactly `store.boundary_violations`, not a reimplementation (line is
+    1-indexed here, 0-indexed in the store, like every other tool)."""
+    result = mcp_server.boundary_violation_report(
+        boundary_store, [["common/", "platform/"]], full_symbols=True
+    )
+    expected, expected_total = boundary_store.boundary_violations([("common/", "platform/")])
+    assert result["total"] == expected_total
+    assert [
+        (v["kind"], v["src"], v["dst"], v["file"], v["rule"]) for v in result["violations"]
+    ] == [(e["kind"], e["src"], e["dst"], e["file"], e["rule"]) for e in expected]
+    assert result["violations"][0]["line"] == expected[0]["line"] + 1
+
+
+def test_boundary_violation_report_invalid_rules_are_error_dicts(
+    boundary_store: GraphStore,
+) -> None:
+    """A malformed rule (empty list, degenerate, empty prefix, not a pair)
+    comes back as an error dict showing the expected shape — not an
+    exception."""
+    for bad in ([], [["common/", "common/"]], [["", "platform/"]], [["common/"]]):
+        result = mcp_server.boundary_violation_report(boundary_store, bad)
+        assert "error" in result, bad
+        assert "[from_prefix, forbidden_prefix]" in result["hint"]
+
+
+def test_boundary_violations_tool_registered_and_routes_through_call(
+    tmp_path: Path,
+) -> None:
+    """The `@mcp.tool()` wrapper exists and delegates to
+    `boundary_violation_report` (the pure function is covered directly; this
+    covers the wiring)."""
+    from cppgraph.mcp_server import build_server
+
+    graph = Graph()
+    graph.add_edge("calls", "common_fn", "platform_secret", file="common/util.cpp", line=9)
+    graph.nodes["common_fn"].file = "common/util.cpp"
+    graph.nodes["platform_secret"].file = "platform/hidden.cpp"
+    path = tmp_path / "g.db"
+    write_sqlite(graph, path)
+    server = build_server(str(path))
+    tool = server._tool_manager._tools["boundary_violations"].fn
+    result = tool(rules=[["common/", "platform/"]])
+    assert result["total"] == 1
+    assert result["violations"][0]["dst"] == "platform_secret"
+
+
 BASE = "cxx . . $ mongo/Base#"
 DERIVED = "cxx . . $ mongo/Derived#"
 LEAF = "cxx . . $ mongo/Leaf#"

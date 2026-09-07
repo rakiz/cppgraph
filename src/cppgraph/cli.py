@@ -766,6 +766,41 @@ def main(argv: list[str] | None = None) -> int:
     )
     _add_path_filters(p_no_incoming)
 
+    p_boundary = sub.add_parser(
+        "boundary-violations",
+        help="declared-layering conformance: list calls/inherits edges that "
+        "cross a rule you supply (zero false positives — each hit is a real edge)",
+    )
+    p_boundary.add_argument(
+        "--graph",
+        required=False,
+        default=None,
+        help="graph store path (default: auto-discovered from the cwd's .cppgraph/)",
+    )
+    p_boundary.add_argument(
+        "--rule",
+        action="append",
+        dest="rules",
+        required=True,
+        metavar="FROM:FORBIDDEN",
+        help="layering rule, repeatable: no edge from a symbol defined under "
+        "FROM to one defined under FORBIDDEN (e.g. --rule common/:platform/ = "
+        "common/ must not call platform/)",
+    )
+    p_boundary.add_argument(
+        "--kind",
+        action="append",
+        choices=("calls", "inherits", "implements"),
+        default=None,
+        help="edge kind to check (repeatable; default: calls and inherits)",
+    )
+    p_boundary.add_argument("--limit", type=int, default=40, help="max rows to show (default: 40)")
+    p_boundary.add_argument(
+        "--full-symbols",
+        action="store_true",
+        help="print the raw SCIP symbol strings instead of readable labels",
+    )
+
     p_status = sub.add_parser(
         "status",
         help="show the graph's source commit and, with --root, whether the checkout has drifted",
@@ -1395,6 +1430,36 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"  {symbol if args.full_symbols else short_label(symbol)}  (?)")
         if total > len(symbols):
             print(f"  ... and {total - len(symbols)} more (raise --limit to see them)")
+        return 0
+
+    if args.command == "boundary-violations":
+        store = _open_store_checked(args, parser)
+        rules: list[tuple[str, str]] = []
+        for value in args.rules:
+            parts = value.split(":", 1)
+            if len(parts) != 2 or not parts[0].strip() or not parts[1].strip():
+                parser.error(f"--rule {value!r}: expected FROM:FORBIDDEN (e.g. common/:platform/)")
+            rules.append((parts[0], parts[1]))
+        kinds = tuple(args.kind) if args.kind else ("calls", "inherits")
+        try:
+            violations, total = store.boundary_violations(rules, edge_kinds=kinds, limit=args.limit)
+        except ValueError as e:
+            parser.error(str(e))
+        print(f"[cppgraph] {len(violations)} of {total} violation(s) across {len(rules)} rule(s)")
+        print(
+            "  note: each violation is a real compiler-traced edge (zero false positives); "
+            "0 violations means no statically indexed edge crosses the rules — "
+            "runtime dispatch (virtual calls, function pointers) can cross a "
+            "boundary with no static edge"
+        )
+        for v in violations:
+            src = v["src"] if args.full_symbols else short_label(v["src"])
+            dst = v["dst"] if args.full_symbols else short_label(v["dst"])
+            line = v["line"] + 1 if v["line"] is not None else "?"
+            site = f"{v['file']}:{line}" if v["file"] is not None else "?"
+            print(f"  [{v['rule']}] {v['kind']}  {src} -> {dst}  ({site})")
+        if total > len(violations):
+            print(f"  ... and {total - len(violations)} more (raise --limit to see them)")
         return 0
 
     if args.command == "status":

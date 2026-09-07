@@ -50,15 +50,6 @@ active list. Design detail is in `DESIGN.md`, shipped features in
   architecture" verdict — mutual recursion is often legitimate. Returns the components
   of size > 1 as a fact; the LLM decides which matter. Bounded output (cap + `total`,
   like the fan-out tools).
-- **`boundary_violations` — declared-layering conformance check.** The project
-  declares a strict layering (e.g. `common/` → `platform/` → `projects/`); the graph
-  can confirm it factually. Given rules ("`common/` must not call `platform/`"), list
-  the `calls`/`inherits` edges that cross them — each reported violation *is* a real
-  edge, so zero false positives (the strongest fact cppgraph can produce). The rules
-  come from the user (the project's SPEC), not the tool: it confronts exact edges with
-  a given constraint, no interpretation. Directory membership from `Edge.file` prefix;
-  works on any graph. Highest-value of this batch — answers a question nobody can
-  answer today without reading the whole tree.
 - **`reachable_from(symbols)` — forward transitive reachability.** Complements
   `impact_of` (reverse): from an entry point, what does it reach? Forward closure over
   the `calls` adjacency (already built for `shortest_call_path`). Underpins attack-
@@ -141,7 +132,7 @@ active list. Design detail is in `DESIGN.md`, shipped features in
   (`.pio/libdeps`, `vcpkg_installed`) from project sources factually — a stronger
   grounding than root-containment alone, no name heuristic (`.pio`/`third_party`/
   `vendor`). Decide the default when we build it. (Also still applies to
-  `boundary_violations`/`api_surface`, which don't exist yet — same "belongs to
+  `api_surface`, which doesn't exist yet — same "belongs to
   a path prefix" notion, feed off the same primitive when they're built.)
 - **Contributing notes, CI (lint + pytest), publish.** Not a 0.1.0 blocker.
 - **Make the repo discoverable to LLMs (distribution).** LLMs asked to compare

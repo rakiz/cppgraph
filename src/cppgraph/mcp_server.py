@@ -87,6 +87,19 @@ _STOCK_ATTRIBUTION_UNRELIABLE = (
     "this tool must get right. Index with a #504-built scip-clang and rebuild "
     "the store to enable it"
 )
+# Standing caveat on every boundary_violations response, both directions of the
+# facts-not-judgments rule: a listed violation is exact (an edge that exists),
+# while an empty list is a lower bound (the static graph under-reports runtime
+# reachability), never a conformance verdict.
+_BOUNDARY_NOTE = (
+    "each violation is a real compiler-traced edge — zero false positives. The "
+    "converse is a lower bound: 0 violations means no *statically indexed* edge "
+    "crosses these rules — runtime dispatch (virtual calls, function pointers, "
+    "registered factories) can cross a boundary with no static edge, and only "
+    "the given rules and edge kinds were checked. The rules are supplied by "
+    "you (the project's declared layering); the graph stores no intended "
+    "architecture of its own."
+)
 
 
 def _line1(line0: int | None) -> int | None:
@@ -862,6 +875,69 @@ def no_incoming_calls_report(
     }
 
 
+def boundary_violation_report(
+    store: GraphStore,
+    rules: list[list[str]],
+    edge_kinds: list[str] | None = None,
+    limit: int = DEFAULT_LIMIT,
+    full_symbols: bool = False,
+) -> dict[str, Any]:
+    """Declared-layering conformance check: the `calls`/`inherits` edges that
+    cross rules the CALLER supplies — e.g. `rules=[["common/", "platform/"]]`
+    means "no symbol defined under `common/` may call one defined under
+    `platform/`". The rules are yours (the project's SPEC); the graph stores no
+    intended architecture, it only confronts exact edges with the given
+    constraint — so every reported violation is a real compiler-traced edge
+    (zero false positives), while 0 violations is a lower bound, not proof of
+    conformance (see the standing `note`).
+
+    `edge_kinds` defaults to `["calls", "inherits"]` (`"implements"` = override
+    relationships, also accepted). `limit` caps the list (default 40); `total`
+    always reports the full count. An edge matching several rules appears once
+    per rule, each record naming the rule it broke. A malformed rule comes
+    back as an `{"error", "hint"}` dict showing the expected shape, not an
+    exception.
+    """
+    kinds = tuple(edge_kinds) if edge_kinds else ("calls", "inherits")
+    try:
+        violations, total = store.boundary_violations(
+            [tuple(r) for r in rules], edge_kinds=kinds, limit=limit
+        )
+    except ValueError as e:
+        return {
+            "error": f"invalid rules: {e}",
+            "hint": (
+                "each rule is a [from_prefix, forbidden_prefix] pair, e.g. "
+                '[["common/", "platform/"]] = "common/ must not call platform/"'
+            ),
+        }
+
+    def _name(symbol: str) -> str:
+        return symbol if full_symbols else _label(symbol, store.get_node(symbol))
+
+    items: list[dict[str, Any]] = [
+        {
+            "rule": v["rule"],
+            "kind": v["kind"],
+            "src": _name(v["src"]),
+            "dst": _name(v["dst"]),
+            "file": v["file"],
+            "line": _line1(v["line"]),
+        }
+        for v in violations
+    ]
+    return {
+        "rules": [
+            f"{from_prefix} -> {forbidden_prefix}" for from_prefix, forbidden_prefix in rules
+        ],
+        "edge_kinds": list(kinds),
+        "total": total,
+        "truncated": total > len(violations),
+        "note": _BOUNDARY_NOTE,
+        "violations": items,
+    }
+
+
 def explain(
     store: GraphStore,
     symbol: str,
@@ -1512,6 +1588,35 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
             full_symbols=full_symbols,
             include_paths=include_paths,
             exclude_paths=exclude_paths,
+        )
+
+    @mcp.tool()
+    def boundary_violations(
+        rules: list[list[str]],
+        edge_kinds: list[str] | None = None,
+        limit: int = DEFAULT_LIMIT,
+        full_symbols: bool = False,
+    ) -> dict[str, Any]:
+        """Declared-layering conformance check. Takes rules from YOU (the
+        project's intended layering — the graph doesn't know it): each rule is
+        [from_prefix, forbidden_prefix], e.g. rules=[["common/", "platform/"]]
+        = "no symbol defined under common/ may call one defined under
+        platform/". Reports every calls/inherits edge that crosses a rule —
+        each violation IS a real compiler-traced edge, so zero false positives;
+        0 violations is a lower bound (no *statically indexed* edge crosses —
+        runtime dispatch may), never proof the layering holds. Directory
+        membership is the endpoint's own definition file, matched on a
+        path-segment boundary ("common/" matches common/util.cpp, never
+        commons/util.cpp). edge_kinds defaults to ["calls", "inherits"]
+        ("implements" also accepted). `limit` caps the list (default 40):
+        lower it to spend fewer tokens, raise it when `truncated` — `total`
+        always reports the full count."""
+        return _call(
+            boundary_violation_report,
+            rules=rules,
+            edge_kinds=edge_kinds,
+            limit=limit,
+            full_symbols=full_symbols,
         )
 
     @mcp.tool()

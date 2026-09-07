@@ -349,7 +349,10 @@ designing the builder so this isn't a later rewrite:
   (definition + neighbors; pass `--root` to also get a source snippet, omit it
   for coordinates only), `line_span` (definitions ranked by body extent,
   #504-gated), `no_incoming_calls` (zero-caller definitions — a fact, never a
-  "dead" verdict; #504-gated), `status` (source commit + drift check).
+  "dead" verdict; #504-gated), `boundary-violations` (declared-layering
+  conformance — rules supplied per query as `--rule FROM:FORBIDDEN`; every
+  hit is a real edge, zero false positives), `status` (source commit + drift
+  check).
 - MCP server (`cppgraph-mcp`, `src/cppgraph/mcp_server.py`): exposes the same
   queries to an LLM, token-budgeted. FastMCP over stdio; the graph store is
   fixed at launch (`--graph <db>`, optional `--root <checkout>`) so tools never
@@ -362,7 +365,10 @@ designing the builder so this isn't a later rewrite:
    (zero-incoming-calls definitions — a fact, never a "dead" verdict), both
    gated on the store's enclosing-range data (#504) and reporting
    unavailability with the reason on a stock-binary graph,
-   `explain_symbol`, `status`,
+   `boundary_violations` (declared-layering conformance — rules supplied per
+   query by the caller, the graph stores no intended architecture; every hit
+   is a real edge, zero false positives, and 0 hits a lower bound, never a
+   conformance verdict), `explain_symbol`, `status`,
    `visualize`. Each symbol-taking tool accepts a plain
   name as well as an exact SCIP string, through the shared `GraphStore.resolve`
   (also behind the CLI): a unique name resolves, `Class::method` maps to
@@ -391,9 +397,11 @@ designing the builder so this isn't a later rewrite:
     (`exclude_tests`, filtered on the far-end node's definition file, catching
     `~..._Test` teardown sites too). A `Node.file`-prefix predicate
     (`include_paths`/`exclude_paths`, simple prefix match) scopes a query to
-     "my code, not vendored deps" the same way, on `find`/`who_calls`/
-     `what_it_calls`/`find_references`/`impact_of`/`hotspots`/`stats`/
-     `line_span`/`no_incoming_calls`. These filter
+      "my code, not vendored deps" the same way, on `find`/`who_calls`/
+      `what_it_calls`/`find_references`/`impact_of`/`hotspots`/`stats`/
+      `line_span`/`no_incoming_calls`. `boundary_violations` matches its
+      layering-rule prefixes against each endpoint's definition file with the
+      same segment-boundary semantics. These filter
     primitives live in `cppgraph.filters` and drive **both** surfaces — the MCP
     tools and the CLI query commands (`callers`/`callees`/`impact`, with
     `--limit`, `--exclude-tests`/`--no-exclude-tests`, `--hide-trivial`,

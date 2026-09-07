@@ -6,7 +6,29 @@ on-disk store also carries its own `schema_version` for forward-compatibility.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+
+- **`boundary_violations`**: declared-layering conformance check — given rules
+  supplied per-query by the caller (`("common/", "platform/")` = "no symbol
+  defined under `common/` may call one defined under `platform/`"; the graph
+  stores no intended architecture of its own), lists the `calls`/`inherits`
+  edges that cross them. Each reported violation *is* a real compiler-traced
+  edge — zero false positives by construction — and the standing note states
+  the converse as a lower bound (0 violations means no *statically indexed*
+  edge crosses the rules; runtime dispatch — virtual calls, function pointers
+  — can cross a boundary with no static edge), never a proof of conformance.
+  Directory membership is the endpoint's own definition file, matched on a
+  path-segment boundary via the shared `cppgraph.filters.matches_path_prefix`
+  (registered as a SQL function, the same pattern as `hotspots`'
+  `cpg_path_ok`); a symbol with no definition site belongs to no layer. On
+  the CLI (`boundary-violations --rule FROM:FORBIDDEN`, repeatable, plus
+  `--kind`/`--limit`/`--full-symbols`) and as an MCP tool (`rules` as
+  `[from_prefix, forbidden_prefix]` pairs), both backed by the same
+  `GraphStore.boundary_violations`; an edge matching several rules is
+  reported once per rule, each record naming the rule it broke; bounded
+  output (`limit` + `total`); malformed rules raise/`parser.error` on the CLI
+  and come back as an error dict on MCP (a typo must never silently read as
+  "layering holds").
 
 ## [0.2.0] - 2026-09-04
 

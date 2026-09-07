@@ -1072,6 +1072,142 @@ def test_no_incoming_calls_unavailable_returns_nonzero(
 
 
 @pytest.fixture
+def boundary_graph(tmp_path: Path) -> Path:
+    """One legal downward edge (`platform/` may call `common/`) and one that
+    crosses `common/ -> platform/`."""
+    graph = Graph()
+    graph.add_edge("calls", "platform_fn", "common_fn", file="platform/io.cpp", line=1)
+    graph.add_edge("calls", "common_fn", "platform_secret", file="common/util.cpp", line=9)
+    graph.nodes["common_fn"].file = "common/util.cpp"
+    graph.nodes["platform_fn"].file = "platform/io.cpp"
+    graph.nodes["platform_secret"].file = "platform/hidden.cpp"
+    path = tmp_path / "boundary.db"
+    write_sqlite(graph, path)
+    return path
+
+
+def test_boundary_violations_prints_crossing_edge(
+    boundary_graph: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    exit_code = main(
+        ["boundary-violations", "--graph", str(boundary_graph), "--rule", "common/:platform/"]
+    )
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "1 of 1 violation(s) across 1 rule(s)" in out
+    assert "[common/ -> platform/] calls  common_fn -> platform_secret" in out
+    assert "(common/util.cpp:10)" in out
+    # the facts-not-judgments caveat prints with the answer
+    assert "zero false positives" in out
+
+
+def test_boundary_violations_clean_layering_exits_zero(
+    boundary_graph: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    exit_code = main(
+        ["boundary-violations", "--graph", str(boundary_graph), "--rule", "platform/:projects/"]
+    )
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "0 of 0 violation(s)" in out
+    # 0 is a lower bound, never proof of conformance
+    assert "statically indexed" in out
+
+
+def test_boundary_violations_limit_truncates_and_reports_total(
+    boundary_graph: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    exit_code = main(
+        [
+            "boundary-violations",
+            "--graph",
+            str(boundary_graph),
+            "--rule",
+            "common/:platform/",
+            "--limit",
+            "0",
+        ]
+    )
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "0 of 1 violation(s)" in out
+    assert "... and 1 more" in out
+
+
+def test_boundary_violations_rule_flag_is_repeatable(
+    boundary_graph: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    exit_code = main(
+        [
+            "boundary-violations",
+            "--graph",
+            str(boundary_graph),
+            "--rule",
+            "common/:platform/",
+            "--rule",
+            "platform/:projects/",
+        ]
+    )
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "across 2 rule(s)" in out
+    assert "[common/ -> platform/]" in out
+    assert "[platform/ -> projects/]" not in out
+
+
+def test_boundary_violations_kind_restricts_edge_kinds(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    graph = Graph()
+    graph.add_edge("inherits", "CommonWidget", "PlatformBase", file="common/widget.h", line=3)
+    graph.nodes["CommonWidget"].file = "common/widget.h"
+    graph.nodes["PlatformBase"].file = "platform/base.h"
+    path = tmp_path / "inh.db"
+    write_sqlite(graph, path)
+    exit_code = main(
+        [
+            "boundary-violations",
+            "--graph",
+            str(path),
+            "--rule",
+            "common/:platform/",
+            "--kind",
+            "calls",
+        ]
+    )
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "0 of 0 violation(s)" in out
+    exit_code = main(
+        [
+            "boundary-violations",
+            "--graph",
+            str(path),
+            "--rule",
+            "common/:platform/",
+            "--kind",
+            "inherits",
+        ]
+    )
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "1 of 1 violation(s)" in out
+    assert "inherits  CommonWidget -> PlatformBase" in out
+
+
+def test_boundary_violations_rejects_malformed_rule_flag(boundary_graph: Path) -> None:
+    with pytest.raises(SystemExit):  # no FROM:FORBIDDEN colon
+        main(["boundary-violations", "--graph", str(boundary_graph), "--rule", "common"])
+    with pytest.raises(SystemExit):  # from == forbidden (a layer vs itself)
+        main(["boundary-violations", "--graph", str(boundary_graph), "--rule", "common/:common/"])
+
+
+def test_boundary_violations_requires_a_rule(boundary_graph: Path) -> None:
+    with pytest.raises(SystemExit):
+        main(["boundary-violations", "--graph", str(boundary_graph)])
+
+
+@pytest.fixture
 def refs_graph(tmp_path: Path) -> Path:
     graph = Graph()
     graph.add_reference("cxx . . $ mongo/ResumeTokenData#", "a.cpp", 10)
