@@ -31,7 +31,13 @@ from importlib import metadata as importlib_metadata
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from cppgraph.builder import _gc_disabled, build_graph, is_callable_symbol
+from cppgraph.builder import (
+    _gc_disabled,
+    _is_direct_member,
+    build_graph,
+    is_callable_symbol,
+    is_type_symbol,
+)
 from cppgraph.export import is_test_file
 from cppgraph.filters import matches_path_prefix
 from cppgraph.model import Edge, Graph, Node, Reference
@@ -1448,6 +1454,89 @@ class GraphStore:
                 for kind, src, dst, site_path, site_line in rows
             )
         return violations[:limit], len(violations)
+
+    def outline(self, file: str, limit: int = 200) -> tuple[list[Node], int]:
+        """Every symbol *defined* in `file`, sorted by definition line — the
+        file's outline, "what's in this file?" answered without reading it.
+
+        `file` is matched exactly against the store's recorded (relative)
+        path — never a prefix — so an unindexed or misspelled path returns
+        `([], 0)` (the surfaces above this add a note; a bare zero would read
+        as "empty file"). Backslashes are normalized to `/` first (mirroring
+        `filters.matches_path_prefix`), so a path given either separator
+        convention matches a graph indexed with the other. Returns
+        `(nodes, total)` in the usual bounded-output shape: `nodes` is at most
+        `limit`, `total` the full count, so an outline of a huge generated file
+        can't flood a reply.
+        """
+        if limit < 0:
+            raise ValueError(f"limit must be >= 0, got {limit}")
+        file = file.replace("\\", "/")
+        rows = self._con.execute(
+            """
+            SELECT s.symbol, s.display_name, f.path, s.line
+            FROM symbols s JOIN files f ON f.id = s.file_id
+            WHERE f.path = ?
+            ORDER BY s.line, s.symbol
+            """,
+            (file,),
+        ).fetchall()
+        nodes = [Node(symbol=r[0], display_name=r[1] or "", file=r[2], line=r[3]) for r in rows]
+        return nodes[:limit], len(nodes)
+
+    def class_members(self, class_symbol: str, limit: int = 200) -> tuple[list[Node], int] | None:
+        """Every *direct* member declared on `class_symbol` (a class/struct/enum).
+
+        A member's SCIP symbol string starts with the class's own symbol
+        string, which ends in `#` (the type descriptor, `is_type_symbol`):
+        `mongo/Foo#` prefixes the method `mongo/Foo#parse(a1).` and the field
+        `mongo/Foo#count.` but never `mongo/FooBar#x.` (after `Foo` comes `B`,
+        not `#`) — the container nesting the SCIP grammar already encodes, so
+        no new symbol parsing. The class itself is excluded (it equals the
+        prefix, doesn't extend it).
+
+        "Direct" matters because a NESTED class's members also share the outer
+        class's symbol as a *string* prefix: `mongo/Foo#Inner#method().` starts
+        with `mongo/Foo#` too, even though it's declared on `Foo::Inner`, not on
+        `Foo`. `_is_direct_member` (see `builder.py`) tells the two apart using
+        the SCIP descriptor grammar's own terminators, so `class_members(Foo)`
+        excludes `Foo::Inner`'s (and any deeper nesting's) members. A nested
+        type's own symbol — `mongo/Foo#Inner#` — IS one of `Foo`'s direct
+        members (one descriptor, `Inner#`); only what's declared *inside* it is
+        excluded. So for `class Foo { class Inner { class Innermost { void m();
+        }; }; };`: `class_members(Foo)` lists `Foo::Inner`'s own type symbol,
+        but neither `Inner`'s nor `Innermost`'s members; `class_members(Foo::Inner)`
+        lists `Innermost`'s own type symbol and `Inner`'s direct members, but not
+        `Innermost`'s members.
+
+        Returns `None` when `class_symbol` is unknown or not a type — bad
+        input, distinct from the `([], 0)` that is a valid answer for a
+        memberless type. `substr(symbol, 1, ?) = ?` scans `symbols` (a
+        computed prefix can't use `ix_sym`), the same trade `find`'s substring
+        search makes for a rare interactive lookup; the direct-vs-nested
+        filter runs after, in Python, since it isn't expressible as a clean
+        SQLite string comparison.
+        """
+        if limit < 0:
+            raise ValueError(f"limit must be >= 0, got {limit}")
+        if not is_type_symbol(class_symbol) or self._symbol_id(class_symbol) is None:
+            return None
+        prefix_len = len(class_symbol)
+        rows = self._con.execute(
+            """
+            SELECT s.symbol, s.display_name, f.path, s.line
+            FROM symbols s LEFT JOIN files f ON f.id = s.file_id
+            WHERE substr(s.symbol, 1, ?) = ? AND s.symbol <> ?
+            ORDER BY f.path, s.line, s.symbol
+            """,
+            (prefix_len, class_symbol, class_symbol),
+        ).fetchall()
+        members = [
+            Node(symbol=r[0], display_name=r[1] or "", file=r[2], line=r[3])
+            for r in rows
+            if _is_direct_member(r[0][prefix_len:])
+        ]
+        return members[:limit], len(members)
 
     def subgraph(
         self, symbol: str, depth: int = 2, direction: str = "both"

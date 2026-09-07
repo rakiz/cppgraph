@@ -938,6 +938,89 @@ def boundary_violation_report(
     }
 
 
+def file_outline_report(
+    store: GraphStore,
+    file: str,
+    limit: int = DEFAULT_LIMIT,
+    full_symbols: bool = False,
+) -> dict[str, Any]:
+    """The outline of one file: every symbol *defined* in it, sorted by line —
+    "what's in this file?" without reading it. A compact symbol list that
+    replaces a `Read` of the file (the same reflex-replacement
+    `explain_symbol` is for one definition), exact and available on any graph
+    (no #504 needed).
+
+    `file` is the exact path as recorded in the index (relative, e.g.
+    `src/app.cpp`) — not a prefix. `limit` caps the list (default 40); `total`
+    always reports the full count. An empty result carries a `note` (a wrong
+    path is the usual cause — `stats` lists the indexed files), never a bare
+    zero that would read as "empty file".
+    """
+    nodes, total = store.outline(file, limit=limit)
+    result: dict[str, Any] = {
+        "file": file,
+        "total": total,
+        "truncated": total > len(nodes),
+        "definitions": [_node_dict(n, full_symbols) for n in nodes],
+    }
+    if total == 0:
+        result["note"] = (
+            "no symbols defined in this file in the index — the path must match "
+            "the index's recorded relative path exactly (e.g. `src/app.cpp`, not "
+            "absolute, not a prefix); `stats` lists the indexed files"
+        )
+    return result
+
+
+def class_members_report(
+    store: GraphStore,
+    symbol: str,
+    limit: int = DEFAULT_LIMIT,
+    full_symbols: bool = False,
+) -> dict[str, Any]:
+    """Every member declared on a class/struct — methods, fields, nested
+    types — the class's real member list, replacing a header `grep`. Exact by
+    construction: a member's SCIP symbol string starts with its class's own
+    (container nesting), so the list is the compiler's, not a text match.
+
+    Named `class_members`, not `public_api`, because SCIP doesn't encode C++
+    visibility — this lists members that *exist* (a fact), not a
+    public/private claim. `symbol` is a name or an exact SCIP string (a unique
+    name resolves automatically; note a bare class name typically also matches
+    its own members, so the exact `#`-terminated string is the reliable input).
+    Unknown symbol → the shared error/candidates convention; a known non-type
+    symbol → an error dict — bad input, never an empty list that would read
+    as "memberless class". `limit` caps the list (default 40); `total` always
+    reports the full count.
+    """
+    symbol, _alt = _resolve(store, symbol)
+    if _alt is not None:
+        return _alt
+    result = store.class_members(symbol, limit=limit)
+    if result is None:
+        return {
+            "error": (
+                f"{symbol} is not a type (class/struct/enum): `class_members` lists "
+                "the members declared on a class — use `find` to locate the class "
+                "symbol (it ends in `#`)"
+            ),
+        }
+    members, total = result
+    out: dict[str, Any] = {
+        "symbol": symbol,
+        "total": total,
+        "truncated": total > len(members),
+        "members": [_node_dict(n, full_symbols) for n in members],
+    }
+    if total == 0:
+        out["note"] = (
+            "no members recorded on this type — it may be genuinely memberless, "
+            "defined outside the indexed scope, or only forward-declared; "
+            "`find_references` shows where it is used"
+        )
+    return out
+
+
 def explain(
     store: GraphStore,
     symbol: str,
@@ -1618,6 +1701,40 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
             limit=limit,
             full_symbols=full_symbols,
         )
+
+    @mcp.tool()
+    def outline(
+        file: str, limit: int = DEFAULT_LIMIT, full_symbols: bool = False
+    ) -> dict[str, Any]:
+        """Use this instead of Read/opening a file to see what's in it: the
+        outline of one file — every symbol defined in it, sorted by line. A
+        compact symbol list that replaces reading a 1400-line file, exact and
+        available on any graph. `file` is the exact path as recorded in the
+        index (relative, e.g. `src/app.cpp`, not a prefix) — `stats` lists the
+        indexed files; an empty result carries a note explaining that, never a
+        bare zero. Compact `name` + `file:line` by default (`full_symbols=True`
+        for raw SCIP). `limit` caps the list (default 40): raise it when
+        `truncated` — `total` always reports the full count."""
+        return _call(file_outline_report, file, limit=limit, full_symbols=full_symbols)
+
+    @mcp.tool()
+    def class_members(
+        symbol: str,
+        limit: int = DEFAULT_LIMIT,
+        full_symbols: bool = False,
+    ) -> dict[str, Any]:
+        """Every member declared on a class/struct — methods, fields, nested
+        types — the class's real member list, replacing a header grep. `symbol`
+        is a name or an exact SCIP string (a unique name resolves automatically,
+        an ambiguous one returns candidates — a bare class name typically also
+        matches its own members, so pick the `#`-terminated entry); an unknown
+        or non-type symbol comes back as an error dict. Named `class_members`,
+        not `public_api`, because SCIP doesn't encode C++ visibility — members
+        that *exist* (a fact), not a public/private claim. Compact `name` +
+        `file:line` by default (`full_symbols=True` for raw SCIP). `limit` caps
+        the list (default 40): raise it when `truncated` — `total` always
+        reports the full count."""
+        return _call(class_members_report, symbol, limit=limit, full_symbols=full_symbols)
 
     @mcp.tool()
     def explain_symbol(

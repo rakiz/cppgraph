@@ -582,6 +582,192 @@ def test_boundary_violations_tool_registered_and_routes_through_call(
     assert result["violations"][0]["dst"] == "platform_secret"
 
 
+# --- outline / class_members -------------------------------------------------
+
+FOO_TYPE = "cxx . . $ mongo/Foo#"
+FOO_PARSE = "cxx . . $ mongo/Foo#parse(a1)."
+FOO_COUNT = "cxx . . $ mongo/Foo#count."
+FOO_INNER = "cxx . . $ mongo/Foo#Inner#"
+MAKE_FOO = "cxx . . $ mongo/makeFoo(a2)."
+FOOBAR = "cxx . . $ mongo/FooBar#"
+FOOBAR_PARSE = "cxx . . $ mongo/FooBar#parse(a3)."
+
+
+@pytest.fixture
+def members_store(tmp_path: Path) -> GraphStore:
+    """One file (`mongo/foo.h`) holding class `Foo` (a method, a field, a
+    nested type), a free function, and the sibling class `FooBar` whose
+    members must not leak into `Foo`'s."""
+    graph = Graph()
+    for symbol, line in (
+        (MAKE_FOO, 30),
+        (FOOBAR_PARSE, 41),
+        (FOO_TYPE, 10),
+        (FOO_INNER, 13),
+        (FOOBAR, 40),
+        (FOO_COUNT, 12),
+        (FOO_PARSE, 11),
+    ):
+        graph.add_node(symbol)
+        graph.nodes[symbol].file = "mongo/foo.h"
+        graph.nodes[symbol].line = line
+    path = tmp_path / "members.db"
+    write_sqlite(graph, path)
+    return GraphStore(path)
+
+
+def test_file_outline_report_lists_definitions_in_line_order(
+    members_store: GraphStore,
+) -> None:
+    result = mcp_server.file_outline_report(members_store, "mongo/foo.h")
+    assert result["total"] == 7
+    assert result["truncated"] is False
+    assert [d["line"] for d in result["definitions"]] == [11, 12, 13, 14, 31, 41, 42]
+    assert result["definitions"][0]["name"] == "mongo/Foo#"  # label from the SCIP string
+    assert result["definitions"][0]["file"] == "mongo/foo.h"
+
+
+def test_file_outline_report_unknown_file_is_a_note_not_a_bare_zero(
+    members_store: GraphStore,
+) -> None:
+    """A wrong path is the usual cause of an empty outline (exact match, the
+    index's relative paths) — the response says so instead of a bare 0."""
+    result = mcp_server.file_outline_report(members_store, "src/nope.cpp")
+    assert result["total"] == 0
+    assert result["definitions"] == []
+    assert "exactly" in result["note"]
+    assert "stats" in result["note"]
+
+
+def test_file_outline_report_limit_truncates(members_store: GraphStore) -> None:
+    result = mcp_server.file_outline_report(members_store, "mongo/foo.h", limit=2)
+    assert result["total"] == 7
+    assert len(result["definitions"]) == 2
+    assert result["truncated"] is True
+
+
+def test_file_outline_report_matches_store_directly(members_store: GraphStore) -> None:
+    """Parity check, same shape as the other report/store pairs: the MCP
+    outline is exactly `store.outline`, not a reimplementation (line is
+    1-indexed here, 0-indexed in the store, like every other tool)."""
+    result = mcp_server.file_outline_report(members_store, "mongo/foo.h", full_symbols=True)
+    expected, expected_total = members_store.outline("mongo/foo.h")
+    assert result["total"] == expected_total
+    assert [(d["symbol"], d["file"], d["line"]) for d in result["definitions"]] == [
+        (n.symbol, n.file, n.line + 1) for n in expected
+    ]
+
+
+def test_class_members_report_lists_methods_fields_and_nested_types(
+    members_store: GraphStore,
+) -> None:
+    result = mcp_server.class_members_report(members_store, FOO_TYPE)
+    assert result["total"] == 3
+    assert result["truncated"] is False
+    assert [d["name"] for d in result["members"]] == [
+        "mongo/Foo#parse(a1).",
+        "mongo/Foo#count.",
+        "mongo/Foo#Inner#",
+    ]
+
+
+def test_class_members_report_does_not_confuse_foo_with_foobar(
+    members_store: GraphStore,
+) -> None:
+    result = mcp_server.class_members_report(members_store, FOO_TYPE, full_symbols=True)
+    symbols = [d["symbol"] for d in result["members"]]
+    assert symbols == [FOO_PARSE, FOO_COUNT, FOO_INNER]
+    assert FOOBAR_PARSE not in symbols
+
+
+def test_class_members_report_unknown_symbol_is_error_dict(members_store: GraphStore) -> None:
+    """The shared unknown-symbol convention (same as `who_calls`/`references`):
+    an error dict pointing at `find`, never a guessed answer."""
+    result = mcp_server.class_members_report(members_store, "cxx . . $ mongo/Nope#")
+    assert "error" in result
+    assert "find" in result["error"]
+
+
+def test_class_members_report_ambiguous_name_lists_candidates(
+    members_store: GraphStore,
+) -> None:
+    """`Foo` matches the class *and* its own members (their SCIP strings all
+    contain `Foo`), plus `FooBar`'s — the no-guessing convention returns the
+    candidate list; the caller re-picks the `#`-terminated entry."""
+    result = mcp_server.class_members_report(members_store, "Foo")
+    assert "ambiguous" in result
+    assert result["total"] == 7
+    assert FOO_TYPE in [c["symbol"] for c in result["candidates"]]
+
+
+def test_class_members_report_non_type_is_error_dict(members_store: GraphStore) -> None:
+    """A known non-type symbol (a method, a free function) is bad input, not
+    an empty member list that would read as 'memberless class'."""
+    result = mcp_server.class_members_report(members_store, "makeFoo")
+    assert "error" in result
+    assert "not a type" in result["error"]
+    result = mcp_server.class_members_report(members_store, FOO_PARSE)
+    assert "error" in result
+
+
+def test_class_members_report_limit_truncates(members_store: GraphStore) -> None:
+    result = mcp_server.class_members_report(members_store, FOO_TYPE, limit=1)
+    assert result["total"] == 3
+    assert len(result["members"]) == 1
+    assert result["truncated"] is True
+
+
+def test_class_members_report_matches_store_directly(members_store: GraphStore) -> None:
+    result = mcp_server.class_members_report(members_store, FOO_TYPE, full_symbols=True)
+    expected, expected_total = members_store.class_members(FOO_TYPE)
+    assert result["total"] == expected_total
+    assert [(d["symbol"], d["file"], d["line"]) for d in result["members"]] == [
+        (m.symbol, m.file, m.line + 1) for m in expected
+    ]
+
+
+def test_outline_tool_registered_and_routes_through_call(tmp_path: Path) -> None:
+    """The `@mcp.tool()` wrapper exists and delegates to
+    `file_outline_report` (the pure function is covered directly; this covers
+    the wiring)."""
+    from cppgraph.mcp_server import build_server
+
+    graph = Graph()
+    graph.add_node("cxx . . $ src/app#main(m1).")
+    graph.nodes["cxx . . $ src/app#main(m1)."].file = "src/app.cpp"
+    graph.nodes["cxx . . $ src/app#main(m1)."].line = 3
+    path = tmp_path / "g.db"
+    write_sqlite(graph, path)
+    server = build_server(str(path))
+    tool = server._tool_manager._tools["outline"].fn
+    result = tool(file="src/app.cpp")
+    assert result["total"] == 1
+    assert result["definitions"][0]["name"] == "src/app#main(m1)."
+
+
+def test_class_members_tool_registered_and_routes_through_call(tmp_path: Path) -> None:
+    """The `@mcp.tool()` wrapper exists and delegates to
+    `class_members_report` (the pure function is covered directly; this
+    covers the wiring)."""
+    from cppgraph.mcp_server import build_server
+
+    graph = Graph()
+    for symbol, line in ((FOO_TYPE, 10), (FOO_PARSE, 11), (FOO_COUNT, 12)):
+        graph.add_node(symbol)
+        graph.nodes[symbol].file = "mongo/foo.h"
+        graph.nodes[symbol].line = line
+    path = tmp_path / "g.db"
+    write_sqlite(graph, path)
+    server = build_server(str(path))
+    tool = server._tool_manager._tools["class_members"].fn
+    result = tool(symbol=FOO_TYPE)
+    assert result["total"] == 2
+    assert [d["name"] for d in result["members"]] == [
+        "mongo/Foo#parse(a1).",
+        "mongo/Foo#count.",
+    ]
+
+
 BASE = "cxx . . $ mongo/Base#"
 DERIVED = "cxx . . $ mongo/Derived#"
 LEAF = "cxx . . $ mongo/Leaf#"

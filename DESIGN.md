@@ -351,8 +351,12 @@ designing the builder so this isn't a later rewrite:
   #504-gated), `no_incoming_calls` (zero-caller definitions — a fact, never a
   "dead" verdict; #504-gated), `boundary-violations` (declared-layering
   conformance — rules supplied per query as `--rule FROM:FORBIDDEN`; every
-  hit is a real edge, zero false positives), `status` (source commit + drift
-  check).
+  hit is a real edge, zero false positives), `outline <file>` (every symbol
+  defined in a file, sorted by line — the file's contents as a compact symbol
+  list, replacing a `Read`), `class-members <symbol>` (members declared on a
+  class/struct — methods, fields, nested types — by SCIP container nesting:
+  a member's symbol string starts with its class's, so the boundary is exact
+  and needs no #504), `status` (source commit + drift check).
 - MCP server (`cppgraph-mcp`, `src/cppgraph/mcp_server.py`): exposes the same
   queries to an LLM, token-budgeted. FastMCP over stdio; the graph store is
   fixed at launch (`--graph <db>`, optional `--root <checkout>`) so tools never
@@ -368,8 +372,12 @@ designing the builder so this isn't a later rewrite:
    `boundary_violations` (declared-layering conformance — rules supplied per
    query by the caller, the graph stores no intended architecture; every hit
    is a real edge, zero false positives, and 0 hits a lower bound, never a
-   conformance verdict), `explain_symbol`, `status`,
-   `visualize`. Each symbol-taking tool accepts a plain
+    conformance verdict), `outline` (every symbol defined in one file, sorted
+    by line — a compact symbol list that replaces reading the file) and
+    `class_members` (every member declared on a class/struct, by the same
+    SCIP container nesting — members that *exist*, a fact, since SCIP encodes
+    no visibility), `explain_symbol`, `status`,
+    `visualize`. Each symbol-taking tool accepts a plain
   name as well as an exact SCIP string, through the shared `GraphStore.resolve`
   (also behind the CLI): a unique name resolves, `Class::method` maps to
   `Class#method`, an ambiguous name returns candidates, and no symbol is guessed.

@@ -801,6 +801,48 @@ def main(argv: list[str] | None = None) -> int:
         help="print the raw SCIP symbol strings instead of readable labels",
     )
 
+    p_outline = sub.add_parser(
+        "outline",
+        help="the outline of one file: every symbol defined in it, sorted by line",
+    )
+    p_outline.add_argument(
+        "--graph",
+        required=False,
+        default=None,
+        help="graph store path (default: auto-discovered from the cwd's .cppgraph/)",
+    )
+    p_outline.add_argument(
+        "file",
+        help="exact file path as recorded in the index (relative, e.g. src/app.cpp)",
+    )
+    p_outline.add_argument("--limit", type=int, default=200, help="max rows to show (default: 200)")
+    p_outline.add_argument(
+        "--full-symbols",
+        action="store_true",
+        help="print the raw SCIP symbol strings instead of readable labels",
+    )
+
+    p_members = sub.add_parser(
+        "class-members",
+        help="members declared on a class/struct (methods, fields, nested types), by line",
+    )
+    p_members.add_argument(
+        "--graph",
+        required=False,
+        default=None,
+        help="graph store path (default: auto-discovered from the cwd's .cppgraph/)",
+    )
+    p_members.add_argument(
+        "symbol",
+        help="class name or exact SCIP symbol (must be a type; it ends in '#')",
+    )
+    p_members.add_argument("--limit", type=int, default=200, help="max rows to show (default: 200)")
+    p_members.add_argument(
+        "--full-symbols",
+        action="store_true",
+        help="print the raw SCIP symbol strings instead of readable labels",
+    )
+
     p_status = sub.add_parser(
         "status",
         help="show the graph's source commit and, with --root, whether the checkout has drifted",
@@ -1460,6 +1502,46 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  [{v['rule']}] {v['kind']}  {src} -> {dst}  ({site})")
         if total > len(violations):
             print(f"  ... and {total - len(violations)} more (raise --limit to see them)")
+        return 0
+
+    if args.command == "outline":
+        store = _open_store_checked(args, parser)
+        nodes, total = store.outline(args.file, limit=args.limit)
+        print(f"[cppgraph] {len(nodes)} of {total} definition(s) in {args.file}, by line")
+        for node in nodes:
+            _print_node(node, full_symbols=args.full_symbols)
+        if total == 0:
+            print(
+                "  note: no symbols defined in this file in the index — the path must "
+                "match the index's recorded relative path exactly (not a prefix, not "
+                "absolute); `cppgraph stats` lists the indexed files"
+            )
+        if total > len(nodes):
+            print(f"  ... and {total - len(nodes)} more (raise --limit to see them)")
+        return 0
+
+    if args.command == "class-members":
+        store = _open_store_checked(args, parser)
+        args.symbol = _resolve_symbol(store, args.symbol, parser)
+        result = store.class_members(args.symbol, limit=args.limit)
+        if result is None:
+            parser.error(
+                f"{args.symbol} is not a type (class/struct/enum) — class-members lists "
+                "the members declared on a class (use `cppgraph find` to locate the "
+                "class symbol; it ends in '#')"
+            )
+        members, total = result
+        print(f"[cppgraph] {len(members)} of {total} member(s) of {args.symbol}, by line")
+        for node in members:
+            _print_node(node, full_symbols=args.full_symbols)
+        if total == 0:
+            print(
+                "  note: no members recorded on this type — it may be genuinely "
+                "memberless, defined outside the indexed scope, or only "
+                "forward-declared; `cppgraph refs` shows where it is used"
+            )
+        if total > len(members):
+            print(f"  ... and {total - len(members)} more (raise --limit to see them)")
         return 0
 
     if args.command == "status":

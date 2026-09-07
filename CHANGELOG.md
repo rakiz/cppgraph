@@ -8,6 +8,28 @@ on-disk store also carries its own `schema_version` for forward-compatibility.
 
 ### Added
 
+- **`outline` / `class_members`**: list definitions by container — two facets
+  of one primitive, both exact and available on any graph (no #504 needed),
+  no judgment, structure not interpretation. `outline(file)` is the outline
+  of a single file: every symbol *defined* there (`Node.file == path`),
+  sorted by line — a compact symbol list that replaces a `Read` of a
+  1400-line file, the tool that beats the Read/grep reflex on its own turf.
+  `class_members(symbol)` is every member declared on a class/struct —
+  methods, fields, nested types — found by SCIP container nesting: a member's
+  symbol string starts with its class's own symbol string, which ends in `#`,
+  so the boundary is exact (`mongo/Foo#` prefixes `mongo/Foo#parse(a1).`,
+  never `mongo/FooBar#x.`) and no new symbol parsing is involved. Named
+  `class_members`, not `public_api`, because SCIP doesn't encode C++
+  visibility — members that *exist* (a fact), not a public/private claim.
+  On the CLI (`outline <file>`, `class-members <symbol>`, both with
+  `--limit`/`--full-symbols`) and as MCP tools, both backed by the same
+  `GraphStore.outline`/`GraphStore.class_members`; bounded output (`limit` +
+  `total`); `outline`'s path match is exact (an empty result carries a note
+  pointing at `stats`, not a bare zero); `class_members` on an unknown symbol
+  follows the shared resolution convention (error dict / candidates, never a
+  guess) and on a known non-type symbol returns an error dict — bad input,
+  never an empty list that would read as "no members".
+
 - **`boundary_violations`**: declared-layering conformance check — given rules
   supplied per-query by the caller (`("common/", "platform/")` = "no symbol
   defined under `common/` may call one defined under `platform/`"; the graph

@@ -72,17 +72,6 @@ active list. Design detail is in `DESIGN.md`, shipped features in
   code" — so it should land as a *mode* of `hotspots` once the path-prefix predicate
   exists, not a standalone tool. Depends on that primitive arriving first; build it
   after.
-- **`outline` / `class_members` — list definitions by container (class or file).**
-  Two facets of one primitive, both exact and available today (no #504), no judgment —
-  structure, not interpretation: (a) by class, symbols whose SCIP container descriptor
-  is `Class#…` — the members declared on a class; (b) by file, nodes with
-  `Node.file == path` sorted by `Node.line` — the file outline. From real usage this is
-  the tool that beats the `Read`/`grep` reflex, because it wins on the reflex's own turf:
-  it replaces a `Read` of a 1400-line file with a ~50-token symbol list, or a header
-  `grep` with the class's real member list. Distinct from `api_surface` (members *used*
-  from outside) — this lists members that *exist*. Naming per facts-not-judgments: SCIP
-  doesn't encode visibility, so it's `class_members` (a fact), not `public_api` (a claim
-  we can't back).
 - **Typed-by edges via `Relationship.is_type_definition`.** The builder reads only
   `is_implementation` (inheritance/override); `is_type_definition` gives the exact
   variable/field → its-type relationship, unused today. Promote it to a traversable edge

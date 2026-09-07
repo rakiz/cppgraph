@@ -513,6 +513,178 @@ def test_boundary_violations_rejects_bad_input(tmp_path: Path) -> None:
         store.boundary_violations([("common/", "platform/")], edge_kinds=("telepathy",))
 
 
+# --- outline / class_members -------------------------------------------------
+
+FOO = "cxx . . $ mongo/Foo#"
+FOO_PARSE = "cxx . . $ mongo/Foo#parse(a1)."  # method
+FOO_COUNT = "cxx . . $ mongo/Foo#count."  # field (a term descriptor)
+FOO_INNER = "cxx . . $ mongo/Foo#Inner#"  # nested type
+MAKE_FOO = "cxx . . $ mongo/makeFoo(a2)."  # free function in the same file
+FOOBAR = "cxx . . $ mongo/FooBar#"
+FOOBAR_PARSE = "cxx . . $ mongo/FooBar#parse(a3)."
+INNER_METHOD = "cxx . . $ mongo/Foo#Inner#method()."  # Inner's own method (1 level nested)
+INNER_INNERMOST = "cxx . . $ mongo/Foo#Inner#Innermost#"  # doubly-nested type's own symbol
+INNERMOST_METHOD = "cxx . . $ mongo/Foo#Inner#Innermost#method()."  # doubly-nested method
+
+
+def _container_graph() -> Graph:
+    """One file (`mongo/foo.h`) holding class `Foo` (a method, a field, a
+    nested type), a free function, and the sibling class `FooBar` whose
+    members must not leak into `Foo`'s. Added out of line order so the
+    store's ORDER BY line is actually exercised."""
+    graph = Graph()
+    for symbol, line in (
+        (MAKE_FOO, 30),
+        (FOOBAR_PARSE, 41),
+        (FOO, 10),
+        (FOO_INNER, 13),
+        (FOOBAR, 40),
+        (FOO_COUNT, 12),
+        (FOO_PARSE, 11),
+    ):
+        graph.add_node(symbol)
+        graph.nodes[symbol].file = "mongo/foo.h"
+        graph.nodes[symbol].line = line
+    return graph
+
+
+def test_outline_lists_definitions_in_line_order(tmp_path: Path) -> None:
+    store = _store(tmp_path, _container_graph())
+    nodes, total = store.outline("mongo/foo.h")
+    assert total == 7
+    assert [n.line for n in nodes] == [10, 11, 12, 13, 30, 40, 41]
+    assert nodes[0].symbol == FOO
+    assert nodes[0].file == "mongo/foo.h"
+
+
+def test_outline_exact_path_match_not_prefix(tmp_path: Path) -> None:
+    """The file argument is an exact path match, never a prefix: a misspelled
+    or unindexed path is an empty outline, not a fuzzy guess."""
+    store = _store(tmp_path, _container_graph())
+    assert store.outline("mongo/foo") == ([], 0)
+    assert store.outline("mongo/other.cpp") == ([], 0)
+
+
+def test_outline_limit_truncates_but_total_is_full_count(tmp_path: Path) -> None:
+    store = _store(tmp_path, _container_graph())
+    nodes, total = store.outline("mongo/foo.h", limit=3)
+    assert total == 7
+    assert [n.line for n in nodes] == [10, 11, 12]
+
+
+def test_outline_rejects_negative_limit(tmp_path: Path) -> None:
+    store = _store(tmp_path, _container_graph())
+    with pytest.raises(ValueError):
+        store.outline("mongo/foo.h", limit=-1)
+
+
+def test_outline_normalizes_backslashes_in_the_lookup_path(tmp_path: Path) -> None:
+    """A path given with Windows-style separators must find the same file as
+    one given with `/`, matching `filters.matches_path_prefix`'s normalization."""
+    store = _store(tmp_path, _container_graph())
+    nodes, total = store.outline("mongo\\foo.h")
+    assert total == 7
+    assert nodes[0].symbol == FOO
+
+
+def test_class_members_lists_methods_fields_and_nested_types(tmp_path: Path) -> None:
+    """Members are the symbols whose SCIP string starts with the class's own
+    (container nesting): method, field, nested type — sorted by line, and the
+    class itself is never its own member."""
+    store = _store(tmp_path, _container_graph())
+    members, total = store.class_members(FOO)
+    assert [m.symbol for m in members] == [FOO_PARSE, FOO_COUNT, FOO_INNER]
+    assert total == 3
+    assert all(m.file == "mongo/foo.h" for m in members)
+
+
+def test_class_members_does_not_confuse_foo_with_foobar(tmp_path: Path) -> None:
+    """The container boundary is the class's own `#` descriptor: `mongo/Foo#`
+    prefixes `mongo/Foo#parse(...)` but never `mongo/FooBar#parse(...)` (after
+    `Foo` comes `B`, not `#`) — and symmetrically for `FooBar`."""
+    store = _store(tmp_path, _container_graph())
+    foo_members, _ = store.class_members(FOO)
+    assert FOOBAR_PARSE not in [m.symbol for m in foo_members]
+    foobar_members, foobar_total = store.class_members(FOOBAR)
+    assert [m.symbol for m in foobar_members] == [FOOBAR_PARSE]
+    assert foobar_total == 1
+    assert FOO_PARSE not in [m.symbol for m in foobar_members]
+
+
+def test_class_members_unknown_symbol_returns_none(tmp_path: Path) -> None:
+    """Unknown symbol is bad input (None), not an empty list that would read
+    as 'a class with no members'."""
+    store = _store(tmp_path, _container_graph())
+    assert store.class_members("cxx . . $ mongo/Nope#") is None
+
+
+def test_class_members_non_type_symbol_returns_none(tmp_path: Path) -> None:
+    """A method or a free function is not a container: None (bad input), not
+    an empty member list."""
+    store = _store(tmp_path, _container_graph())
+    assert store.class_members(FOO_PARSE) is None
+    assert store.class_members(MAKE_FOO) is None
+
+
+def test_class_members_limit_truncates_but_total_is_full_count(tmp_path: Path) -> None:
+    store = _store(tmp_path, _container_graph())
+    members, total = store.class_members(FOO, limit=1)
+    assert total == 3
+    assert [m.symbol for m in members] == [FOO_PARSE]
+
+
+def test_class_members_rejects_negative_limit(tmp_path: Path) -> None:
+    store = _store(tmp_path, _container_graph())
+    with pytest.raises(ValueError):
+        store.class_members(FOO, limit=-1)
+
+
+def _nested_container_graph() -> Graph:
+    """`Foo` contains `Inner` (one level), which contains `Innermost` (two
+    levels) — pins the direct-member rule against 3 levels of nesting."""
+    graph = _container_graph()
+    for symbol, line in (
+        (INNER_METHOD, 14),
+        (INNER_INNERMOST, 15),
+        (INNERMOST_METHOD, 16),
+    ):
+        graph.add_node(symbol)
+        graph.nodes[symbol].file = "mongo/foo.h"
+        graph.nodes[symbol].line = line
+    return graph
+
+
+def test_class_members_excludes_nested_class_members_but_includes_its_own_symbol(
+    tmp_path: Path,
+) -> None:
+    """`class_members(Foo)` must not leak `Foo::Inner`'s or
+    `Foo::Inner::Innermost`'s own members (the bug), but DOES include
+    `Inner`'s own type symbol as one of `Foo`'s direct members (the documented
+    choice: a nested type's symbol is a direct member of its enclosing class;
+    what's declared inside it is not)."""
+    store = _store(tmp_path, _nested_container_graph())
+    members, total = store.class_members(FOO)
+    symbols = [m.symbol for m in members]
+    assert symbols == [FOO_PARSE, FOO_COUNT, FOO_INNER]
+    assert total == 3
+    assert INNER_METHOD not in symbols
+    assert INNER_INNERMOST not in symbols
+    assert INNERMOST_METHOD not in symbols
+
+
+def test_class_members_of_singly_nested_class_excludes_doubly_nested_members(
+    tmp_path: Path,
+) -> None:
+    """`class_members(Foo::Inner)` lists `Inner`'s own direct members —
+    including `Innermost`'s own type symbol — but not `Innermost`'s members."""
+    store = _store(tmp_path, _nested_container_graph())
+    members, total = store.class_members(FOO_INNER)
+    symbols = [m.symbol for m in members]
+    assert symbols == [INNER_METHOD, INNER_INNERMOST]
+    assert total == 2
+    assert INNERMOST_METHOD not in symbols
+
+
 # --- line_span / no_incoming_calls (enclosing-range gated) -------------------
 
 BIG = "cxx . . $ app/big(b1)."

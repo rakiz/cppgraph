@@ -1207,6 +1207,133 @@ def test_boundary_violations_requires_a_rule(boundary_graph: Path) -> None:
         main(["boundary-violations", "--graph", str(boundary_graph)])
 
 
+# --- outline / class-members -------------------------------------------------
+
+FOO = "cxx . . $ mongo/Foo#"
+FOO_PARSE = "cxx . . $ mongo/Foo#parse(a1)."
+FOO_COUNT = "cxx . . $ mongo/Foo#count."
+FOO_INNER = "cxx . . $ mongo/Foo#Inner#"
+MAKE_FOO = "cxx . . $ mongo/makeFoo(a2)."
+FOOBAR = "cxx . . $ mongo/FooBar#"
+FOOBAR_PARSE = "cxx . . $ mongo/FooBar#parse(a3)."
+
+
+@pytest.fixture
+def container_graph(tmp_path: Path) -> Path:
+    """One file (`mongo/foo.h`) holding class `Foo` (a method, a field, a
+    nested type), a free function, and the sibling class `FooBar` whose
+    members must not leak into `Foo`'s."""
+    graph = Graph()
+    for symbol, line in (
+        (MAKE_FOO, 30),
+        (FOOBAR_PARSE, 41),
+        (FOO, 10),
+        (FOO_INNER, 13),
+        (FOOBAR, 40),
+        (FOO_COUNT, 12),
+        (FOO_PARSE, 11),
+    ):
+        graph.add_node(symbol)
+        graph.nodes[symbol].file = "mongo/foo.h"
+        graph.nodes[symbol].line = line
+    path = tmp_path / "container.db"
+    write_sqlite(graph, path)
+    return path
+
+
+def test_outline_prints_definitions_in_line_order(
+    container_graph: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    exit_code = main(["outline", "--graph", str(container_graph), "mongo/foo.h"])
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "7 of 7 definition(s) in mongo/foo.h, by line" in out
+    assert "mongo/Foo#" in out
+    assert "(mongo/foo.h:11)" in out  # first definition, 0-indexed 10 -> 1-indexed
+
+
+def test_outline_unknown_file_prints_note_not_bare_zero(
+    container_graph: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    exit_code = main(["outline", "--graph", str(container_graph), "mongo/foo"])
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "0 of 0 definition(s)" in out
+    assert "exactly" in out
+
+
+def test_outline_limit_truncates_and_reports_total(
+    container_graph: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    exit_code = main(["outline", "--graph", str(container_graph), "mongo/foo.h", "--limit", "2"])
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "2 of 7 definition(s)" in out
+    assert "... and 5 more" in out
+
+
+def test_class_members_prints_members(
+    container_graph: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    exit_code = main(["class-members", "--graph", str(container_graph), FOO])
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "3 of 3 member(s) of cxx . . $ mongo/Foo#" in out
+    assert "mongo/Foo#parse(a1)." in out  # readable label by default
+    assert "mongo/FooBar#parse(a3)." not in out  # FooBar's members don't leak
+
+
+def test_class_members_limit_truncates_and_reports_total(
+    container_graph: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    exit_code = main(["class-members", "--graph", str(container_graph), FOO, "--limit", "1"])
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "1 of 3 member(s)" in out
+    assert "... and 2 more" in out
+
+
+def test_class_members_unknown_symbol_errors(container_graph: Path) -> None:
+    with pytest.raises(SystemExit):
+        main(["class-members", "--graph", str(container_graph), "cxx . . $ mongo/Nope#"])
+
+
+def test_class_members_ambiguous_name_lists_candidates_and_errors(
+    container_graph: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`Foo` matches the class and its own members: candidates are listed,
+    none is guessed (the shared `_resolve_symbol` behaviour)."""
+    with pytest.raises(SystemExit):
+        main(["class-members", "--graph", str(container_graph), "Foo"])
+    err = capsys.readouterr().err
+    assert "ambiguous" in err
+
+
+def test_class_members_non_type_symbol_errors(container_graph: Path) -> None:
+    """A known non-type symbol is bad input: parser.error, not an empty list."""
+    with pytest.raises(SystemExit):
+        main(["class-members", "--graph", str(container_graph), MAKE_FOO])
+
+
+def test_class_members_zero_members_prints_note(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A memberless (but known) type prints an explanatory note, not a bare
+    zero — mirrors the MCP `class_members` tool's note and `outline`'s CLI
+    zero-result note."""
+    graph = Graph()
+    graph.add_node("cxx . . $ mongo/Empty#")
+    graph.nodes["cxx . . $ mongo/Empty#"].file = "mongo/empty.h"
+    graph.nodes["cxx . . $ mongo/Empty#"].line = 5
+    path = tmp_path / "empty.db"
+    write_sqlite(graph, path)
+    exit_code = main(["class-members", "--graph", str(path), "cxx . . $ mongo/Empty#"])
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "0 of 0 member(s)" in out
+    assert "no members recorded on this type" in out
+
+
 @pytest.fixture
 def refs_graph(tmp_path: Path) -> Path:
     graph = Graph()

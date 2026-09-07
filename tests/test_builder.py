@@ -7,7 +7,7 @@ the attribution logic itself, independent of scip-clang's specific quirks
 
 from __future__ import annotations
 
-from cppgraph.builder import build_graph, is_callable_symbol
+from cppgraph.builder import _is_direct_member, build_graph, is_callable_symbol
 from cppgraph.proto import scip_pb2
 
 DEFINITION = scip_pb2.SymbolRole.Definition
@@ -24,6 +24,31 @@ def test_is_callable_symbol_uses_scip_method_descriptor_suffix() -> None:
     assert not is_callable_symbol("cxx . . $ mongo/Foo#field.")
     assert not is_callable_symbol("cxx . . $ mongo/Foo#")
     assert not is_callable_symbol("cxx . . $ mongo/namespace/")
+
+
+def test_is_direct_member_one_descriptor_of_each_kind() -> None:
+    """A remainder that is exactly one descriptor (method, field/term, or
+    nested type) is a direct member."""
+    assert _is_direct_member("parse(a1).")  # method
+    assert _is_direct_member("count.")  # field / term
+    assert _is_direct_member("Inner#")  # nested type's own symbol
+    assert _is_direct_member("ns/")  # namespace
+
+
+def test_is_direct_member_rejects_nested_container_members() -> None:
+    """A remainder with a container boundary before its own terminator belongs
+    to something nested inside the class, not the class itself — the bug this
+    helper fixes (`class_members` used to leak these)."""
+    assert not _is_direct_member("Inner#field.")  # Inner's field, not Foo's
+    assert not _is_direct_member("Inner#method().")  # Inner's method
+    assert not _is_direct_member("Inner#Innermost#method().")  # two levels down
+    assert not _is_direct_member("Inner#Innermost#")  # Innermost's own symbol,
+    # still nested one level too deep from Foo's perspective
+
+
+def test_is_direct_member_edge_cases() -> None:
+    assert not _is_direct_member("")  # nothing left after stripping the prefix
+    assert not _is_direct_member("garbage")  # no recognized terminator at all
 
 
 def test_over_capture_two_distinct_makeresumetoken_symbols() -> None:

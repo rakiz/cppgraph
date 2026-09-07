@@ -92,6 +92,53 @@ def is_type_symbol(symbol: str) -> bool:
     return symbol.endswith("#")
 
 
+_SINGLE_CHAR_TERMINATORS = "/#.:!"  # namespace, type, term, meta, macro
+
+
+def _is_direct_member(remainder: str) -> bool:
+    """True if `remainder` — a symbol string with a class's own prefix already
+    stripped off — is exactly ONE descriptor, i.e. the symbol is a *direct*
+    member of that class rather than a member of some class nested inside it.
+
+    Per the SCIP descriptor grammar (`scip.proto`'s `Symbol` docs), every
+    descriptor ends with its own terminator: `/` (namespace), `#` (type),
+    `.` (term), `:` (meta), `!` (macro), or `).` (method — the only two-character
+    terminator, e.g. `parse(a1).`). A direct member's remainder has exactly one
+    such terminator, sitting at the very end of the string. A member declared on
+    a class nested one or more levels deeper has an *earlier* terminator (the
+    nested class's own `#`) followed by more descriptors.
+
+    Worked example for `class_symbol = "mongo/Foo#"`:
+      - remainder `"parse(a1)."`      -> one method descriptor      -> direct.
+      - remainder `"Inner#"`          -> one type descriptor        -> direct
+        (this is `Inner`'s own symbol, counted as one of `Foo`'s direct
+        members; `Inner`'s own members are not).
+      - remainder `"Inner#field."`    -> `#` appears before the end -> NOT
+        direct (it's declared on `Foo::Inner`, not on `Foo`).
+      - remainder `"Inner#Innermost#method()."` -> `#` appears before the end
+        -> NOT direct (declared two levels down, on `Foo::Inner::Innermost`).
+
+    Doesn't unescape backtick-quoted identifiers (`` `a/b` ``, a name containing
+    a literal terminator character): a real terminator inside one would be
+    misread as a descriptor boundary. None of this module's other symbol-string
+    helpers
+    (`is_callable_symbol`, `is_type_symbol`) unescape them either, so this stays
+    consistent rather than adding one-off escaping logic here.
+    """
+    if remainder.endswith(")."):
+        body = remainder[:-2]
+    elif remainder and remainder[-1] in _SINGLE_CHAR_TERMINATORS:
+        body = remainder[:-1]
+    else:
+        return False  # empty, or an ending SCIP's grammar doesn't recognize
+    for i, ch in enumerate(body):
+        if ch in _SINGLE_CHAR_TERMINATORS:
+            return False
+        if ch == ")" and body[i + 1 : i + 2] == ".":
+            return False
+    return True
+
+
 def _occurrence_start_line(occ: scip_pb2.Occurrence) -> int | None:
     which = occ.WhichOneof("typed_range")
     if which == "single_line_range":
