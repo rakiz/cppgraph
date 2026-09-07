@@ -79,6 +79,21 @@ active list. Design detail is in `DESIGN.md`, shipped features in
   a short write-up / Show HN. Refer to it with a descriptor everywhere it's linked
   ("cppgraph — compiler-exact C++ code-intelligence MCP server"), never bare
   "cppgraph". Gated on making the repo publicly visible / cutting 0.1.0.
+- **Add a Graft contrast to `COMPARISON.md`.** Graft (nanonets/graft) is the tool an
+  LLM will most likely bring up unprompted when asked about "code graph for agents" —
+  broad (21 languages), tree-sitter by default with optional per-language LSP
+  precision (clangd for C/C++), and an LLM-written markdown "node" layer (summaries +
+  cruxes) an agent reads as context. Two real axes of contrast, not a dismissal:
+  (1) **exactness** — its C++ precision option is clangd, which `COMPARISON.md`
+  already measured stalling on MongoDB (cross-TU references never warming up); scip-clang
+  is a batch compiler index, not a live LSP session, so this is a real, evidenced
+  difference for large real C++, not a assumed one; (2) **facts vs. judgments** — Graft's
+  node summaries are model-written prose, which is explicitly what `DESIGN.md`'s
+  facts-not-judgments principle refuses to ship (a summary can be wrong in a way a
+  compiler-traced edge cannot). Write this measured, the way the existing Serena/graphify
+  sections are — no unearned superiority claims on axes we haven't measured (their
+  SWE-bench Verified numbers are real and we have no equivalent yet, see the benchmark
+  items above).
 - **Ship a `SKILL.md` (agent steering + distribution).** A short Claude Code skill
   that steers the agent to the cppgraph tools (`who_calls`, `impact_of`,
   `find_references`, …) over grep for in-scope C++, plus the install pointer. Two
@@ -109,7 +124,13 @@ active list. Design detail is in `DESIGN.md`, shipped features in
   `deny`: grep over comments, string literals and non-indexed files stays correct;
   (3) `SessionStart` — emit the scope + freshness line instead of waiting for the agent to
   think of calling `status`. Complements the `SKILL.md` item above (skill descriptions are
-  permanently in context; hooks are positional).
+  permanently in context; hooks are positional). External validation of the general
+  pattern (not our measurement, so not a substitute for the benchmark items below, but
+  a reason to prioritize this): Graft (nanonets/graft), a competing tool wiring similar
+  hooks into Claude Code, reports 46% fewer tool calls and 60% less latency in its own
+  controlled benchmark — the closest independent evidence that this exact mechanism
+  (auto-injected steering + auto-resync, not just a static `instructions` string) moves
+  the needle for agent-facing code tools generally.
 - **Package as a Claude Code plugin (`.claude-plugin/`).** Install today is a two-phase
   README ritual where the agent interviews the user and `setup.sh` runs `claude mcp add`.
   A plugin manifest + `marketplace.json` carries the MCP server declaration, the skill,
@@ -123,7 +144,12 @@ active list. Design detail is in `DESIGN.md`, shipped features in
   or the existing dirty fingerprints) and annotate any result citing one. Precision of the
   answer *as delivered*, not of the store. Pairs with single-TU incremental reindex on demand
   (`pipeline.incremental_update` already has the machinery — see the alignment item above).
-- **Answer-accuracy benchmark, tier 1: oracle + static metrics.** `COMPARISON.md` §"Token
+- **Answer-accuracy benchmark, tier 1: oracle + static metrics.** Bumped priority: a
+  competing tool, Graft (nanonets/graft), just published exactly this kind of evidence —
+  an official SWE-bench Verified run (54%→66% resolved, +12 pts) plus a controlled
+  162-run sweep — where we still only *argue* accuracy. Being the tool that measures
+  vs. the tool that asserts is a credibility gap, not just a completeness one. `COMPARISON.md`
+  §"Token
   cost" *measures* tokens but only *argues* accuracy and completeness (noise %, `†` = does
   not fit a context). Put all three axes on the same evidentiary footing. Needs ground truth,
   and cppgraph cannot be its own oracle. Primary oracle: a hand-curated set (20–30 symbols)
@@ -147,12 +173,20 @@ active list. Design detail is in `DESIGN.md`, shipped features in
   claim we actually make. It doubles as the triggering metric: an agent that has cppgraph
   and greps anyway shows up in the results, replacing the current intuition that the tools
   are sometimes skipped. Report as dated files (`benchmarks/results/YYYY-MM-DD-*.md`) with a
-  reproducible runner rather than growing `COMPARISON.md`.
+  reproducible runner rather than growing `COMPARISON.md`. Consider the official `swebench`
+  harness (SWE-bench Verified) as one arm here instead of inventing our own scoring —
+  Graft used it directly (real merged-PR instances, official grader, no judge model needed)
+  and it reads as more credible than a self-graded rubric; would need C++ instances, which
+  SWE-bench Verified is thin on (it's mostly Python) — check coverage before committing to it.
 - **Multi-host steering adapters.** Generate one steering ruleset into the per-host formats
   (`AGENTS.md`, `.cursor/rules/`, `.windsurf/rules/`, `.clinerules/`,
   `.github/copilot-instructions.md`) from a single source, with a drift check in CI so the
   copies cannot diverge. Only worth the maintenance if non-Claude hosts become a goal —
-  the pitch is Claude Code-only today. Lowest priority of this group.
+  the pitch is Claude Code-only today. Lowest priority of this group. Note this is
+  table-stakes for at least one competing tool (Graft's `init` detects and wires Claude
+  Code, Cursor, Codex, Gemini, Copilot, Kiro, Windsurf, AdaL from one source) — a reason to
+  revisit the "Claude Code-only" premise if adoption data ever shows non-Claude usage
+  demand, not a reason to build it speculatively now.
 
 ## scip-clang (upstream)
 
@@ -160,9 +194,10 @@ cppgraph is downstream of scip-clang: some features are blocked not by our code 
 what the indexer emits. Items here are gaps in scip-clang itself — candidates to advocate
 upstream (sourcegraph/scip-clang) or, if it comes to it, to patch in our own clone (we
 already carry the #504 `enclosing_range` patch that way). Each links the feature of ours
-it unblocks. Until the audit ticket above runs, treat the *field-emptiness* items
-(`kind`, read/write, `Test`, doc) as **suspected** absent; the `enclosing_range` and ARM
-items are confirmed.
+it unblocks. The field-emptiness audit has now run (`SCIP_AUDIT.md`, measured against
+`scratch/mongo_src_tests.scip` + a #504 fixture, exhaustive counts, not sampling) — every
+item below states a verified fact, not a suspicion; see `FOLLOWUP.md` §"Worth patching
+upstream" for the ranked PR shortlist this audit produced.
 
 - **`enclosing_range` — not emitted by official scip-clang at all (PR #504 in progress).**
   The single biggest gap: enclosing ranges are the definition-body extents that drive exact
@@ -186,21 +221,29 @@ items are confirmed.
   [sourcegraph/scip-clang#542](https://github.com/sourcegraph/scip-clang/issues/542). Once the
   asset exists, wire the `Linux/aarch64` `download` case in `setup_cmd.py`
   `platform_sources()` (stock binary, no #504). → unblocks a no-toolchain install on Linux ARM.
-- **`SymbolInformation.kind` — not emitted (comes back `UnspecifiedKind`).** The builder
-  header notes it, which is why we derive node kind (callable/type/term) from the SCIP
-  descriptor suffix. If scip-clang filled it, we could drop that derivation and make
-  global/field/enum distinctions exact. → would unblock cleaner node typing; a firmer
-  `global_init_references` (identify globals without suffix parsing).
-- **`symbol_roles` `ReadAccess` / `WriteAccess` bits — not set today.** If set, they would
-  tag a reference read vs write — "who *mutates* this global/field?" vs who reads it, a
-  capability class we can't offer now. → would unblock mutation analysis; a sharper
-  `global_init_references` (a write at init vs a mere mention).
-- **`symbol_roles` `Test` bit — not set today.** We derive "is a test" from the file path
-  (`exclude_tests`); if scip-clang set the Test role it would beat the path heuristic. →
-  would unblock exact test filtering.
-- **`documentation` / `signature_documentation` — empty today** (like `display_name`, 0%
-  on the mongo index). If populated with doc comments / declared signatures, they would
-  enrich `explain_symbol` (signature/doc without reading source).
+- **`SymbolInformation.kind` — confirmed unemitted (`UnspecifiedKind` on 810,919/810,919
+  corpus symbols, 100%).** The builder derives node kind (callable/type/term) from the
+  SCIP descriptor suffix instead. If scip-clang filled it, we could drop that derivation
+  and make global/field/enum distinctions exact. → would unblock cleaner node typing; a
+  firmer `global_init_references` (identify globals without suffix parsing).
+- **`symbol_roles` `ReadAccess` / `WriteAccess` bits — confirmed never set (0 of
+  15,176,411 corpus occurrences carry either bit).** If set, they would tag a reference
+  read vs write — "who *mutates* this global/field?" vs who reads it, a capability class
+  we can't offer now. Upstream already has a `TODO` at the exact call site
+  (`Indexer.cc:1018`) — see `FOLLOWUP.md`'s PR shortlist for the concrete patch shape. →
+  would unblock mutation analysis; a sharper `global_init_references` (a write at init vs
+  a mere mention).
+- **`symbol_roles` `Test` bit — confirmed never set (0 of 15,176,411).** We derive "is a
+  test" from the file path (`exclude_tests`); if scip-clang set the Test role it would
+  beat the path heuristic, though an upstream emitter would itself need a path/gtest
+  heuristic, so no exactness gain — not worth filing (see `FOLLOWUP.md`). → would unblock
+  exact test filtering, in principle.
+- **`documentation` — confirmed WORKING, contradicts this bullet's own prior claim.**
+  Measured: 99.99% non-empty, but 84.45% is a literal `"No documentation available."`
+  placeholder — the genuine doc-comment rate is 10.61% (86,061 of 810,919 symbols). No
+  upstream ask here: `explain_symbol` can consume this today, cppgraph-side.
+  `signature_documentation` remains genuinely empty (0/810,919) — would render declared
+  signatures without a source read.
 - **Effective call arity per call site — not modeled.** A call occurrence carries the
   callee symbol and location but not how many arguments the call expression actually passes.
   clang's AST knows it; SCIP drops it. Without it the graph can't tell "called with 2 args"
