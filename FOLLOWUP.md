@@ -345,3 +345,49 @@ any PR above.
 Already written up elsewhere in this file / TODO.md and not repeated here:
 landing #504 `enclosing_range` upstream (TODO.md's first upstream bullet),
 lambda symbols/intervals (§ above), `is_type_definition` (§typed-by).
+
+---
+
+## Project-scope default for path-prefix filtering
+
+### Problem
+
+Per-query `exclude_paths`/`include_paths` are done and wired into every
+relevant tool (`who_calls`, `what_it_calls`, `find_references`, `impact_of`,
+`hotspots`, `find`, on both the CLI and MCP). What's missing is a
+project-scope *default* that excludes vendored/external code everywhere, so
+"my code, not libs" is free — not a convenience, an **adoption precondition**:
+real usage shows the noise actively discourages the tools (`find "Block"` →
+188 hits, mostly `spirv_cross`; `build/vcpkg_installed/` swamping results) —
+an unscoped default pushes the agent back to `Read`/`grep`.
+
+### Why parked, not active
+
+The open question is how cppgraph knows what's external *factually*, not by
+name heuristic (`.pio`/`third_party`/`vendor` guessing). The leaning: derive
+it from `compile_commands.json`'s `arguments`, which `compdb.py` doesn't read
+today (only `file`) — the `-I` include paths there delineate vendored
+(`.pio/libdeps`, `vcpkg_installed`) from project sources factually, a
+stronger grounding than root-containment alone. This is a real design
+decision (how to parse/rank `-I` paths, what counts as "vendored" vs
+"third-party but still mine," how the default interacts with an explicit
+`--include-path`/`--exclude-path` override) that needs deciding before
+writing code, not a small mechanical task — hence parked here rather than in
+`TODO.md`, until it's actually being worked on.
+
+### If it proves useful
+
+1. Read `-I`/`-isystem` arguments out of `compile_commands.json` in
+   `compdb.py` (today it only reads `file`).
+2. Decide the ranking/heuristic: likely "the last `-I` path that's an
+   ancestor of the file being compiled, if any, marks it project-local;
+   anything only reachable via `-isystem` or an `-I` outside the project root
+   is vendored" — but this needs checking against a few real compdbs
+   (mongo's, a `vcpkg`-based one, a PlatformIO one) before committing to a
+   rule, not designed in the abstract.
+3. Store the derived project-vs-vendor classification per file (or compute it
+   lazily) and wire it as the DEFAULT `exclude_paths` behavior, with an
+   explicit override still available and taking precedence.
+4. Also applies to `boundary_violations`/`api_surface` (now shipped) — same
+   "belongs to a path prefix" notion, would feed off the same primitive once
+   built.

@@ -37,6 +37,16 @@ active list. Design detail is in `DESIGN.md`, shipped features in
   (a distinct `kind`) so `impact_of`/`path` cover type-change blast radius. Needs a
   #504 graph; the data already exists but this adds ~one edge per attributed reference
   (millions on mongo → larger store), so it's opt-in.
+  **Effort/interest note (checked against reality, not the pitch above):** the
+  "type-change blast radius" headline doesn't actually land — `impact_of`/`reachable_from`
+  only walk ONE edge kind per call (same limit found for `typed-by`), so `uses` edges
+  alone can't chain into a `calls` traversal any better than manually combining
+  `find_references` + `impact_of` already does today. Real incremental value is narrower:
+  (a) `boundary_violations` could check type-usage crossing declared layers (a genuinely
+  new capability, not a `find_references` reformulation), (b) `visualize`/`subgraph`
+  (already generic over edge kinds) would render `uses` relationships automatically. Cost
+  (millions of extra edges) vs. that narrower payoff — moderate cost, modest-but-real
+  value; lower priority than the headline made it sound.
 - **Show the storage cost of the symbol-granularity upgrade in `status`.** `status`
   already prints the file→symbol upgrade hint (index with a #504 binary / `enrich-refs`);
   add the extra `.graph.db` cost so the user can weigh it. Measure the real delta first
@@ -50,25 +60,6 @@ active list. Design detail is in `DESIGN.md`, shipped features in
   confirmed — the #504 `saveVarDecl` patch emits it — so it's not in this list.) Cheap;
   gates the `scip-clang (upstream)` section below. Same "verify before promising" lesson
   as `line_span`.
-- **Project-scope default for path-prefix filtering.** Per-query `exclude_paths`/
-  `include_paths` are done (a `Node.file`-prefix predicate in `cppgraph.filters`,
-  `matches_path_prefix`/`filter_by_path`, wired into `who_calls`, `what_it_calls`,
-  `find_references`, `impact_of`, `hotspots`, `find` on both the CLI
-  (`--include-path`/`--exclude-path`) and MCP). Still open: a project-scope
-  *default* that excludes vendored/external code everywhere so "my code, not
-  libs" is free, without the caller having to pass `--exclude-path` by hand —
-  not a convenience but an **adoption precondition**: real usage shows the
-  noise actively discourages the tools — `find "Block"` → 188 hits (mostly
-  `spirv_cross`), `build/vcpkg_installed/` swamping results — so an unscoped
-  default pushes the agent back to `Read`/`grep`. Open question on how cppgraph
-  knows what's external: leaning toward deriving it factually from
-  `compile_commands.json`, whose `arguments` we don't read today (`compdb.py`
-  reads only `file`). The `-I` include paths there delineate vendored
-  (`.pio/libdeps`, `vcpkg_installed`) from project sources factually — a stronger
-  grounding than root-containment alone, no name heuristic (`.pio`/`third_party`/
-  `vendor`). Decide the default when we build it. (Also still applies to
-  `api_surface`, now shipped — same "belongs to a path prefix" notion, fed by
-  that same primitive.)
 - **Contributing notes, CI (lint + pytest), publish.** Not a 0.1.0 blocker.
 - **Make the repo discoverable to LLMs (distribution).** LLMs asked to compare
   code-intelligence tools describe cppgraph from the *name* only — the page isn't
