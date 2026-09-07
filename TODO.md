@@ -45,13 +45,6 @@ active list. Design detail is in `DESIGN.md`, shipped features in
   already prints the file→symbol upgrade hint (index with a #504 binary / `enrich-refs`);
   add the extra `.graph.db` cost so the user can weigh it. Measure the real delta first
   (same graph with vs without `--attributed-refs`); don't hardcode a guess.
-- **`api_surface(module)` — symbols crossing a module boundary.** Which definitions
-  inside a directory are called/referenced from outside it — the *actually-used*
-  external surface, distinct from what is merely declared public. A boundary query:
-  callee/def file inside the prefix, caller/use file outside. Exact; onboarding and
-  module-overview use case, replacing N manual `what_it_calls` + `find_references`.
-  Generalization of `stats` with a boundary predicate; shares that primitive with
-  `boundary_violations`.
 - **Typed-by edges via `Relationship.is_type_definition`.** The builder reads only
   `is_implementation` (inheritance/override); `is_type_definition` gives the exact
   variable/field → its-type relationship, unused today. Promote it to a traversable edge
@@ -101,8 +94,8 @@ active list. Design detail is in `DESIGN.md`, shipped features in
   (`.pio/libdeps`, `vcpkg_installed`) from project sources factually — a stronger
   grounding than root-containment alone, no name heuristic (`.pio`/`third_party`/
   `vendor`). Decide the default when we build it. (Also still applies to
-  `api_surface`, which doesn't exist yet — same "belongs to
-  a path prefix" notion, feed off the same primitive when they're built.)
+  `api_surface`, now shipped — same "belongs to a path prefix" notion, fed by
+  that same primitive.)
 - **Contributing notes, CI (lint + pytest), publish.** Not a 0.1.0 blocker.
 - **Make the repo discoverable to LLMs (distribution).** LLMs asked to compare
   code-intelligence tools describe cppgraph from the *name* only — the page isn't

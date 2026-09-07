@@ -1603,6 +1603,114 @@ class GraphStore:
             )
         return violations[:limit], len(violations)
 
+    def api_surface(
+        self,
+        module_prefix: str,
+        limit: int = 40,
+        exclude_tests: bool = False,
+    ) -> tuple[list[dict[str, str | int | None]], int, bool]:
+        """Definitions under `module_prefix` that are used from *outside* it —
+        the **actually-used** external surface of a module, as opposed to what
+        is merely declared with some visibility keyword (SCIP encodes no C++
+        visibility, so "used from outside" is the observable fact; the
+        facts-not-judgments rule makes it the right one to report).
+
+        Two use sources, one boundary predicate per use: the *used* symbol's
+        own definition file (`symbols.file_id`) must be under `module_prefix`,
+        and the *use site* file must NOT be — for `calls` edges that site is
+        `edges.file_id` (where the call happened), for references `refs.file_id`
+        (where the occurrence lives). Counts are kept **separate** per symbol
+        (`external_calls` / `external_refs`, the same per-column detail `stats`
+        gives for symbols/edges/refs) and ranked by their **sum** descending —
+        so the headline ordering is one number while the detail never collapses
+        into a blob.
+
+        References are the `--references` location index (`references_of`'s
+        data): when the store was built without it, the surface is call sites
+        only — the third return element is then `False` so callers can say so
+        (a bare `external_refs == 0` everywhere would read as "never referenced
+        outside", which is not known). Reference *attribution* is not needed:
+        `refs.file_id` is already the exact use-site file.
+
+        `exclude_tests` drops a use when *either* side of the boundary is a
+        test file — the use site, or the used symbol's own definition file
+        (a test-defined helper inside the module is not production surface;
+        `hotspots`' either-endpoint shape). Prefix membership is
+        `matches_path_prefix` registered as `cpg_under_prefix` (the
+        `boundary_violations` pattern), i.e. a path-segment boundary: `"mod"`
+        matches `mod/util.cpp`, never `mods/util.cpp`. A symbol with no
+        recorded definition file belongs to no module and can never be listed.
+
+        Aggregated entirely in SQL (`GROUP BY` + `ORDER BY` + slice) over the
+        `edges`/`refs` indexes — the `hotspots` discipline: id-space until the
+        final rows are resolved to symbol strings. Returns `(ranked, total,
+        has_refs_data)`: `ranked` is at most `limit` dicts (`{"symbol",
+        "file", "line", "external_calls", "external_refs"}`), `total` the
+        count of distinct symbols with at least one external use, and
+        `has_refs_data` whether reference uses were counted at all.
+
+        Raises ValueError on an empty `module_prefix` (which would match
+        nothing, reading as "empty surface") or a negative `limit`.
+        """
+        prefix = module_prefix.replace("\\", "/").rstrip("/")
+        if not prefix:
+            raise ValueError(
+                "api_surface needs a non-empty module prefix (an empty one matches nothing)"
+            )
+        if limit < 0:
+            raise ValueError(f"limit must be >= 0, got {limit}")
+
+        has_refs = self.meta().get("has_references") == "true"
+
+        def _under_prefix(path: str | None, prefix: str) -> bool:
+            return matches_path_prefix(path, include=[prefix], exclude=None)
+
+        self._con.create_function("cpg_under_prefix", 2, _under_prefix, deterministic=True)
+        test_clause = ""
+        if exclude_tests:
+            self._con.create_function("cpg_is_test_file", 1, is_test_file, deterministic=True)
+            test_clause = (
+                "AND NOT cpg_is_test_file(f_own.path) AND NOT cpg_is_test_file(f_use.path)"
+            )
+        # One UNION ALL row per use (call site or reference site), tagged with
+        # its kind so a single GROUP BY splits the counts per symbol — the
+        # same per-role UNION ALL shape `hotspots` uses for its edges ranking.
+        refs_union = (
+            "UNION ALL SELECT r.symbol_id, r.file_id, 'ref' FROM refs r" if has_refs else ""
+        )
+        rows = self._con.execute(
+            f"""
+            SELECT s.symbol, f_own.path, s.line,
+                   SUM(use_kind = 'call') AS external_calls,
+                   SUM(use_kind = 'ref') AS external_refs
+            FROM (
+                SELECT e.dst_id AS sym_id, e.file_id AS use_file_id, 'call' AS use_kind
+                FROM edges e WHERE e.kind = 'calls'
+                {refs_union}
+            ) uses
+            JOIN symbols s ON s.id = uses.sym_id
+            JOIN files f_own ON f_own.id = s.file_id
+            LEFT JOIN files f_use ON f_use.id = uses.use_file_id
+            WHERE cpg_under_prefix(f_own.path, ?)
+              AND NOT cpg_under_prefix(f_use.path, ?)
+              {test_clause}
+            GROUP BY uses.sym_id
+            ORDER BY (external_calls + external_refs) DESC, s.symbol ASC
+            """,
+            (prefix, prefix),
+        ).fetchall()
+        ranked = [
+            {
+                "symbol": symbol,
+                "file": file,
+                "line": line,
+                "external_calls": calls,
+                "external_refs": refs,
+            }
+            for symbol, file, line, calls, refs in rows
+        ]
+        return ranked[:limit], len(ranked), has_refs
+
     def outline(self, file: str, limit: int = 200) -> tuple[list[Node], int]:
         """Every symbol *defined* in `file`, sorted by definition line — the
         file's outline, "what's in this file?" answered without reading it.

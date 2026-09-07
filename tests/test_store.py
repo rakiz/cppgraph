@@ -660,6 +660,136 @@ def test_boundary_violations_rejects_bad_input(tmp_path: Path) -> None:
         store.boundary_violations([("common/", "platform/")], edge_kinds=("telepathy",))
 
 
+# --- api_surface ---------------------------------------------------------------
+
+
+def _module_graph(with_refs: bool = True) -> Graph:
+    """`mod/` is the module under inspection; `app/` is outside code using it.
+
+    - `internal_fn` (mod/): called only from inside mod/ — not on the surface.
+    - `called_fn` (mod/): one external call from `app/`, one internal call.
+    - `refd_type` (mod/): one external reference from `app/`, one internal.
+    - `both_fn` (mod/): two external calls + one external reference — ranks first.
+    """
+    graph = Graph()
+    graph.add_edge("calls", "internal_fn", "called_fn", file="mod/util.cpp", line=10)
+    graph.add_edge("calls", "app_main", "called_fn", file="app/main.cpp", line=5)
+    graph.add_edge("calls", "app_main", "both_fn", file="app/main.cpp", line=6)
+    graph.add_edge("calls", "app_other", "both_fn", file="app/other.cpp", line=7)
+    graph.nodes["internal_fn"].file = "mod/util.cpp"
+    graph.nodes["called_fn"].file = "mod/util.cpp"
+    graph.nodes["both_fn"].file = "mod/api.cpp"
+    graph.nodes["both_fn"].line = 4
+    graph.nodes["app_main"].file = "app/main.cpp"
+    graph.nodes["app_other"].file = "app/other.cpp"
+    graph.nodes["refd_type"] = Node(symbol="refd_type", file="mod/types.h", line=3)
+    if with_refs:
+        graph.add_reference("refd_type", "app/main.cpp", 20)
+        graph.add_reference("refd_type", "mod/util.cpp", 30)  # internal: never counts
+        graph.add_reference("both_fn", "app/main.cpp", 21)
+    return graph
+
+
+def test_api_surface_ranks_by_sum_with_calls_and_refs_shown_separately(
+    tmp_path: Path,
+) -> None:
+    """Separate counters per symbol (the `stats` convention), ranked by their
+    sum: `both_fn` (2 calls + 1 ref = 3) first, then the two 1-use symbols."""
+    store = _store(tmp_path, _module_graph())
+    ranked, total, has_refs = store.api_surface("mod/")
+    assert [r["symbol"] for r in ranked] == ["both_fn", "called_fn", "refd_type"]
+    assert ranked[0] == {
+        "symbol": "both_fn",
+        "file": "mod/api.cpp",
+        "line": 4,
+        "external_calls": 2,
+        "external_refs": 1,
+    }
+    by_symbol = {r["symbol"]: r for r in ranked}
+    assert by_symbol["called_fn"]["external_calls"] == 1  # calls-only external use
+    assert by_symbol["called_fn"]["external_refs"] == 0
+    assert by_symbol["refd_type"]["external_calls"] == 0  # refs-only external use
+    assert by_symbol["refd_type"]["external_refs"] == 1
+    assert total == 3
+    assert has_refs is True
+
+
+def test_api_surface_symbol_used_only_internally_is_excluded(tmp_path: Path) -> None:
+    """The surface is *external* uses: `internal_fn` (called only from inside
+    `mod/`) never appears, and the internal call/reference to `called_fn` /
+    `refd_type` counted for nothing (each still shows exactly its 1 external)."""
+    store = _store(tmp_path, _module_graph())
+    ranked, total, _ = store.api_surface("mod/")
+    assert "internal_fn" not in {r["symbol"] for r in ranked}
+    by_symbol = {r["symbol"]: r for r in ranked}
+    assert by_symbol["called_fn"]["external_calls"] == 1
+    assert by_symbol["refd_type"]["external_refs"] == 1
+    assert total == 3
+
+
+def test_api_surface_without_refs_data_degrades_to_calls_only(tmp_path: Path) -> None:
+    """A store built `--no-references` has no refs to count: the surface is
+    call sites only, and the caller is told so (`has_refs` False) rather than
+    reading `external_refs == 0` as 'never referenced outside'."""
+    store = _store(tmp_path, _module_graph(with_refs=False))
+    ranked, total, has_refs = store.api_surface("mod/")
+    assert has_refs is False
+    assert [r["symbol"] for r in ranked] == ["both_fn", "called_fn"]
+    assert all(r["external_refs"] == 0 for r in ranked)
+    assert total == 2
+
+
+def test_api_surface_limit_truncates_but_total_is_full_count(tmp_path: Path) -> None:
+    store = _store(tmp_path, _module_graph())
+    ranked, total, _ = store.api_surface("mod/", limit=1)
+    assert [r["symbol"] for r in ranked] == ["both_fn"]
+    assert total == 3
+
+
+def test_api_surface_exclude_tests_drops_test_uses_on_either_side(
+    tmp_path: Path,
+) -> None:
+    """`exclude_tests` drops a use when *either* side of the boundary is a test
+    file: a test calling into the module, and a test-defined symbol inside the
+    module used from outside — neither is production surface."""
+    graph = _module_graph()
+    graph.add_edge("calls", "test_main", "called_fn", file="src/t_test.cpp", line=1)
+    graph.nodes["test_main"] = Node(symbol="test_main", file="src/t_test.cpp", line=1)
+    graph.add_edge("calls", "app_main", "test_helper", file="app/main.cpp", line=8)
+    graph.nodes["test_helper"] = Node(symbol="test_helper", file="mod/util_test.cpp", line=1)
+    store = _store(tmp_path, graph)
+    ranked, _, _ = store.api_surface("mod/", exclude_tests=True)
+    by_symbol = {r["symbol"]: r for r in ranked}
+    assert by_symbol["called_fn"]["external_calls"] == 1  # the app/ call; tests/ dropped
+    assert "test_helper" not in by_symbol  # its own definition file is a test file
+
+
+def test_api_surface_prefix_matches_on_segment_boundaries(tmp_path: Path) -> None:
+    """The `matches_path_prefix` contract: `mod/` never matches a sibling that
+    merely shares characters (`mods/`)."""
+    graph = _module_graph()
+    graph.add_edge("calls", "sib_main", "sib_fn", file="app/main.cpp", line=9)
+    graph.nodes["sib_fn"].file = "mods/util.cpp"
+    store = _store(tmp_path, graph)
+    ranked, _, _ = store.api_surface("mod/")
+    assert "sib_fn" not in {r["symbol"] for r in ranked}
+    ranked, total, _ = store.api_surface("mods/")
+    assert [r["symbol"] for r in ranked] == ["sib_fn"]
+    assert total == 1
+
+
+def test_api_surface_rejects_bad_input(tmp_path: Path) -> None:
+    """Defensive validation in the `boundary_violations` style: an empty prefix
+    (which would match nothing) must raise, never read as 'empty surface'."""
+    store = _store(tmp_path, _module_graph())
+    with pytest.raises(ValueError):  # empty prefix matches nothing
+        store.api_surface("")
+    with pytest.raises(ValueError):  # same after separator normalization
+        store.api_surface("/")
+    with pytest.raises(ValueError):
+        store.api_surface("mod/", limit=-1)
+
+
 # --- outline / class_members -------------------------------------------------
 
 FOO = "cxx . . $ mongo/Foo#"

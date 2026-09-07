@@ -354,7 +354,11 @@ designing the builder so this isn't a later rewrite:
   #504-gated), `no_incoming_calls` (zero-caller definitions — a fact, never a
   "dead" verdict; #504-gated), `boundary-violations` (declared-layering
   conformance — rules supplied per query as `--rule FROM:FORBIDDEN`; every
-  hit is a real edge, zero false positives), `outline <file>` (every symbol
+  hit is a real edge, zero false positives), `api-surface <prefix>` (the
+  actually-used external surface of a module — definitions inside the prefix
+  called/referenced from outside it; `external_calls`/`external_refs` as
+  separate counters ranked by their sum, calls-only with a note on a
+  `--no-references` store), `outline <file>` (every symbol
   defined in a file, sorted by line — the file's contents as a compact symbol
    list, replacing a `Read`), `class-members <symbol>` (members declared on a
    class/struct — methods, fields, nested types — by SCIP container nesting:
@@ -388,10 +392,14 @@ designing the builder so this isn't a later rewrite:
    (zero-incoming-calls definitions — a fact, never a "dead" verdict), both
    gated on the store's enclosing-range data (#504) and reporting
    unavailability with the reason on a stock-binary graph,
-   `boundary_violations` (declared-layering conformance — rules supplied per
-   query by the caller, the graph stores no intended architecture; every hit
-   is a real edge, zero false positives, and 0 hits a lower bound, never a
-    conformance verdict), `outline` (every symbol defined in one file, sorted
+    `boundary_violations` (declared-layering conformance — rules supplied per
+    query by the caller, the graph stores no intended architecture; every hit
+    is a real edge, zero false positives, and 0 hits a lower bound, never a
+     conformance verdict), `api_surface` (the actually-used external surface
+    of a module — definitions under a prefix called/referenced from outside
+    it, separate `external_calls`/`external_refs` counters ranked by their
+    sum; calls-only with a note on a `--no-references` store), `outline`
+    (every symbol defined in one file, sorted
     by line — a compact symbol list that replaces reading the file),
     `class_members` (every member declared on a class/struct, by the same
     SCIP container nesting — members that *exist*, a fact, since SCIP encodes

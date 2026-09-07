@@ -8,6 +8,43 @@ on-disk store also carries its own `schema_version` for forward-compatibility.
 
 ### Added
 
+- **`api_surface`**: the actually-used external surface of a module — which
+  definitions under a directory prefix are called or referenced from *outside*
+  it. The observed surface, not the declared one: SCIP encodes no C++
+  visibility, so "used from outside" is the exact fact cppgraph can state
+  (facts-not-judgments: a measured surface, never an API-design verdict).
+  Onboarding/module-overview use case — one call replacing N manual
+  `what_it_calls` + `find_references` fan-outs over a directory. One boundary
+  predicate over two already-exact use sources: a `calls` edge counts when
+  the callee's own definition file is under the prefix and the call site
+  (`edges.file_id`) is not; a reference counts the same way, and `refs.file_id`
+  needs no attribution — it *is* the exact use-site file, which is why the
+  plain `--references` index suffices here (unlike the #504-gated
+  symbol-granularity features). The two are combined in a single SQL
+  aggregation: `UNION ALL` of the two sources, one row per use tagged with
+  its kind (the per-role shape `hotspots` uses), then one `GROUP BY` splits
+  them back apart — `external_calls`/`external_refs` reported as **separate**
+  counters per symbol (the per-column detail `stats` gives for symbols/edges/
+  refs, not one blob number) and ranked by their **sum** descending; id-space
+  until the final rows resolve to symbol strings, the `hotspots` discipline.
+  On a store built `--no-references` the answer degrades cleanly to call
+  sites only — the store returns `(ranked, total, has_refs_data)` and both
+  surfaces carry `refs_available: false` plus a note naming the rebuild —
+  never a bare `external_refs == 0` that would read as "never referenced
+  outside" (a module whose surface is only types would be invisible: exactly
+  the misleading-zero case). Prefix membership is `matches_path_prefix` as
+  the SQL function `cpg_under_prefix` (the `boundary_violations` pattern:
+  path-segment boundaries, `mod` matches `mod/util.cpp`, never
+  `mods/util.cpp`); `exclude_tests` drops a use when *either* side of the
+  boundary is a test file (`hotspots`' either-endpoint shape); an empty
+  prefix raises `ValueError` (it would match nothing and read as "empty
+  surface") — a parser error on the CLI, an error dict on MCP. CLI:
+  `api-surface <prefix>` (positional, like `class-members`) with
+  `--limit`/`--exclude-tests`/`--full-symbols`; MCP tool `api_surface`; both
+  thin wrappers over the same `GraphStore.api_surface` — bounded output
+  (`limit` + `total` + `truncated`), and a zero-result note pointing at
+  `stats` (a wrong prefix is the usual cause, the `outline` convention).
+
 - **`reachable_from`**: forward transitive reachability — the exact mirror of
   `impact_of` (reverse): from an entry point, everything it transitively
   reaches along `calls` edges ("what can this external handler trigger?" —

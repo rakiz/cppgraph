@@ -1325,6 +1325,79 @@ def test_boundary_violations_requires_a_rule(boundary_graph: Path) -> None:
         main(["boundary-violations", "--graph", str(boundary_graph)])
 
 
+# --- api-surface ---------------------------------------------------------------
+
+
+@pytest.fixture
+def module_graph_path(tmp_path: Path) -> Path:
+    """`mod/` with `both_fn` (2 external calls + 1 external ref from `app/`)
+    and `called_fn` (1 external call); `internal_fn` used only inside mod/."""
+    graph = Graph()
+    graph.add_edge("calls", "internal_fn", "called_fn", file="mod/util.cpp", line=10)
+    graph.add_edge("calls", "app_main", "called_fn", file="app/main.cpp", line=5)
+    graph.add_edge("calls", "app_main", "both_fn", file="app/main.cpp", line=6)
+    graph.add_edge("calls", "app_other", "both_fn", file="app/other.cpp", line=7)
+    graph.nodes["internal_fn"].file = "mod/util.cpp"
+    graph.nodes["called_fn"].file = "mod/util.cpp"
+    graph.nodes["both_fn"].file = "mod/api.cpp"
+    graph.nodes["app_main"].file = "app/main.cpp"
+    graph.nodes["app_other"].file = "app/other.cpp"
+    graph.add_reference("both_fn", "app/main.cpp", 21)
+    path = tmp_path / "module.db"
+    write_sqlite(graph, path)
+    return path
+
+
+def test_api_surface_prints_separate_counts_ranked_by_sum(
+    module_graph_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    exit_code = main(["api-surface", "--graph", str(module_graph_path), "mod/"])
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "top 2 of 2 externally-used symbol(s) under mod/" in out
+    assert "2 calls" in out
+    assert "1 refs" in out
+    assert "both_fn" in out
+    assert "called_fn" in out
+    assert "internal_fn" not in out  # used only inside the module
+
+
+def test_api_surface_without_refs_prints_the_calls_only_note(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    graph = Graph()
+    graph.add_edge("calls", "app_main", "called_fn", file="app/main.cpp", line=5)
+    graph.nodes["called_fn"].file = "mod/util.cpp"
+    graph.nodes["app_main"].file = "app/main.cpp"
+    path = tmp_path / "norefs.db"
+    write_sqlite(graph, path)
+    exit_code = main(["api-surface", "--graph", str(path), "mod/"])
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "1 refs" not in out
+    assert "--no-references" in out
+
+
+def test_api_surface_limit_truncates_and_reports_total(
+    module_graph_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    exit_code = main(["api-surface", "--graph", str(module_graph_path), "mod/", "--limit", "1"])
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "top 1 of 2 externally-used symbol(s)" in out
+    assert "... and 1 more" in out
+
+
+def test_api_surface_empty_prefix_is_rejected(module_graph_path: Path) -> None:
+    with pytest.raises(SystemExit):
+        main(["api-surface", "--graph", str(module_graph_path), ""])
+
+
+def test_api_surface_requires_a_prefix(module_graph_path: Path) -> None:
+    with pytest.raises(SystemExit):
+        main(["api-surface", "--graph", str(module_graph_path)])
+
+
 # --- outline / class-members -------------------------------------------------
 
 FOO = "cxx . . $ mongo/Foo#"

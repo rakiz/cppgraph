@@ -710,6 +710,110 @@ def test_boundary_violations_tool_registered_and_routes_through_call(
     assert result["violations"][0]["dst"] == "platform_secret"
 
 
+# --- api_surface ---------------------------------------------------------------
+
+
+@pytest.fixture
+def module_store(tmp_path: Path) -> GraphStore:
+    """`mod/` with `both_fn` (2 external calls + 1 external ref) and
+    `called_fn` (1 external call), both used from `app/` outside it."""
+    graph = Graph()
+    graph.add_edge("calls", "app_main", "called_fn", file="app/main.cpp", line=5)
+    graph.add_edge("calls", "app_main", "both_fn", file="app/main.cpp", line=6)
+    graph.add_edge("calls", "app_other", "both_fn", file="app/other.cpp", line=7)
+    graph.nodes["called_fn"].file = "mod/util.cpp"
+    graph.nodes["both_fn"].file = "mod/api.cpp"
+    graph.nodes["both_fn"].line = 4
+    graph.nodes["app_main"].file = "app/main.cpp"
+    graph.nodes["app_other"].file = "app/other.cpp"
+    graph.add_reference("both_fn", "app/main.cpp", 21)
+    path = tmp_path / "module.db"
+    write_sqlite(graph, path)
+    return GraphStore(path)
+
+
+def test_api_surface_report_lists_separate_counts_ranked_by_sum(
+    module_store: GraphStore,
+) -> None:
+    result = mcp_server.api_surface_report(module_store, "mod/")
+    assert result["total"] == 2
+    assert result["truncated"] is False
+    assert result["refs_available"] is True
+    assert [item["name"] for item in result["surface"]] == ["both_fn", "called_fn"]
+    both = result["surface"][0]
+    assert both["external_calls"] == 2
+    assert both["external_refs"] == 1
+    assert both["file"] == "mod/api.cpp"
+    assert "note" not in result  # refs data present: no degrade note
+
+
+def test_api_surface_report_without_refs_notes_calls_only(tmp_path: Path) -> None:
+    """The `--references`-gated degrade path: the surface is still answered
+    (call sites only) but says so — `refs_available: false` plus a note naming
+    the rebuild, never a bare `external_refs: 0` that reads as 'never
+    referenced outside'."""
+    graph = Graph()
+    graph.add_edge("calls", "app_main", "called_fn", file="app/main.cpp", line=5)
+    graph.nodes["called_fn"].file = "mod/util.cpp"
+    graph.nodes["app_main"].file = "app/main.cpp"
+    path = tmp_path / "norefs.db"
+    write_sqlite(graph, path)
+    store = GraphStore(path)
+    result = mcp_server.api_surface_report(store, "mod/")
+    assert result["total"] == 1
+    assert result["refs_available"] is False
+    assert result["surface"][0]["external_calls"] == 1
+    assert result["surface"][0]["external_refs"] == 0
+    assert "--no-references" in result["note"]
+
+
+def test_api_surface_report_limit_truncates(module_store: GraphStore) -> None:
+    result = mcp_server.api_surface_report(module_store, "mod/", limit=1)
+    assert result["total"] == 2
+    assert len(result["surface"]) == 1
+    assert result["truncated"] is True
+
+
+def test_api_surface_report_matches_store_directly(module_store: GraphStore) -> None:
+    """Parity check, same shape as the boundary ones: the report is exactly
+    `store.api_surface`, not a reimplementation (line is 1-indexed here,
+    0-indexed in the store, like every other tool)."""
+    result = mcp_server.api_surface_report(module_store, "mod/", full_symbols=True)
+    expected, expected_total, expected_refs = module_store.api_surface("mod/")
+    assert result["total"] == expected_total
+    assert result["refs_available"] == expected_refs
+    assert [
+        (i["symbol"], i["file"], i["external_calls"], i["external_refs"]) for i in result["surface"]
+    ] == [(e["symbol"], e["file"], e["external_calls"], e["external_refs"]) for e in expected]
+    assert result["surface"][0]["line"] == expected[0]["line"] + 1
+
+
+def test_api_surface_report_empty_prefix_is_an_error_dict(module_store: GraphStore) -> None:
+    """Bad input comes back as an error dict showing the expected shape, not
+    an exception (the `boundary_violation_report` convention)."""
+    result = mcp_server.api_surface_report(module_store, "")
+    assert "error" in result
+    assert "module" in result["hint"].lower()
+
+
+def test_api_surface_tool_registered_and_routes_through_call(tmp_path: Path) -> None:
+    """The `@mcp.tool()` wrapper exists and delegates to `api_surface_report`
+    (the pure function is covered directly; this covers the wiring)."""
+    from cppgraph.mcp_server import build_server
+
+    graph = Graph()
+    graph.add_edge("calls", "app_main", "called_fn", file="app/main.cpp", line=5)
+    graph.nodes["called_fn"].file = "mod/util.cpp"
+    graph.nodes["app_main"].file = "app/main.cpp"
+    path = tmp_path / "g.db"
+    write_sqlite(graph, path)
+    server = build_server(str(path))
+    tool = server._tool_manager._tools["api_surface"].fn
+    result = tool(module_prefix="mod/")
+    assert result["total"] == 1
+    assert result["surface"][0]["name"] == "called_fn"
+
+
 # --- outline / class_members -------------------------------------------------
 
 FOO_TYPE = "cxx . . $ mongo/Foo#"

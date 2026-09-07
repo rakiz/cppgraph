@@ -1115,6 +1115,83 @@ def boundary_violation_report(
     }
 
 
+def api_surface_report(
+    store: GraphStore,
+    module_prefix: str,
+    limit: int = DEFAULT_LIMIT,
+    exclude_tests: bool = False,
+    full_symbols: bool = False,
+) -> dict[str, Any]:
+    """The actually-used external surface of a module: the definitions under a
+    directory prefix (`module_prefix`, e.g. `"src/pipeline/"`) that are called
+    or referenced from OUTSIDE it. That is the *observed* surface — what
+    outside code really uses — as opposed to what is merely declared public
+    (SCIP has no visibility info to check against anyway, so "used from
+    outside" is the fact this tool can state exactly). Onboarding and
+    module-overview use case: one call replacing N manual `what_it_calls` +
+    `find_references` fan-outs.
+
+    Each symbol carries `external_calls` (call sites outside the prefix) and
+    `external_refs` (reference use sites outside it) as separate counters,
+    ranked by their sum descending — `stats`' level of per-column detail, not
+    one blob number. When the graph carries no reference index (built
+    `--no-references`) the answer degrades cleanly to call sites only:
+    `refs_available: false` plus a `note` saying how to get the other half —
+    never a bare `external_refs: 0` that would read as "never referenced
+    outside". `exclude_tests` drops a use when either the use site or the used
+    definition is in a test file. `limit` caps the list (default 40); `total`
+    always reports the full count. An empty `module_prefix` comes back as an
+    `{"error", "hint"}` dict, not an exception.
+    """
+    try:
+        ranked, total, has_refs = store.api_surface(
+            module_prefix, limit=limit, exclude_tests=exclude_tests
+        )
+    except ValueError as e:
+        return {
+            "error": f"invalid module_prefix: {e}",
+            "hint": "module_prefix is a directory path prefix (segment-boundary "
+            'match, e.g. "src/pipeline" covers src/pipeline/... never '
+            "src/pipeline_extra/...); `stats` lists the indexed paths",
+        }
+
+    items: list[dict[str, Any]] = []
+    for row in ranked:
+        node = store.get_node(row["symbol"])
+        item = (
+            _node_dict(node, full_symbols)
+            if node is not None
+            else {"name": _short_label(row["symbol"]), "file": None, "line": None}
+        )
+        if full_symbols:
+            item["symbol"] = row["symbol"]
+        item["external_calls"] = row["external_calls"]
+        item["external_refs"] = row["external_refs"]
+        items.append(item)
+    result: dict[str, Any] = {
+        "module_prefix": module_prefix,
+        "total": total,
+        "truncated": total > len(items),
+        "excluded_tests": exclude_tests,
+        "refs_available": has_refs,
+        "surface": items,
+    }
+    if not has_refs:
+        result["note"] = (
+            "this graph carries no reference index (built `--no-references`), so "
+            "`external_refs` is 0 everywhere and the surface is call sites only — "
+            "a type used outside the module is invisible to it. Rebuild the store "
+            "with references to count those uses too"
+        )
+    elif total == 0:
+        result["note"] = (
+            "no external uses found — either the module is genuinely self-contained "
+            "or the prefix matches no indexed path; `stats` lists the indexed paths "
+            "(the match is on a path-segment boundary)"
+        )
+    return result
+
+
 def file_outline_report(
     store: GraphStore,
     file: str,
@@ -2002,6 +2079,33 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
             rules=rules,
             edge_kinds=edge_kinds,
             limit=limit,
+            full_symbols=full_symbols,
+        )
+
+    @mcp.tool()
+    def api_surface(
+        module_prefix: str,
+        limit: int = DEFAULT_LIMIT,
+        exclude_tests: bool = False,
+        full_symbols: bool = False,
+    ) -> dict[str, Any]:
+        """The actually-used external surface of a module: definitions under a
+        directory prefix (`module_prefix`, e.g. "src/pipeline/") that are
+        called/referenced from OUTSIDE it — the observed surface, as opposed
+        to what is merely declared public (SCIP has no visibility info to
+        check against anyway). Each entry carries `external_calls` and
+        `external_refs` as separate counters, ranked by their sum — a fact,
+        never an API-design verdict. On a graph built `--no-references` the
+        answer is call sites only, flagged `refs_available: false` with a
+        note (type uses are invisible without the reference index).
+        `exclude_tests` drops uses whose use site or used definition is in a
+        test file. `limit` caps the list (default 40): raise it when
+        `truncated` — `total` always reports the full count."""
+        return _call(
+            api_surface_report,
+            module_prefix,
+            limit=limit,
+            exclude_tests=exclude_tests,
             full_symbols=full_symbols,
         )
 

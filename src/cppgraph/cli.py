@@ -869,6 +869,36 @@ def main(argv: list[str] | None = None) -> int:
         help="print the raw SCIP symbol strings instead of readable labels",
     )
 
+    p_api = sub.add_parser(
+        "api-surface",
+        help="the actually-used external surface of a module: definitions "
+        "inside a prefix called/referenced from outside it",
+    )
+    p_api.add_argument(
+        "--graph",
+        required=False,
+        default=None,
+        help="graph store path (default: auto-discovered from the cwd's .cppgraph/)",
+    )
+    p_api.add_argument(
+        "module_prefix",
+        help="directory prefix of the module (segment-boundary match, e.g. "
+        "src/pipeline covers src/pipeline/util.cpp, never src/pipeline_extra/)",
+    )
+    p_api.add_argument("--limit", type=int, default=40, help="max rows to show (default: 40)")
+    p_api.add_argument(
+        "--exclude-tests",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="drop uses whose use site or used definition is in a test file "
+        "(default: off; a test caller still counts as an external use)",
+    )
+    p_api.add_argument(
+        "--full-symbols",
+        action="store_true",
+        help="print the raw SCIP symbol strings instead of readable labels",
+    )
+
     p_outline = sub.add_parser(
         "outline",
         help="the outline of one file: every symbol defined in it, sorted by line",
@@ -1669,6 +1699,43 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  [{v['rule']}] {v['kind']}  {src} -> {dst}  ({site})")
         if total > len(violations):
             print(f"  ... and {total - len(violations)} more (raise --limit to see them)")
+        return 0
+
+    if args.command == "api-surface":
+        store = _open_store_checked(args, parser)
+        try:
+            ranked, total, has_refs = store.api_surface(
+                args.module_prefix, limit=args.limit, exclude_tests=args.exclude_tests
+            )
+        except ValueError as e:
+            parser.error(str(e))
+        tests_note = " (excluding tests)" if args.exclude_tests else ""
+        print(
+            f"[cppgraph] top {len(ranked)} of {total} externally-used symbol(s) under "
+            f"{args.module_prefix}{tests_note}"
+        )
+        if not has_refs:
+            print(
+                "  note: this graph carries no reference index (built --no-references) — "
+                "call sites only, a type used outside the module is invisible to this "
+                "list; rebuild with references to count those uses too"
+            )
+        for row in ranked:
+            label = row["symbol"] if args.full_symbols else short_label(row["symbol"])
+            line = row["line"] + 1 if row["line"] is not None else "?"
+            loc = f"{row['file']}:{line}" if row["file"] is not None else "?"
+            print(
+                f"  {row['external_calls']:>5} calls  {row['external_refs']:>5} refs"
+                f"  {label}  ({loc})"
+            )
+        if total == 0 and has_refs:
+            print(
+                "  note: no external uses found — either the module is genuinely "
+                "self-contained or the prefix matches no indexed path; `cppgraph "
+                "stats` lists the indexed paths (the match is on a path-segment boundary)"
+            )
+        if total > len(ranked):
+            print(f"  ... and {total - len(ranked)} more (raise --limit to see them)")
         return 0
 
     if args.command == "outline":
