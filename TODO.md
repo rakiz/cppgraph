@@ -32,6 +32,25 @@ active list. Design detail is in `DESIGN.md`, shipped features in
   (already generic over edge kinds) would render `uses` relationships automatically. Cost
   (millions of extra edges) vs. that narrower payoff — moderate cost, modest-but-real
   value; lower priority than the headline made it sound.
+- **Simplify installation.** Both macOS arm64 and Linux aarch64 #504 binaries are now
+  published (`scip-clang-504-v0.4.0` on GitHub releases), and `setup_cmd.py`'s
+  `platform_sources()`/`obtain_scip_clang()` now offer a `download-504` source
+  (checksum-verified against the release's `.sha256` asset) ahead of `download`
+  (stock) and `build` (local compile) whenever a prebuilt #504 binary exists for the
+  host. Still open: reconsider whether the agent-interview ritual (README's two-phase
+  setup flow) is still the right default now that the two heaviest costs (compile
+  time, disk space) can often be skipped entirely — and publish an `x86_64-linux` #504
+  asset too, the one platform still without one.
+- **Human-oriented CLI reference doc.** `cppgraph --help` now lists 27 subcommands
+  (`build`, `find`, `callers`, `impact`, `boundary-violations`, `outline`,
+  `strongly-connected-components`, …) grown incrementally over many sessions, each with
+  its own `--help`, but there is no single page a human can read to see what exists and
+  when to reach for which one — `QUICKSTART.md`'s "Or use the CLI directly" section shows
+  only 3 example commands. A reference doc (generated from the subparsers where
+  possible, to avoid drifting from the real `--help` text, rather than hand-maintained
+  prose that goes stale) grouping commands by purpose (symbol lookup, call-graph
+  traversal, structural facts, lifecycle/setup) would help a human pick the right tool
+  without reading argparse output for 27 commands one at a time.
 - **Contributing notes, CI (lint + pytest), publish.** Not a 0.1.0 blocker.
 - **Make the repo discoverable to LLMs (distribution).** LLMs asked to compare
   code-intelligence tools describe cppgraph from the *name* only — the page isn't

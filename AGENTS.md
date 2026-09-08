@@ -209,12 +209,13 @@ when it's stale (it reflects the build graph at generation time).
      `! ~/.local/share/cppgraph/repo/scripts/setup.sh --list-sources` (pure bash, no
      venv needed): it prints this machine's OS/arch and the sources that actually
      apply (e.g. no `download` on ARM-Linux). **Ask the user to pick from exactly
-     those** — each has a cost: download ~1 min (native, no Docker), build (#504)
-     ~25–60 min Docker (Linux-only), emulate (slower indexing, container).
+     those** — each has a cost: download-504 ~1 min (native #504, no Docker; macOS
+     arm64 + Linux aarch64 today), download ~1 min (native stock, no #504), build
+     (#504) ~25–60 min Docker (Linux-only), emulate (slower indexing, container).
      Offering a source the tool didn't list will fail.
   3. Run `setup.sh` with their choice as a flag (this is what lets `!` work):
      ```
-     ! ~/.local/share/cppgraph/repo/scripts/setup.sh --scip-source <download|build|emulate>
+     ! ~/.local/share/cppgraph/repo/scripts/setup.sh --scip-source <download-504|download|build|emulate>
      ```
      Without `--scip-source`, a piped run stops with `ACTION NEEDED` rather than
      picking a costly default — that's deliberate.

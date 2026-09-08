@@ -43,7 +43,7 @@ def test_obtain_abort_stops_setup(tmp_path: Path, monkeypatch) -> None:
     # No binary present; the source menu ends with "abort". Force the abort choice
     # by making platform_sources report nothing downloadable/buildable so the menu
     # is [emulate, abort]; pick abort by its index.
-    monkeypatch.setattr(setup_cmd, "platform_sources", lambda: (None, False))
+    monkeypatch.setattr(setup_cmd, "platform_sources", lambda: (None, None, False))
     # options: [emulate(1), abort(2)]
     p, out = _scripted_prompter(["2"])
     result = setup_cmd.obtain_scip_clang(p, bin_dir=bindir)
@@ -52,7 +52,7 @@ def test_obtain_abort_stops_setup(tmp_path: Path, monkeypatch) -> None:
 
 def test_obtain_emulate_installs_nothing(tmp_path: Path, monkeypatch) -> None:
     bindir = tmp_path / "bin"
-    monkeypatch.setattr(setup_cmd, "platform_sources", lambda: (None, False))
+    monkeypatch.setattr(setup_cmd, "platform_sources", lambda: (None, None, False))
     # options: [emulate(1), abort(2)] -> pick emulate.
     p, out = _scripted_prompter(["1"])
     result = setup_cmd.obtain_scip_clang(p, bin_dir=bindir)
@@ -64,7 +64,9 @@ def test_obtain_non_interactive_without_source_stops(tmp_path: Path, monkeypatch
     """Under a pipe (can_prompt=False) with no --scip-source, it must NOT default
     into a costly build/download — it stops with ACTION NEEDED."""
     bindir = tmp_path / "bin"
-    monkeypatch.setattr(setup_cmd, "platform_sources", lambda: (None, True))  # build-capable host
+    monkeypatch.setattr(
+        setup_cmd, "platform_sources", lambda: (None, None, True)
+    )  # build-capable host
     p, out = _scripted_prompter([])  # a prompt here would raise IndexError? no — returns ""
     result = setup_cmd.obtain_scip_clang(p, bin_dir=bindir, source=None, can_prompt=False)
     assert result == "need-input"
@@ -75,7 +77,7 @@ def test_obtain_non_interactive_without_source_stops(tmp_path: Path, monkeypatch
 def test_obtain_explicit_source_emulate_no_prompt(tmp_path: Path, monkeypatch) -> None:
     """An explicit --scip-source is honoured with no prompt, even non-interactive."""
     bindir = tmp_path / "bin"
-    monkeypatch.setattr(setup_cmd, "platform_sources", lambda: (None, True))
+    monkeypatch.setattr(setup_cmd, "platform_sources", lambda: (None, None, True))
     result = setup_cmd.obtain_scip_clang(
         p := Prompter(_boom, lambda *a: None), bin_dir=bindir, source="emulate", can_prompt=False
     )
@@ -84,11 +86,168 @@ def test_obtain_explicit_source_emulate_no_prompt(tmp_path: Path, monkeypatch) -
 
 
 def test_obtain_invalid_source_for_platform_fails(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(setup_cmd, "platform_sources", lambda: (None, False))  # no download/build
+    monkeypatch.setattr(
+        setup_cmd, "platform_sources", lambda: (None, None, False)
+    )  # no download/build
     p, out = _scripted_prompter([])
     result = setup_cmd.obtain_scip_clang(p, bin_dir=tmp_path / "bin", source="download")
     assert result == "failed"
     assert any("not valid on this platform" in line for line in out)
+
+
+def test_obtain_download_504_verifies_checksum(tmp_path: Path, monkeypatch) -> None:
+    import hashlib
+
+    bindir = tmp_path / "bin"
+    monkeypatch.setattr(
+        setup_cmd, "platform_sources", lambda: (None, "scip-clang-504-arm64-darwin", False)
+    )
+
+    payload = b"fake-binary-bytes"
+    digest = hashlib.sha256(payload).hexdigest()
+
+    def fake_run(cmd, **kwargs):
+        class R:
+            returncode = 0
+            stdout = ""
+
+        if "-o" in cmd:
+            out = Path(cmd[cmd.index("-o") + 1])
+            out.write_bytes(payload)
+            return R()
+        r = R()
+        r.stdout = f"{digest}  scip-clang-504-arm64-darwin"
+        return r
+
+    monkeypatch.setattr(setup_cmd.subprocess, "run", fake_run)
+    p, out = _scripted_prompter([])
+    result = setup_cmd.obtain_scip_clang(p, bin_dir=bindir, source="download-504")
+    assert result == "present"
+    assert (bindir / "scip-clang").read_bytes() == payload
+    side = json.loads((bindir / "scip-clang.json").read_text())
+    assert side["variant"] == "504"
+
+
+def test_obtain_download_504_rejects_bad_checksum(tmp_path: Path, monkeypatch) -> None:
+    bindir = tmp_path / "bin"
+    monkeypatch.setattr(
+        setup_cmd, "platform_sources", lambda: (None, "scip-clang-504-arm64-darwin", False)
+    )
+
+    def fake_run(cmd, **kwargs):
+        class R:
+            returncode = 0
+            stdout = ""
+
+        if "-o" in cmd:
+            out = Path(cmd[cmd.index("-o") + 1])
+            out.write_bytes(b"fake-binary-bytes")
+            return R()
+        r = R()
+        r.stdout = f"{'a' * 64}  scip-clang-504-arm64-darwin"  # well-formed but wrong
+        return r
+
+    monkeypatch.setattr(setup_cmd.subprocess, "run", fake_run)
+    p, out = _scripted_prompter([])
+    result = setup_cmd.obtain_scip_clang(p, bin_dir=bindir, source="download-504")
+    assert result == "failed"
+    assert not (bindir / "scip-clang").exists()
+    assert any("checksum mismatch" in line for line in out)
+
+
+def test_obtain_download_504_rejects_malformed_sha(tmp_path: Path, monkeypatch) -> None:
+    """A .sha256 sidecar whose first token isn't a 64-hex digest is a fetch
+    failure — no unverified binary is kept."""
+    bindir = tmp_path / "bin"
+    monkeypatch.setattr(
+        setup_cmd, "platform_sources", lambda: (None, "scip-clang-504-arm64-darwin", False)
+    )
+
+    def fake_run(cmd, **kwargs):
+        class R:
+            returncode = 0
+            stdout = ""
+
+        if "-o" in cmd:
+            out = Path(cmd[cmd.index("-o") + 1])
+            out.write_bytes(b"fake-binary-bytes")
+            return R()
+        r = R()
+        r.stdout = "deadbeef  scip-clang-504-arm64-darwin"
+        return r
+
+    monkeypatch.setattr(setup_cmd.subprocess, "run", fake_run)
+    p, out = _scripted_prompter([])
+    result = setup_cmd.obtain_scip_clang(p, bin_dir=bindir, source="download-504")
+    assert result == "failed"
+    assert not (bindir / "scip-clang").exists()
+    assert any("no valid sha256" in line for line in out)
+
+
+def test_obtain_download_504_curl_failures_cleanup(tmp_path: Path, monkeypatch) -> None:
+    """curl failing on the binary itself or on the .sha256 sidecar: both fail and
+    no partial file is left behind."""
+    bindir = tmp_path / "bin"
+    monkeypatch.setattr(
+        setup_cmd, "platform_sources", lambda: (None, "scip-clang-504-arm64-darwin", False)
+    )
+
+    def attempt(binary_ok: bool, sha_ok: bool) -> str:
+        def fake_run(cmd, **kwargs):
+            class R:
+                returncode = 0
+                stdout = ""
+
+            if "-o" in cmd:  # the binary download; leaves a partial file even on failure
+                Path(cmd[cmd.index("-o") + 1]).write_bytes(b"partial-")
+                r = R()
+                r.returncode = 0 if binary_ok else 1
+                return r
+            r = R()  # the .sha256 fetch
+            r.returncode = 0 if sha_ok else 1
+            return r
+
+        monkeypatch.setattr(setup_cmd.subprocess, "run", fake_run)
+        p, _ = _scripted_prompter([])
+        return setup_cmd.obtain_scip_clang(p, bin_dir=bindir, source="download-504")
+
+    assert attempt(binary_ok=False, sha_ok=True) == "failed"
+    assert not (bindir / "scip-clang").exists()
+    assert attempt(binary_ok=True, sha_ok=False) == "failed"
+    assert not (bindir / "scip-clang").exists()
+
+
+def test_obtain_interactive_menu_defaults_to_download_504(tmp_path: Path, monkeypatch) -> None:
+    """Interactive with no --scip-source and a native #504 asset: the menu's
+    default (what an empty answer accepts) is download-504."""
+    bindir = tmp_path / "bin"
+    monkeypatch.setattr(
+        setup_cmd, "platform_sources", lambda: (None, "scip-clang-504-arm64-darwin", False)
+    )
+
+    seen: dict[str, object] = {}
+    real_select = Prompter.select
+
+    def recording_select(self, message, options, default):
+        seen["default"] = default
+        seen["first"] = options[0][0]
+        return real_select(self, message, options, default)
+
+    monkeypatch.setattr(Prompter, "select", recording_select)
+    downloads: list[str] = []
+
+    def fake_download_504(bin_dir, asset, version, p):
+        downloads.append(asset)
+        return True
+
+    monkeypatch.setattr(setup_cmd, "_download_504", fake_download_504)
+
+    p, out = _scripted_prompter([""])  # empty answer accepts the default
+    result = setup_cmd.obtain_scip_clang(p, bin_dir=bindir)
+    assert result == "present"
+    assert seen["default"] == "download-504"
+    assert seen["first"] == "download-504"
+    assert downloads == ["scip-clang-504-arm64-darwin"]
 
 
 def _boom(_prompt: str) -> str:

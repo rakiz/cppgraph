@@ -462,7 +462,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     p_setup.add_argument(
         "--scip-source",
-        choices=["download", "build", "emulate"],
+        choices=["download-504", "download", "build", "emulate"],
         default=None,
         help="how to obtain scip-clang (skips the menu; required when non-interactive)",
     )

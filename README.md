@@ -61,12 +61,14 @@ UI), then run the script non-interactively with those choices as flags.**
    ```
    It prints this machine's OS/arch and the sources that actually apply (e.g. no
    `download` on ARM-Linux). **Ask the user to pick from exactly those** — costs:
-   download ~1 min, build (#504) ~25–60 min Docker, emulate (slower indexing).
+   download-504 ~1 min (native #504, no Docker; macOS arm64 + Linux aarch64 today),
+   download ~1 min (stock, no #504), build (#504) ~25–60 min Docker, emulate (slower
+   indexing).
    Windows → WSL2; Intel Mac → only emulate.
 3. **Run it with their choice** (`!` runs it non-interactively; `--scip-source` is
    what makes that work — without it a piped run stops with `ACTION NEEDED`):
    ```
-   ! ~/.local/share/cppgraph/repo/scripts/setup.sh --scip-source <download|build|emulate>
+   ! ~/.local/share/cppgraph/repo/scripts/setup.sh --scip-source <download-504|download|build|emulate>
    ```
    `setup.sh` is the **sole** entry point — it creates the venv, obtains scip-clang,
    registers the MCP server, and (in a real terminal) offers to index the current

@@ -9,6 +9,7 @@ per-machine binary that took 30-60 minutes to build is never clobbered silently.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import platform
@@ -20,6 +21,7 @@ from cppgraph.init import find_compdb, scip_clang_bin_dir
 from cppgraph.prompt import Prompter, interactive, make_prompter
 
 _DEFAULT_SCIP_VERSION = "0.4.0"
+_CPPGRAPH_REPO = "rakiz/cppgraph"
 
 
 def _repo_root() -> Path:
@@ -36,17 +38,26 @@ def _pinned_scip_version() -> str:
         return _DEFAULT_SCIP_VERSION
 
 
-def platform_sources() -> tuple[str | None, bool]:
-    """`(native_asset, host_can_build)` for this machine. `native_asset` is the
-    prebuilt release asset name, or None when none is published; `host_can_build` is
-    True on Linux (a local #504 build compiles a Linux binary for the host)."""
+def platform_sources() -> tuple[str | None, str | None, bool]:
+    """`(native_asset, native_504_asset, host_can_build)` for this machine.
+    `native_asset` is the prebuilt stock release asset name (upstream
+    sourcegraph/scip-clang), or None when none is published. `native_504_asset` is
+    the prebuilt #504 (enclosing_range) asset name published by this project's own
+    releases (see `scripts/publish-scip-clang-504.sh`), or None when this host's
+    platform has no published #504 binary yet. `host_can_build` is True on Linux (a
+    local #504 build compiles a Linux binary for the host)."""
     system, machine = platform.system(), platform.machine()
     native = {
         ("Darwin", "arm64"): "scip-clang-arm64-darwin",
         ("Linux", "x86_64"): "scip-clang-x86_64-linux",
     }.get((system, machine))
+    native_504 = {
+        ("Darwin", "arm64"): "scip-clang-504-arm64-darwin",
+        ("Linux", "aarch64"): "scip-clang-504-aarch64-linux",
+        ("Linux", "arm64"): "scip-clang-504-aarch64-linux",
+    }.get((system, machine))
     host_can_build = system == "Linux" and machine in ("x86_64", "aarch64", "arm64")
-    return native, host_can_build
+    return native, native_504, host_can_build
 
 
 def read_sidecar(bin_dir: Path) -> dict | None:
@@ -87,6 +98,41 @@ def _download_scip(bin_dir: Path, asset: str, version: str, p: Prompter) -> bool
     return True
 
 
+def _download_504(bin_dir: Path, asset: str, version: str, p: Prompter) -> bool:
+    """Download a prebuilt #504 (enclosing_range) binary from this project's own
+    GitHub releases (published by `scripts/publish-scip-clang-504.sh`), verified
+    against its `.sha256` sidecar asset."""
+    binary = bin_dir / "scip-clang"
+    tag = f"scip-clang-504-v{version}"
+    base = f"https://github.com/{_CPPGRAPH_REPO}/releases/download/{tag}"
+    p.note(f"==> Downloading scip-clang #504 {tag} ({asset})")
+    proc = subprocess.run(["curl", "-fL", "--retry", "3", "-o", str(binary), f"{base}/{asset}"])
+    if proc.returncode != 0:
+        binary.unlink(missing_ok=True)
+        p.note(f"error: failed to download from {base}/{asset} — check network/proxy and retry.")
+        return False
+    sha_proc = subprocess.run(
+        ["curl", "-fL", "--retry", "3", f"{base}/{asset}.sha256"], capture_output=True, text=True
+    )
+    if sha_proc.returncode != 0:
+        binary.unlink(missing_ok=True)
+        p.note(f"error: failed to download {asset}.sha256 — refusing an unverified binary.")
+        return False
+    expected = sha_proc.stdout.split()[0] if sha_proc.stdout.split() else ""
+    if len(expected) != 64 or any(c not in "0123456789abcdef" for c in expected.lower()):
+        binary.unlink(missing_ok=True)
+        p.note(f"error: no valid sha256 in {asset}.sha256 — refusing an unverified binary.")
+        return False
+    actual = hashlib.sha256(binary.read_bytes()).hexdigest()
+    if actual != expected:
+        binary.unlink(missing_ok=True)
+        p.note(f"error: checksum mismatch for {asset} (expected {expected}, got {actual}).")
+        return False
+    binary.chmod(0o755)
+    _write_sidecar(bin_dir, version, "504", "download-504")
+    return True
+
+
 def _build_scip(bin_dir: Path, p: Prompter) -> bool:
     build = _repo_root() / "docker" / "build-scip-clang" / "build.sh"
     if not build.is_file():
@@ -97,9 +143,13 @@ def _build_scip(bin_dir: Path, p: Prompter) -> bool:
     return proc.returncode == 0
 
 
-def _valid_sources(native: str | None, host_can_build: bool) -> list[tuple[str, str]]:
+def _valid_sources(
+    native: str | None, native_504: str | None, host_can_build: bool
+) -> list[tuple[str, str]]:
     """The scip-clang sources valid on this host, each `(value, label-with-cost)`."""
     options: list[tuple[str, str]] = []
+    if native_504:
+        options.append(("download-504", "download prebuilt #504 (enclosing_range) — ~1 min"))
     if native:
         options.append(("download", "download prebuilt binary (stock, no #504) — ~1 min"))
     if host_can_build:
@@ -125,9 +175,9 @@ def obtain_scip_clang(
     bin_dir = bin_dir or scip_clang_bin_dir()
     bin_dir.mkdir(parents=True, exist_ok=True)
     binary = bin_dir / "scip-clang"
-    native, host_can_build = platform_sources()
+    native, native_504, host_can_build = platform_sources()
     version = _pinned_scip_version()
-    valid = _valid_sources(native, host_can_build)
+    valid = _valid_sources(native, native_504, host_can_build)
     valid_values = {v for v, _ in valid}
 
     if os.access(binary, os.X_OK) and not from_scratch:
@@ -165,7 +215,9 @@ def obtain_scip_clang(
         choice = p.select(
             "How should scip-clang be obtained?",
             [*valid, ("abort", "don't install — stop setup")],
-            "download" if native else ("build" if host_can_build else "emulate"),
+            "download-504"
+            if native_504
+            else ("download" if native else ("build" if host_can_build else "emulate")),
         )
     else:
         # Non-interactive and no source given: STOP, never default into a costly
@@ -183,6 +235,11 @@ def obtain_scip_clang(
             p.note("error: no prebuilt binary for this platform.")
             return "failed"
         return "present" if _download_scip(bin_dir, native, version, p) else "failed"
+    if choice == "download-504":
+        if not native_504:
+            p.note("error: no prebuilt #504 binary for this platform.")
+            return "failed"
+        return "present" if _download_504(bin_dir, native_504, version, p) else "failed"
     if choice == "build":
         if not host_can_build:
             p.note("error: a local build only works on a Linux host.")

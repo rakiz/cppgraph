@@ -26,9 +26,11 @@ scripts/setup.sh
 Useful options:
 
 - `--list-sources` prints the `scip-clang` sources valid for this host and exits.
-- `--scip-source download|build|emulate` selects a source without prompting;
-  this is required for non-interactive runs. `build` is the Linux Docker #504
-  build; `emulate` indexes through an x86 container when no native binary exists.
+- `--scip-source download-504|download|build|emulate` selects a source without
+  prompting; this is required for non-interactive runs. `download-504` fetches this
+  project's own prebuilt enclosing_range binary (macOS arm64 / Linux aarch64 today);
+  `build` is the Linux Docker #504 build; `emulate` indexes through an x86 container
+  when no native binary exists.
 - `--version VERSION`, `--branch BRANCH`, or `--nightly` selects the cppgraph
   checkout/ref to install.
 - `--from-scratch` re-walks setup stages; `--no-index` stops after machine setup;
