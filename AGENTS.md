@@ -46,7 +46,7 @@ when you want to measure at scale; keep such paths out of the shipped code.)
   crash.
 - **scip-clang runs NATIVELY on macOS arm64, Linux x86_64, and Linux aarch64 —
   indexing there needs NO Docker.** macOS arm64 + Linux aarch64 get #504
-  (`--attributed-refs`, symbol-granularity refs) natively via `download-504`;
+  (`--attributed-refs`, symbol-granularity refs) natively via `download-patched`;
   Linux x86_64 gets the stock prebuilt via `download` (no #504), or #504 via a
   local build. Docker enters only for (a) that #504 *build* (a Linux-only
   compile), or (b) hosts with no native binary at all (Intel Mac, Windows) via
@@ -54,7 +54,7 @@ when you want to measure at scale; keep such paths out of the shipped code.)
   **not** generalize "#504 build is Linux-only" into "scip-clang is
   Linux-only" — they are different claims. When unsure of a host's options, run
   `setup.sh --list-sources` (it prints them); on macOS arm64 it lists
-  `download-504` and `download`, both native binaries. Re-indexing a stale
+  `download-patched` and `download`, both native binaries. Re-indexing a stale
   project on macOS arm64 uses that native binary directly — no container.
 - Tests with `pytest` under `tests/`. Prefer small fixtures (a tiny checked-in
   or synthetic `.scip`) over depending on a full external index.
@@ -218,13 +218,14 @@ when it's stale (it reflects the build graph at generation time).
      `! ~/.local/share/cppgraph/repo/scripts/setup.sh --list-sources` (pure bash, no
      venv needed): it prints this machine's OS/arch and the sources that actually
      apply (e.g. no `download` on ARM-Linux). **Ask the user to pick from exactly
-     those** — each has a cost: download-504 ~1 min (native #504, no Docker; macOS
-     arm64 + Linux aarch64 today), download ~1 min (native stock, no #504), build
-     (#504) ~25–60 min Docker (Linux-only), emulate (slower indexing, container).
+     those** — each has a cost: download-patched ~1 min (patched binary, no Docker;
+     macOS
+     arm64 + Linux aarch64 today), download ~1 min (native stock, unpatched), build
+     (patched) ~25–60 min Docker (Linux-only), emulate (slower indexing, container).
      Offering a source the tool didn't list will fail.
   4. Run `setup.sh` with their choice as a flag (this is what lets `!` work):
      ```
-     ! ~/.local/share/cppgraph/repo/scripts/setup.sh --scip-source <download-504|download|build|emulate>
+     ! ~/.local/share/cppgraph/repo/scripts/setup.sh --scip-source <download-patched|download|build|emulate>
      ```
      Without `--scip-source`, a piped run stops with `ACTION NEEDED` rather than
      picking a costly default — that's deliberate.

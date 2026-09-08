@@ -26,10 +26,11 @@ scripts/setup.sh
 Useful options:
 
 - `--list-sources` prints the `scip-clang` sources valid for this host and exits.
-- `--scip-source download-504|download|build|emulate` selects a source without
-  prompting; this is required for non-interactive runs. `download-504` fetches this
-  project's own prebuilt enclosing_range binary (macOS arm64 / Linux aarch64 today);
-  `build` is the Linux Docker #504 build; `emulate` indexes through an x86 container
+- `--scip-source download-patched|download|build|emulate` selects a source without
+  prompting; this is required for non-interactive runs. `download-patched` fetches this
+  project's own prebuilt patched binary — enclosing_range + ForwardDefinition
+  (macOS arm64 / Linux aarch64 today);
+  `build` is the Linux Docker build; `emulate` indexes through an x86 container
   when no native binary exists.
 - `--version VERSION`, `--branch BRANCH`, or `--nightly` selects the cppgraph
   checkout/ref to install.
@@ -39,7 +40,7 @@ Useful options:
 It requires `uv`. The installed tool and per-machine binary live below
 `${XDG_DATA_HOME:-$HOME/.local/share}/cppgraph`; `CPPGRAPH_BIN_DIR` can override
 the binary location. The Linux Docker build used by the `build` source is the
-sibling [`docker/build-scip-clang/`](../docker/build-scip-clang/) implementation.
+sibling [`docker/build-scip-clang-patched-linux/`](../docker/build-scip-clang-patched-linux/) implementation.
 
 ## `index.sh`
 
@@ -136,9 +137,10 @@ names a command that no longer exists) — the prompt to curate the newcomer's
 place, not a silent omission. `tests/test_gen_cli_reference.py` checks the
 checked-in page is always fresh.
 
-## `build-scip-clang-macos.sh`
+## `build-scip-clang-patched-macos.sh`
 
-Builds the `scip-clang` v0.4.0 + `enclosing_range` (#504) binary natively for
+Builds a patched `scip-clang` binary (v0.4.0 + `enclosing_range` (#504) +
+ForwardDefinition) natively for
 the current Mac architecture. Docker cannot produce a native macOS binary, so
 this script builds LLVM/Clang on the host with Bazel, patches the pinned source,
 verifies the result, and writes the binary plus provenance sidecar.
@@ -149,7 +151,7 @@ Bazelisk is used, with Bazelisk downloaded locally when needed. It takes an
 optional output directory:
 
 ```sh
-scripts/build-scip-clang-macos.sh [OUTPUT_DIR]
+scripts/build-scip-clang-patched-macos.sh [OUTPUT_DIR]
 ```
 
 `CPPGRAPH_BUILD_SRC_DIR` selects the reusable source/build checkout,
@@ -162,36 +164,39 @@ per-workspace `output_base`, outside any of this repo's directories) — after a
 successful build the script measures its actual size and, at an interactive
 terminal, offers to reclaim it with `bazel clean --expunge`; a non-interactive
 run always skips this and just prints the size and the manual command. The
-resulting binary is the input to `publish-scip-clang-504.sh`.
+resulting binary is the input to `publish-scip-clang-patched.sh`.
 
 For Linux, the equivalent Docker-based maintainer build is
-[`docker/build-scip-clang/`](../docker/build-scip-clang/); its own README
+[`docker/build-scip-clang-patched-linux/`](../docker/build-scip-clang-patched-linux/); its own README
 documents that path and its disk/timing trade-offs.
 
-## `publish-scip-clang-504.sh`
+## `publish-scip-clang-patched.sh`
 
-Publishes a locally built #504 binary and its SHA-256 checksum as assets on a
+Publishes a locally built patched binary and its SHA-256 checksum as assets on a
 GitHub release. It creates or reuses the release tag
-`scip-clang-504-vVERSION`, allowing assets for multiple platforms to share one
-release. Existing assets are replaced only after an interactive confirmation.
-This publishes the binary only; `cppgraph setup` still downloads upstream stock
-binaries, so consuming these assets is a separate follow-up.
+`scip-clang-patched-vVERSION-pPATCHSET`, allowing assets for multiple platforms
+to share one release (PATCHSET is this repo's patch-bundle version,
+`scip_clang.patchset_version` in `versions.json` — bumping it starts a fresh
+release even on the same upstream version). Existing assets are replaced only
+after an interactive confirmation. This publishes the binary only;
+`cppgraph setup`'s `download-patched` source consumes exactly these assets.
 
 This is also a **manual maintainer tool**, never called by cppgraph and never
 run in CI. It requires an authenticated `gh`, python3, and `sha256sum` or
 `shasum`:
 
 ```sh
-scripts/publish-scip-clang-504.sh BINARY PLATFORM [VERSION]
+scripts/publish-scip-clang-patched.sh BINARY PLATFORM [VERSION] [PATCHSET]
 ```
 
 `BINARY` may be the executable or a directory containing `scip-clang`.
 `PLATFORM` must describe where it was built, not where the command runs:
 `aarch64-linux`, `x86_64-linux`, or `arm64-darwin`. `VERSION` defaults to the
-`scip_clang.version` pin in `versions.json`. The script sanity-checks binaries
+`scip_clang.version` pin and `PATCHSET` to the `scip_clang.patchset_version`
+pin in `versions.json`. The script sanity-checks binaries
 that can run on the current host, but still supports publishing a foreign-arch
 binary and always computes its checksum.
 
-The intended handoff is: build with `build-scip-clang-macos.sh` (or the sibling
+The intended handoff is: build with `build-scip-clang-patched-macos.sh` (or the sibling
 Docker build), then publish with this script. Publishing does not change the
 normal setup/index path.

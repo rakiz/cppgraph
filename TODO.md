@@ -33,14 +33,15 @@ active list. Design detail is in `DESIGN.md`, shipped features in
   (already generic over edge kinds) would render `uses` relationships automatically. Cost
   (millions of extra edges) vs. that narrower payoff — moderate cost, modest-but-real
   value; lower priority than the headline made it sound.
-- **Simplify installation.** Both macOS arm64 and Linux aarch64 #504 binaries are now
-  published (`scip-clang-504-v0.4.0` on GitHub releases), and `setup_cmd.py`'s
-  `platform_sources()`/`obtain_scip_clang()` now offer a `download-504` source
+- **Simplify installation.** Both macOS arm64 and Linux aarch64 patched binaries are now
+  published (`scip-clang-patched-v<version>-p<patchset>` on GitHub releases; the patchset
+  pin is `versions.json`'s `scip_clang.patchset_version`), and `setup_cmd.py`'s
+  `platform_sources()`/`obtain_scip_clang()` now offer a `download-patched` source
   (checksum-verified against the release's `.sha256` asset) ahead of `download`
-  (stock) and `build` (local compile) whenever a prebuilt #504 binary exists for the
+  (stock) and `build` (local compile) whenever a prebuilt patched binary exists for the
   host. Still open: reconsider whether the agent-interview ritual (README's two-phase
   setup flow) is still the right default now that the two heaviest costs (compile
-  time, disk space) can often be skipped entirely — and publish an `x86_64-linux` #504
+  time, disk space) can often be skipped entirely — and publish an `x86_64-linux` patched
   asset too, the one platform still without one.
 - **Contributing notes, CI (lint + pytest), publish.** Not a 0.1.0 blocker.
 - **Make the repo discoverable to LLMs (distribution).** LLMs asked to compare
@@ -158,7 +159,7 @@ item below states a verified fact, not a suspicion, and carries the effort estim
 - **`enclosing_range` — not emitted by official scip-clang at all (PR #504 in progress).**
   The single biggest gap: enclosing ranges are the definition-body extents that drive exact
   caller/reference attribution and the symbol-granularity usage view. The official binary
-  emits none. We carry a patch (`docker/build-scip-clang/enclosing_range-on-v0.4.0.patch`,
+  emits none. We carry a patch (`scip-clang-patches/enclosing_range-on-v0.4.0.patch`,
   tracking [sourcegraph/scip-clang#504](https://github.com/sourcegraph/scip-clang/pull/504))
   and apply it when we build — including on *term* (global) definitions, where our patch's
   `saveVarDecl` emits the range over the initializer (this is what `global_init_references`

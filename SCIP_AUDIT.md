@@ -161,5 +161,5 @@ int with_lambda() {
 
 Source citations are from the #504-patched scip-clang checkout at
 `~/.cache/cppgraph/scip-clang-src` (v0.4.0 base — the same checkout
-`scripts/build-scip-clang-macos.sh` builds from), verified by reading the
+`scripts/build-scip-clang-patched-macos.sh` builds from), verified by reading the
 cited lines, not from memory.

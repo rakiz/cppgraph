@@ -39,6 +39,8 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+from cppgraph.init import PATCHED_VARIANTS
+
 DEFAULT_VERSIONS_URL = "https://raw.githubusercontent.com/rakiz/cppgraph/main/versions.json"
 _CACHE_TTL_SECONDS = 24 * 60 * 60
 _FETCH_TIMEOUT_SECONDS = 2.0
@@ -151,7 +153,7 @@ def _max_level(releases: list[dict[str, Any]]) -> str:
 # ---- scip-clang dependency pin ---------------------------------------------
 # The indexer is a versioned dependency with an identity of (version, variant):
 # "stock" is the unpatched upstream release binary; a non-stock variant (e.g.
-# "enclosing_range-504") is built from source with a patch. The two emit
+# "patched") is built from source with this repo's patch bundle. The two emit
 # different `.scip`, so both the installed binary and each graph are compared
 # against the pin in versions.json (`scip_clang`). See DESIGN.md § Source of truth.
 
@@ -196,13 +198,15 @@ def compute_scip_advice(
 ) -> dict[str, Any]:
     """Pure advice about the scip-clang dependency. No I/O — unit-tested.
 
-    Staleness is judged on **version only**. The *variant* (stock vs
-    `enclosing_range-504`) is deliberately **not** pinned: stock and #504 are two
-    valid capability levels, not a right/wrong pair, and a graph's variant is
-    independent of the locally installed binary (a #504-indexed graph can be
-    copied to a machine that only has the stock binary). So variant is reported
-    for information — never as a "stale, rebuild it" nag. What a *graph* actually
-    carries (file vs symbol granularity) is surfaced separately via
+    Staleness is judged on **version** (and, for a patched-family binary —
+    "patched" or a pre-rename spelling, see PATCHED_VARIANTS — on
+    the `patchset_version` of our patch bundle). The *variant* (stock vs
+    `patched`) itself is deliberately **not** pinned as a requirement: stock and
+    patched are two valid capability levels, not a right/wrong pair, and a graph's
+    variant is independent of the locally installed binary (a patched-indexed graph
+    can be copied to a machine that only has the stock binary). So variant is
+    reported for information — never as a "stale, rebuild it" nag. What a *graph*
+    actually carries (file vs symbol granularity) is surfaced separately via
     `has_attributed_refs` (see the `usage_view` in `status`)."""
     if not pin or not pin.get("version"):
         return {"checked": False}
@@ -229,6 +233,24 @@ def compute_scip_advice(
         advice["binary_status"] = "ok"
     if have is not None:
         advice["installed_variant"] = have[1]  # informational
+        # Patchset staleness, for any patched-family binary (current "patched" or a
+        # pre-rename "enclosing_range-504"/"504" sidecar — see PATCHED_VARIANTS): a
+        # sidecar predating the field (or missing it) counts as patchset 1 — the
+        # initial bundle. Advisory like the version advice, never a hard verdict.
+        pin_ps = pin.get("patchset_version")
+        if have[0] == want_ver and have[1] in PATCHED_VARIANTS and isinstance(pin_ps, int):
+            try:
+                have_ps = int((installed or {}).get("patchset_version", 1))
+            except (TypeError, ValueError):
+                have_ps = 1
+            if have_ps < pin_ps:
+                advice["patchset_status"] = "stale"
+                advice["patchset_message"] = (
+                    f"the installed patched binary is patchset p{have_ps} but the "
+                    f"pinned patchset is p{pin_ps} — re-run scripts/setup.sh "
+                    "(download-patched), or rebuild it locally, to pick up the "
+                    "newer patches."
+                )
 
     g = _scip_identity(graph_scip)
     if g is not None:

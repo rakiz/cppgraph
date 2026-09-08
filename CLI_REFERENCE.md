@@ -48,7 +48,7 @@ forms an agent or a script can call directly.
 
 ```bash
 # once per machine — the script wraps `cppgraph setup` (never run it bare)
-~/.local/share/cppgraph/repo/scripts/setup.sh --scip-source download-504
+~/.local/share/cppgraph/repo/scripts/setup.sh --scip-source download-patched
 
 # index this project (interactive wizard; `scripts/index.sh` wraps it)
 cppgraph init                          # auto-finds compile_commands.json

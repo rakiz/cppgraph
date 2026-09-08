@@ -25,13 +25,13 @@ def _boom_input(_prompt: str) -> str:
     raise AssertionError("non-interactive mode must not prompt for input")
 
 
-def _make_504_bindir(tmp_path: Path) -> Path:
-    d = tmp_path / "bin504"
+def _make_patched_bindir(tmp_path: Path) -> Path:
+    d = tmp_path / "binpatched"
     d.mkdir()
     binary = d / "scip-clang"
     binary.write_text("#!/bin/sh\n")
     binary.chmod(0o755)
-    (d / "scip-clang.json").write_text(json.dumps({"variant": "enclosing_range-504"}))
+    (d / "scip-clang.json").write_text(json.dumps({"variant": "patched"}))
     return d
 
 
@@ -84,8 +84,8 @@ def test_scip_clang_info_reads_variant_sidecar(tmp_path: Path) -> None:
     binary = tmp_path / "scip-clang"
     binary.write_text("#!/bin/sh\n")
     binary.chmod(0o755)
-    (tmp_path / "scip-clang.json").write_text(json.dumps({"variant": "enclosing_range-504"}))
-    assert scip_clang_info(tmp_path) == (True, "enclosing_range-504")
+    (tmp_path / "scip-clang.json").write_text(json.dumps({"variant": "patched"}))
+    assert scip_clang_info(tmp_path) == (True, "patched")
 
 
 def test_scip_clang_info_absent(tmp_path: Path) -> None:
@@ -257,7 +257,7 @@ def test_run_init_non_interactive_gates_attribution(tmp_path: Path, monkeypatch)
     compdb = _write_compdb(tmp_path / "compile_commands.json")
 
     # With a #504 binary: --attributed-refs survives.
-    monkeypatch.setenv("CPPGRAPH_BIN_DIR", str(_make_504_bindir(tmp_path)))
+    monkeypatch.setenv("CPPGRAPH_BIN_DIR", str(_make_patched_bindir(tmp_path)))
     lines, prnt = _capturing_print()
     run_init(
         compdb=str(compdb),

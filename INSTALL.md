@@ -89,9 +89,9 @@ too — the GitHub API resolves either).
 
 | source | what it does | when |
 |---|---|---|
-| `download-504` | fetch this project's prebuilt #504 (`enclosing_range`) binary from its own GitHub releases (~1 min, checksum-verified) | macOS arm64 + Linux aarch64 (today) |
+| `download-patched` | fetch this project's prebuilt patched (`enclosing_range` + ForwardDefinition) binary from its own GitHub releases (~1 min, checksum-verified) | macOS arm64 + Linux aarch64 (today) |
 | `download` | fetch the upstream prebuilt release binary (stock, no PR #504) | macOS arm64, Linux x86_64 |
-| `build` | compile it locally with `enclosing_range`/PR #504 (`docker/build-scip-clang/`, ~25–60 min, Docker, **Linux host only** — produces a Linux binary) | #504 on Linux x86_64 (no prebuilt there yet), or a host preferring a local compile |
+| `build` | compile it locally with `enclosing_range`/PR #504 (`docker/build-scip-clang-patched-linux/`, ~25–60 min, Docker, **Linux host only** — produces a Linux binary) | #504 on Linux x86_64 (no prebuilt there yet), or a host preferring a local compile |
 | `emulate` | install no host binary; index through an x86 container | Intel Mac, Windows, or skipping the native options |
 
 The menu lists only the sources valid on this host, each with its rough cost, plus
@@ -100,8 +100,8 @@ macOS isn't offered: the container emits a *Linux* binary, unusable on the host.
 
 > **Platform rule (don't get this wrong).** `scip-clang` runs **natively** —
 > **no Docker at all** — on all three of: **macOS arm64** (both sources:
-> `download-504` for #504, preferred, and stock `download`), **Linux x86_64**
-> (stock `download`), and **Linux aarch64** (this project's `download-504`
+> `download-patched` for #504, preferred, and stock `download`), **Linux x86_64**
+> (stock `download`), and **Linux aarch64** (this project's `download-patched`
 > prebuilt). Docker is required *only* for the `build` source (a local
 > PR #504 / `enclosing_range` compile — the *build* is Linux-only, and it
 > gives `--attributed-refs`) or the `emulate` source (hosts with no native
@@ -110,14 +110,18 @@ macOS isn't offered: the container emits a *Linux* binary, unusable on the host.
 > **false**. When in doubt, `scripts/setup.sh --list-sources` prints this
 > host's real options.
 
-**Pinned version + staleness.** scip-clang is pinned by **version only** in
-`versions.json` (`scip_clang`). The setup reads it and writes a provenance
+**Pinned version + staleness.** scip-clang is pinned by **version** (the upstream
+release tag) and — for the patched binary — by **patchset** (this repo's patch
+bundle) in `versions.json` (`scip_clang.version` / `scip_clang.patchset_version`,
+independent of each other). The setup reads them and writes a provenance
 sidecar (`scip-clang.json`) next to the binary recording what it installed —
-including the **variant** (`stock` vs a patched build like `enclosing_range-504`
-from PR #504). `cppgraph status` flags **"update the binary"** / **"re-index"**
-only on a *version* change. The **variant is not pinned**: `stock` and `#504` are
+including the **variant** (`stock` vs `patched`) and, for a patched binary, the
+`patchset_version` it was built from. `cppgraph status` flags **"update the
+binary"** on a version change, and advisories (never nags) when an installed
+patched binary predates the pinned patchset. The **variant itself is not
+pinned**: `stock` and `patched` are
 two valid capability levels, and a graph's variant is independent of the local
-binary (a #504-indexed store can be copied to a stock-only machine), so `status`
+binary (a patched-indexed store can be copied to a stock-only machine), so `status`
 reports the variant for information rather than nagging. Whether a given graph has
 the richer symbol-granularity attribution is shown by its `usage_view`, not by a
 variant match — get it with a #504 index + `--attributed-refs`, or `enrich-refs`.
@@ -146,20 +150,21 @@ Use the plain `scip-clang-x86_64-linux`. The `-dev-` asset is a debug build
 (assertions on, slower) — you only want it if you're diagnosing a scip-clang
 crash, not for normal indexing.
 
-The **#504** (`enclosing_range`) binary is published on *this project's* GitHub
-releases instead of upstream's — different tag, different asset names (see
-`scripts/publish-scip-clang-504.sh`): tag `scip-clang-504-v<scip-clang version>`
-(e.g. `scip-clang-504-v0.4.0`), asset `scip-clang-504-<platform>` plus a
+The **patched** (`enclosing_range` + ForwardDefinition) binary is published on
+*this project's* GitHub releases instead of upstream's — different tag, different
+asset names (see `scripts/publish-scip-clang-patched.sh`): tag
+`scip-clang-patched-v<scip-clang version>-p<patchset>` (e.g.
+`scip-clang-patched-v0.4.0-p2`), asset `scip-clang-patched-<platform>` plus a
 `.sha256` sibling, for the platforms published so far:
 
-| Platform     | #504 asset name                     |
+| Platform     | patched asset name                  |
 |--------------|--------------------------------------|
-| macOS arm64  | `scip-clang-504-arm64-darwin`        |
-| Linux aarch64| `scip-clang-504-aarch64-linux`       |
+| macOS arm64  | `scip-clang-patched-arm64-darwin`    |
+| Linux aarch64| `scip-clang-patched-aarch64-linux`   |
 
 ```bash
 curl -fL --retry 3 -o "$BIN_DIR/scip-clang" \
-  https://github.com/rakiz/cppgraph/releases/download/scip-clang-504-v0.4.0/scip-clang-504-arm64-darwin
+  https://github.com/rakiz/cppgraph/releases/download/scip-clang-patched-v0.4.0-p2/scip-clang-patched-arm64-darwin
 chmod +x "$BIN_DIR/scip-clang"   # verify against the matching .sha256 asset
 ```
 
@@ -178,8 +183,8 @@ Verify:
 
 Upstream `scip-clang` ships **no ARM-Linux (aarch64) binary** — only
 `x86_64-linux` and `arm64-darwin` — and nothing for Windows. ARM-Linux instead
-uses a native prebuilt **#504** aarch64 binary this project publishes (the
-setup wizard's `download-504`, ~1 min, native, no Docker — see the source
+uses a native prebuilt **patched** aarch64 binary this project publishes (the
+setup wizard's `download-patched`, ~1 min, native, no Docker — see the source
 table above), so a native index is the normal path there. The container route
 below is for **Windows and Intel Mac** (no native binary at all), or an
 ARM-Linux host that skips the download — and indexing is the **only** step that
@@ -193,8 +198,8 @@ run scip-clang in an x86_64 container, then build the graph natively.
 > project (e.g. MongoDB on a Graviton `m6g.2xlarge`) the run can estimate
 > **~11 h** and then die with worker timeouts before writing any `.scip`. The
 > container path below is fine for a subsystem or a small/medium project; for a
-> real ARM-Linux indexing workflow, take the `download-504` prebuilt above — or
-> compile once with [`docker/build-scip-clang/`](docker/build-scip-clang) — and
+> real ARM-Linux indexing workflow, take the `download-patched` prebuilt above — or
+> compile once with [`docker/build-scip-clang-patched-linux/`](docker/build-scip-clang-patched-linux) — and
 > index with `scripts/index.sh` (no container). See that directory's README.
 
 ```bash

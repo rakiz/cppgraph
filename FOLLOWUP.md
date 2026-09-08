@@ -60,7 +60,7 @@ confirmed via its `scip-clang.json` sidecar `variant: enclosing_range-504` —
 so this isn't a stock-vs-#504 artifact, the #504 patch never touched this).
 `set_is_type_definition` does not appear anywhere in `indexer/Indexer.cc`
 (cloned locally at `~/.cache/cppgraph/scip-clang-src`, same checkout
-`scripts/build-scip-clang-macos.sh` uses) — it's not a rare case, the indexer
+`scripts/build-scip-clang-patched-macos.sh` uses) — it's not a rare case, the indexer
 simply never computes it. So the feature is correct but produces zero edges
 on every graph anyone can build today — dead code. Reverted rather than
 committed; not worth carrying a `typed-by` choice in every `--kind` flag/
@@ -76,10 +76,10 @@ already-existing `symbolFormatter.getNamedDeclSymbol(...)` helper, attach a
 natural place to add the field-type case; `saveVarDecl` (~line 931) similarly
 for variables. Estimate: ~20-40 lines across those two functions, no new
 infrastructure — same shape/size as the `enclosing_range` patch
-(`docker/build-scip-clang/enclosing_range-on-v0.4.0.patch`) we already
+(`scip-clang-patches/enclosing_range-on-v0.4.0.patch`) we already
 maintain. A clean small upstream PR, or an equally small local patch in the
 meantime (same recipe: clone at the pinned tag, patch, rebuild via
-`scripts/build-scip-clang-macos.sh` / `docker/build-scip-clang/`).
+`scripts/build-scip-clang-patched-macos.sh` / `docker/build-scip-clang-patched-linux/`).
 
 ### Is it actually worth doing?
 

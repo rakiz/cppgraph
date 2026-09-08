@@ -330,7 +330,7 @@ def main(argv: list[str] | None = None) -> int:
         "--scip-variant",
         default=None,
         help="the scip-clang variant that produced this index (e.g. 'stock' or "
-        "'enclosing_range-504'); recorded as provenance so `cppgraph status` can "
+        "'patched'); recorded as provenance so `cppgraph status` can "
         "flag the graph as stale when the pinned indexer changes. the index wizard "
         "passes it from the binary's provenance sidecar.",
     )
@@ -462,7 +462,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     p_setup.add_argument(
         "--scip-source",
-        choices=["download-504", "download", "build", "emulate"],
+        choices=["download-patched", "download", "build", "emulate"],
         default=None,
         help="how to obtain scip-clang (skips the menu; required when non-interactive)",
     )
@@ -1957,6 +1957,8 @@ def main(argv: list[str] | None = None) -> int:
             print(line)
             if scip.get("binary_status") in ("stale", "unknown"):
                 print(f"    ! {scip['binary_message']}")
+            if scip.get("patchset_status") == "stale":
+                print(f"    ! {scip['patchset_message']}")
             if scip.get("reindex_recommended"):
                 print(f"    ! {scip['reindex_message']}")
         tool = update_advice(m.get("cppgraph_version"))

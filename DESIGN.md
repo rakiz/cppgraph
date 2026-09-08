@@ -25,17 +25,20 @@ relationships (implementation/override, type definition). It is batch, parallel,
 and crash-isolated per translation unit — important because clangd (tried first)
 crashes on some third_party TUs.
 
-scip-clang is a dependency pinned by **version only** (`versions.json` →
-`scip_clang`); `cppgraph status` flags a stale binary / a graph needing re-index
-on a version change. Its **variant** (`stock` upstream release vs a patched build
-like `enclosing_range-504` from PR #504) is *not* pinned: the two are valid
+scip-clang is a dependency pinned by **version** (the upstream release tag) and —
+for the patched binary — by **patchset** (this repo's patch bundle, an independent
+integer) in `versions.json` → `scip_clang`; `cppgraph status` flags a stale binary
+/ a graph needing re-index on a version change, and advises (never nags) when an
+installed patched binary predates the pinned patchset. Its **variant** (`stock`
+upstream release vs `patched`, our bundle on top of PR #504) is *not* pinned as a
+requirement: the two are valid
 capability levels, not a right/wrong pair, and a graph's variant is independent
-of the locally installed binary — a #504-indexed store can be copied to a machine
+of the locally installed binary — a patched-indexed store can be copied to a machine
 that only has the stock binary. So the installed binary's sidecar and each store's
 `index_tool_variant` are reported by `status` for information, while what a graph
 actually carries (file vs symbol-granularity usage) is surfaced by
 `has_attributed_refs` / the usage view. See `updates.py` and
-`docker/build-scip-clang/`.
+`docker/build-scip-clang-patched-linux/`.
 
 ### Why SCIP is the right foundation — and where its edge is
 
@@ -224,7 +227,7 @@ fallback (`src/cppgraph/builder.py`):
    binary emits `enclosing_range`, caller attribution and (opt-in) reference
    attribution use range containment → exact, zero collateral; the over-capture
    above is the stock-binary fallback only. A #504 binary is built from source
-   via `docker/build-scip-clang/`.
+   via `docker/build-scip-clang-patched-linux/`.
 
    On a #504 graph specifically, `build_graph` also detects the declaration case
    above by a different signal: `callable_intervals` is populated (the binary

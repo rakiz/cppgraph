@@ -45,22 +45,35 @@ fi
 echo "==> Building scip-clang natively for host arch: $(uname -m)"
 echo "    (compiles LLVM-based code from source; expect ~30-60 min)"
 
+# Patchset stamp, read before the build so a broken checkout fails fast: a local
+# build always bakes in the CURRENT patch bundle (the *.patch files here, pinned
+# by versions.json's scip_clang.patchset_version), so the sidecar must carry that
+# pin — without it `cppgraph status` assumes p1 and nags "stale" forever.
+# (No python3 required here: sed against the repo-root versions.json, two levels up.)
+PATCHSET_VERSION="$(sed -n 's/.*"patchset_version": \([0-9][0-9]*\).*/\1/p' ../../versions.json | head -n1)"
+PATCHSET_VERSION="${PATCHSET_VERSION:-1}"
+
 # --output writes the 'export' stage's filesystem (just the binary) to OUT_DIR.
+# Context is the repo root (not this dir) so the Dockerfile can COPY the
+# shared ../../scip-clang-patches/*.patch files.
 DOCKER_BUILDKIT=1 docker build \
+    -f Dockerfile \
     --target export \
     --output "type=local,dest=${OUT_DIR}" \
     -t scip-clang-builder:local \
-    .
+    ../..
 
 BIN="${OUT_DIR}/scip-clang"
 chmod +x "$BIN"
 
 # Provenance sidecar next to the binary (same format setup.sh writes): this build
-# carries PR #504, so the variant is enclosing_range-504. `cppgraph status` reads
-# it to compare against the pin. Version parsed from the binary ("scip-clang X").
+# carries the patch bundle (PR #504 + ForwardDefinition), so the variant is
+# "patched", stamped with the patchset pin it was built from. `cppgraph status`
+# reads it to compare against the pin. Version parsed from the binary
+# ("scip-clang X").
 ver="$("$BIN" --version 2>/dev/null | awk '/scip-clang/{print $2; exit}')"
 cat > "${OUT_DIR}/scip-clang.json" <<EOF
-{"version": "${ver:-0.4.0}", "variant": "enclosing_range-504", "source": "build", "installed_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"}
+{"version": "${ver:-0.4.0}", "variant": "patched", "patchset_version": ${PATCHSET_VERSION}, "source": "build", "installed_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"}
 EOF
 
 echo

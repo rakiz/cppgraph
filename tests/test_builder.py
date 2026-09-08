@@ -17,6 +17,7 @@ from cppgraph.builder import (
 from cppgraph.proto import scip_pb2
 
 DEFINITION = scip_pb2.SymbolRole.Definition
+FORWARD_DEFINITION = scip_pb2.SymbolRole.ForwardDefinition
 
 
 def _occurrence(symbol: str, line: int, *, roles: int = 0) -> scip_pb2.Occurrence:
@@ -204,6 +205,37 @@ def test_calls_fall_back_to_nearest_preceding_without_enclosing_range() -> None:
     graph = build_graph(scip_pb2.Index(documents=[doc]))
 
     assert [e.src for e in graph.callers_of(helper)] == [nested]
+
+
+def test_forward_definition_bit_drops_declaration_site_on_stock_binary() -> None:
+    """The scip-clang `ForwardDefinition` fix (TODO.md scip-clang section):
+    a bodyless declaration occurrence (in-class method decl, header prototype)
+    now carries `ForwardDefinition` instead of landing as plain role-0. This
+    doc has NO `enclosing_range` at all (a genuinely stock-shaped graph, where
+    the nearest-preceding fallback is the only attribution path) — without the
+    bit, `declaredElsewhere`'s declaration site at line 15 would misattribute
+    to `nested` as its "caller" via nearest-preceding, exactly the phantom-caller
+    bug. With the bit, the declaration occurrence is filtered out before it ever
+    becomes a `call_sites` candidate, so no phantom edge is created; a real call
+    is still attributed normally."""
+    outer = "cxx . . $ pkg/Outer#run(o1)."
+    nested = "cxx . . $ pkg/Outer#run/lambda#operator()(l1)."
+    helper = "cxx . . $ pkg/helper(h1)."
+    declared_elsewhere = "cxx . . $ pkg/Foo#declaredElsewhere(d1)."
+
+    doc = scip_pb2.Document(relative_path="outer.cpp")
+    doc.occurrences.extend(
+        [
+            _occurrence(outer, line=5, roles=DEFINITION),  # no enclosing_range
+            _occurrence(nested, line=10, roles=DEFINITION),
+            _occurrence(declared_elsewhere, line=15, roles=FORWARD_DEFINITION),
+            _occurrence(helper, line=20),
+        ]
+    )
+    graph = build_graph(scip_pb2.Index(documents=[doc]))
+
+    assert [e.src for e in graph.callers_of(helper)] == [nested]
+    assert graph.callers_of(declared_elsewhere) == []
 
 
 def test_declaration_only_occurrence_is_not_attributed_as_a_phantom_call() -> None:

@@ -371,7 +371,7 @@ def build_provenance(
     if md.tool_info.version:
         meta["index_tool_version"] = md.tool_info.version
     # The SCIP metadata carries the tool's *version* but not which patch variant
-    # it was — "stock" vs a patched build (e.g. enclosing_range-504) emit
+    # it was — "stock" vs a patched build ("patched") emit
     # different indexes, so the caller stamps it (from the binary's provenance
     # sidecar). Lets `cppgraph status` tell when a graph is stale for the pin.
     if scip_variant:

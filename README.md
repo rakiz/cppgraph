@@ -66,14 +66,14 @@ UI), then run the script non-interactively with those choices as flags.**
    ```
    It prints this machine's OS/arch and the sources that actually apply (e.g. no
    `download` on ARM-Linux). **Ask the user to pick from exactly those** — costs:
-   download-504 ~1 min (native #504, no Docker; macOS arm64 + Linux aarch64 today),
-   download ~1 min (stock, no #504), build (#504) ~25–60 min Docker, emulate (slower
+   download-patched ~1 min (patched binary, no Docker; macOS arm64 + Linux aarch64 today),
+   download ~1 min (stock, unpatched), build (patched) ~25–60 min Docker, emulate (slower
    indexing).
    Windows → WSL2; Intel Mac → only emulate.
 4. **Run it with their choice** (`!` runs it non-interactively; `--scip-source` is
    what makes that work — without it a piped run stops with `ACTION NEEDED`):
    ```
-   ! ~/.local/share/cppgraph/repo/scripts/setup.sh --scip-source <download-504|download|build|emulate>
+   ! ~/.local/share/cppgraph/repo/scripts/setup.sh --scip-source <download-patched|download|build|emulate>
    ```
    `setup.sh` is the **sole** entry point — it creates the venv, obtains scip-clang,
    registers the MCP server, and (in a real terminal) offers to index the current
@@ -162,8 +162,8 @@ Then you're ready to query (see the gains below).
 
 Notes:
 - **Stage 1 is once per machine.** **macOS arm64** and **Linux aarch64** get a
-  native prebuilt **#504** binary (`download-504`, ~1 min); **Linux x86_64** gets
-  the native stock prebuilt (`download`, ~1 min, no #504 — #504 there means a
+  native prebuilt **patched** binary (`download-patched`, ~1 min); **Linux x86_64** gets
+  the native stock prebuilt (`download`, ~1 min, unpatched — #504 there means a
   local build). All three index **natively — no Docker**. Docker is only for the
   `build` source (a #504 compile, ~25–60 min, Linux-only) or for hosts with no
   native binary at all (Intel Mac, Windows) via `emulate`. "#504 build is
@@ -262,7 +262,7 @@ usage graph.
 
 By default that graph is at **file** granularity ("used somewhere in these
 files"). Built with a scip-clang that emits `enclosing_range` (a source build
-carrying [PR #504](docker/build-scip-clang/)), you can upgrade it to **symbol**
+carrying [PR #504](docker/build-scip-clang-patched-linux/)), you can upgrade it to **symbol**
 granularity — "used by *these functions*" — with `cppgraph build
 --attributed-refs`, or add it to an existing graph with `cppgraph enrich-refs`.
 

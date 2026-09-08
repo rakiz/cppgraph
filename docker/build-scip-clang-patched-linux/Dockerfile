@@ -54,9 +54,19 @@ RUN git clone --depth 1 --branch "${SCIP_CLANG_TAG}" \
         https://github.com/sourcegraph/scip-clang.git .
 
 # Apply PR #504 (enclosing_range), rebased onto the v0.4.0 tag.
-COPY enclosing_range-on-v0.4.0.patch /tmp/enclosing_range.patch
+COPY scip-clang-patches/enclosing_range-on-v0.4.0.patch /tmp/enclosing_range.patch
 RUN git apply --verbose /tmp/enclosing_range.patch \
     && grep -q 'enclosingRange' indexer/Indexer.cc  # fail fast if patch is a no-op
+
+# Apply the ForwardDefinition bit fix (on top of #504 — see the patch's own
+# comment header and TODO.md's scip-clang section for the rationale). Tags
+# symbol_roles with ForwardDefinition on true bodyless-declaration occurrences
+# (never on a reference that merely resolves to a decl-only decl), fixing the
+# declaration-site phantom-caller bug on STOCK-binary graphs too (no #504 needed
+# for that fix specifically — it's bundled here purely to ship one binary).
+COPY scip-clang-patches/forward-definition-on-v0.4.0.patch /tmp/forward_definition.patch
+RUN git apply --verbose /tmp/forward_definition.patch \
+    && grep -q 'is_declaration_site' proto/fwd_decls.proto  # fail fast if patch is a no-op
 
 # Optimized release build (same config upstream uses for its linux binaries).
 RUN echo "startup --host_jvm_args=-Xmx${BAZEL_JVM_HEAP}" > ci.bazelrc \

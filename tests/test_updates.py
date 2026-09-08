@@ -154,9 +154,9 @@ def test_update_advice_fails_soft_when_unreachable(monkeypatch: pytest.MonkeyPat
 
 # ---- scip-clang dependency advice (compute_scip_advice) --------------------
 
-# Only VERSION is pinned; the variant (stock vs enclosing_range-504) is reported
-# for information, never treated as stale.
-_PIN = {"version": "0.4.0", "rebuild": "reindex"}
+# VERSION and (for a "patched" binary) the patchset are pinned; the variant
+# (stock vs patched) itself is reported for information, never treated as stale.
+_PIN = {"version": "0.4.0", "rebuild": "reindex", "patchset_version": 2}
 
 
 def test_scip_advice_no_pin_is_unchecked() -> None:
@@ -171,13 +171,11 @@ def test_scip_advice_binary_ok_when_version_matches() -> None:
 
 
 def test_scip_advice_variant_difference_is_not_stale() -> None:
-    # A #504 binary against a version-only pin is fine, not "stale" — variant is
-    # a capability level, not a staleness axis. It's reported for information.
-    adv = updates.compute_scip_advice(
-        _PIN, {"version": "0.4.0", "variant": "enclosing_range-504"}, None
-    )
+    # A patched binary against a version-only check is fine, not "stale" — variant
+    # is a capability level, not a staleness axis. It's reported for information.
+    adv = updates.compute_scip_advice(_PIN, {"version": "0.4.0", "variant": "patched"}, None)
     assert adv["binary_status"] == "ok"
-    assert adv["installed_variant"] == "enclosing_range-504"
+    assert adv["installed_variant"] == "patched"
 
 
 def test_scip_advice_binary_stale_on_version_mismatch() -> None:
@@ -200,10 +198,10 @@ def test_scip_advice_reindex_on_graph_version_mismatch() -> None:
 
 def test_scip_advice_no_reindex_on_variant_only_difference() -> None:
     # Same version, different variant -> NOT a reindex trigger; just reported.
-    graph = {"version": "0.4.0", "variant": "enclosing_range-504"}
+    graph = {"version": "0.4.0", "variant": "patched"}
     adv = updates.compute_scip_advice(_PIN, {"version": "0.4.0", "variant": "stock"}, graph)
     assert "reindex_recommended" not in adv
-    assert adv["graph_variant"] == "enclosing_range-504"
+    assert adv["graph_variant"] == "patched"
 
 
 def test_scip_advice_no_reindex_when_rebuild_none() -> None:
@@ -211,3 +209,77 @@ def test_scip_advice_no_reindex_when_rebuild_none() -> None:
     graph = {"version": "0.3.0", "variant": "stock"}
     adv = updates.compute_scip_advice(pin, {"version": "0.4.0"}, graph)
     assert "reindex_recommended" not in adv
+
+
+# ---- patchset staleness (patched-family binaries: "patched" + pre-rename
+# spellings "504"/"enclosing_range-504") ---------------------------------------
+
+
+def test_scip_advice_patchset_stale_when_installed_older() -> None:
+    adv = updates.compute_scip_advice(
+        _PIN,
+        {"version": "0.4.0", "variant": "patched", "patchset_version": 1},
+        None,
+    )
+    assert adv["binary_status"] == "ok"  # version matches; only the patchset lags
+    assert adv["patchset_status"] == "stale"
+    assert "p1" in adv["patchset_message"] and "p2" in adv["patchset_message"]
+
+
+def test_scip_advice_patchset_quiet_when_current() -> None:
+    adv = updates.compute_scip_advice(
+        _PIN,
+        {"version": "0.4.0", "variant": "patched", "patchset_version": 2},
+        None,
+    )
+    assert "patchset_status" not in adv
+
+
+def test_scip_advice_patchset_missing_sidecar_field_counts_as_1() -> None:
+    # A "patched" sidecar from before the field existed: unknown -> 1, not a crash.
+    adv = updates.compute_scip_advice(_PIN, {"version": "0.4.0", "variant": "patched"}, None)
+    assert adv["patchset_status"] == "stale"
+
+
+def test_scip_advice_patchset_missing_field_counts_as_1_for_pre_rename_504() -> None:
+    # Pre-rename sidecars on disk spell the variant "504" — same patched family,
+    # so a missing patchset field must trigger the same p1 advisory as "patched".
+    adv = updates.compute_scip_advice(_PIN, {"version": "0.4.0", "variant": "504"}, None)
+    assert adv["binary_status"] == "ok"
+    assert adv["patchset_status"] == "stale"
+    assert "p1" in adv["patchset_message"] and "p2" in adv["patchset_message"]
+
+
+def test_scip_advice_patchset_missing_field_counts_as_1_for_pre_rename_enclosing_range() -> None:
+    # Same, for the old local-build spelling "enclosing_range-504".
+    adv = updates.compute_scip_advice(
+        _PIN, {"version": "0.4.0", "variant": "enclosing_range-504"}, None
+    )
+    assert adv["binary_status"] == "ok"
+    assert adv["patchset_status"] == "stale"
+
+
+def test_scip_advice_patchset_missing_field_quiet_when_pin_is_1() -> None:
+    # Missing counts as p1: when the pin IS p1 they match, so no advisory —
+    # the absence default must not manufacture a false "you're stale" nag.
+    pin = {"version": "0.4.0", "rebuild": "reindex", "patchset_version": 1}
+    adv = updates.compute_scip_advice(pin, {"version": "0.4.0", "variant": "patched"}, None)
+    assert adv["binary_status"] == "ok"
+    assert "patchset_status" not in adv
+
+
+def test_scip_advice_patchset_ignored_for_stock() -> None:
+    # No patch bundle on stock — patchset pinning doesn't apply to it.
+    adv = updates.compute_scip_advice(_PIN, {"version": "0.4.0", "variant": "stock"}, None)
+    assert "patchset_status" not in adv
+
+
+def test_scip_advice_patchset_ignored_when_version_differs() -> None:
+    # A version mismatch already advises re-running setup; no second nag.
+    adv = updates.compute_scip_advice(
+        _PIN,
+        {"version": "0.3.0", "variant": "patched", "patchset_version": 1},
+        None,
+    )
+    assert adv["binary_status"] == "stale"
+    assert "patchset_status" not in adv

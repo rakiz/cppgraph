@@ -15,12 +15,12 @@ project's own license text is authoritative.
   [sourcegraph/scip-clang#504](https://github.com/sourcegraph/scip-clang/pull/504).
   Enclosing ranges are **not** in the official scip-clang yet (the PR is in progress
   upstream). Until it lands, cppgraph vendors the patch at
-  `docker/build-scip-clang/enclosing_range-on-v0.4.0.patch` and applies it when
+  `scip-clang-patches/enclosing_range-on-v0.4.0.patch` and applies it when
   building the binary; a stock (unpatched) binary works too, at file — rather than
   symbol — granularity.
 - **LLVM / Clang** — [llvm/llvm-project](https://github.com/llvm/llvm-project)
   (Apache-2.0 with LLVM exceptions). scip-clang is a Clang LibTooling program; the
-  build compiles LLVM/Clang from source (see `docker/build-scip-clang/`).
+  build compiles LLVM/Clang from source (see `docker/build-scip-clang-patched-linux/`).
 
 ## Schema (vendored)
 

@@ -95,16 +95,19 @@ def test_obtain_invalid_source_for_platform_fails(tmp_path: Path, monkeypatch) -
     assert any("not valid on this platform" in line for line in out)
 
 
-def test_obtain_download_504_verifies_checksum(tmp_path: Path, monkeypatch) -> None:
+def test_obtain_download_patched_verifies_checksum(tmp_path: Path, monkeypatch) -> None:
     import hashlib
 
     bindir = tmp_path / "bin"
     monkeypatch.setattr(
-        setup_cmd, "platform_sources", lambda: (None, "scip-clang-504-arm64-darwin", False)
+        setup_cmd, "platform_sources", lambda: (None, "scip-clang-patched-arm64-darwin", False)
     )
+    monkeypatch.setattr(setup_cmd, "_pinned_scip_version", lambda: "0.4.0")
+    monkeypatch.setattr(setup_cmd, "_pinned_patchset_version", lambda: 2)
 
     payload = b"fake-binary-bytes"
     digest = hashlib.sha256(payload).hexdigest()
+    urls: list[str] = []
 
     def fake_run(cmd, **kwargs):
         class R:
@@ -112,26 +115,30 @@ def test_obtain_download_504_verifies_checksum(tmp_path: Path, monkeypatch) -> N
             stdout = ""
 
         if "-o" in cmd:
+            urls.append(cmd[-1])
             out = Path(cmd[cmd.index("-o") + 1])
             out.write_bytes(payload)
             return R()
         r = R()
-        r.stdout = f"{digest}  scip-clang-504-arm64-darwin"
+        r.stdout = f"{digest}  scip-clang-patched-arm64-darwin"
         return r
 
     monkeypatch.setattr(setup_cmd.subprocess, "run", fake_run)
     p, out = _scripted_prompter([])
-    result = setup_cmd.obtain_scip_clang(p, bin_dir=bindir, source="download-504")
+    result = setup_cmd.obtain_scip_clang(p, bin_dir=bindir, source="download-patched")
     assert result == "present"
     assert (bindir / "scip-clang").read_bytes() == payload
+    # Release tag carries both the upstream version and the patchset pin.
+    assert any("scip-clang-patched-v0.4.0-p2/" in url for url in urls)
     side = json.loads((bindir / "scip-clang.json").read_text())
-    assert side["variant"] == "504"
+    assert side["variant"] == "patched"
+    assert side["patchset_version"] == 2
 
 
-def test_obtain_download_504_rejects_bad_checksum(tmp_path: Path, monkeypatch) -> None:
+def test_obtain_download_patched_rejects_bad_checksum(tmp_path: Path, monkeypatch) -> None:
     bindir = tmp_path / "bin"
     monkeypatch.setattr(
-        setup_cmd, "platform_sources", lambda: (None, "scip-clang-504-arm64-darwin", False)
+        setup_cmd, "platform_sources", lambda: (None, "scip-clang-patched-arm64-darwin", False)
     )
 
     def fake_run(cmd, **kwargs):
@@ -144,23 +151,23 @@ def test_obtain_download_504_rejects_bad_checksum(tmp_path: Path, monkeypatch) -
             out.write_bytes(b"fake-binary-bytes")
             return R()
         r = R()
-        r.stdout = f"{'a' * 64}  scip-clang-504-arm64-darwin"  # well-formed but wrong
+        r.stdout = f"{'a' * 64}  scip-clang-patched-arm64-darwin"  # well-formed but wrong
         return r
 
     monkeypatch.setattr(setup_cmd.subprocess, "run", fake_run)
     p, out = _scripted_prompter([])
-    result = setup_cmd.obtain_scip_clang(p, bin_dir=bindir, source="download-504")
+    result = setup_cmd.obtain_scip_clang(p, bin_dir=bindir, source="download-patched")
     assert result == "failed"
     assert not (bindir / "scip-clang").exists()
     assert any("checksum mismatch" in line for line in out)
 
 
-def test_obtain_download_504_rejects_malformed_sha(tmp_path: Path, monkeypatch) -> None:
+def test_obtain_download_patched_rejects_malformed_sha(tmp_path: Path, monkeypatch) -> None:
     """A .sha256 sidecar whose first token isn't a 64-hex digest is a fetch
     failure — no unverified binary is kept."""
     bindir = tmp_path / "bin"
     monkeypatch.setattr(
-        setup_cmd, "platform_sources", lambda: (None, "scip-clang-504-arm64-darwin", False)
+        setup_cmd, "platform_sources", lambda: (None, "scip-clang-patched-arm64-darwin", False)
     )
 
     def fake_run(cmd, **kwargs):
@@ -173,23 +180,23 @@ def test_obtain_download_504_rejects_malformed_sha(tmp_path: Path, monkeypatch) 
             out.write_bytes(b"fake-binary-bytes")
             return R()
         r = R()
-        r.stdout = "deadbeef  scip-clang-504-arm64-darwin"
+        r.stdout = "deadbeef  scip-clang-patched-arm64-darwin"
         return r
 
     monkeypatch.setattr(setup_cmd.subprocess, "run", fake_run)
     p, out = _scripted_prompter([])
-    result = setup_cmd.obtain_scip_clang(p, bin_dir=bindir, source="download-504")
+    result = setup_cmd.obtain_scip_clang(p, bin_dir=bindir, source="download-patched")
     assert result == "failed"
     assert not (bindir / "scip-clang").exists()
     assert any("no valid sha256" in line for line in out)
 
 
-def test_obtain_download_504_curl_failures_cleanup(tmp_path: Path, monkeypatch) -> None:
+def test_obtain_download_patched_curl_failures_cleanup(tmp_path: Path, monkeypatch) -> None:
     """curl failing on the binary itself or on the .sha256 sidecar: both fail and
     no partial file is left behind."""
     bindir = tmp_path / "bin"
     monkeypatch.setattr(
-        setup_cmd, "platform_sources", lambda: (None, "scip-clang-504-arm64-darwin", False)
+        setup_cmd, "platform_sources", lambda: (None, "scip-clang-patched-arm64-darwin", False)
     )
 
     def attempt(binary_ok: bool, sha_ok: bool) -> str:
@@ -209,7 +216,7 @@ def test_obtain_download_504_curl_failures_cleanup(tmp_path: Path, monkeypatch) 
 
         monkeypatch.setattr(setup_cmd.subprocess, "run", fake_run)
         p, _ = _scripted_prompter([])
-        return setup_cmd.obtain_scip_clang(p, bin_dir=bindir, source="download-504")
+        return setup_cmd.obtain_scip_clang(p, bin_dir=bindir, source="download-patched")
 
     assert attempt(binary_ok=False, sha_ok=True) == "failed"
     assert not (bindir / "scip-clang").exists()
@@ -217,12 +224,12 @@ def test_obtain_download_504_curl_failures_cleanup(tmp_path: Path, monkeypatch) 
     assert not (bindir / "scip-clang").exists()
 
 
-def test_obtain_interactive_menu_defaults_to_download_504(tmp_path: Path, monkeypatch) -> None:
-    """Interactive with no --scip-source and a native #504 asset: the menu's
-    default (what an empty answer accepts) is download-504."""
+def test_obtain_interactive_menu_defaults_to_download_patched(tmp_path: Path, monkeypatch) -> None:
+    """Interactive with no --scip-source and a native patched asset: the menu's
+    default (what an empty answer accepts) is download-patched."""
     bindir = tmp_path / "bin"
     monkeypatch.setattr(
-        setup_cmd, "platform_sources", lambda: (None, "scip-clang-504-arm64-darwin", False)
+        setup_cmd, "platform_sources", lambda: (None, "scip-clang-patched-arm64-darwin", False)
     )
 
     seen: dict[str, object] = {}
@@ -236,18 +243,38 @@ def test_obtain_interactive_menu_defaults_to_download_504(tmp_path: Path, monkey
     monkeypatch.setattr(Prompter, "select", recording_select)
     downloads: list[str] = []
 
-    def fake_download_504(bin_dir, asset, version, p):
+    def fake_download_patched(bin_dir, asset, version, p):
         downloads.append(asset)
         return True
 
-    monkeypatch.setattr(setup_cmd, "_download_504", fake_download_504)
+    monkeypatch.setattr(setup_cmd, "_download_patched", fake_download_patched)
 
     p, out = _scripted_prompter([""])  # empty answer accepts the default
     result = setup_cmd.obtain_scip_clang(p, bin_dir=bindir)
     assert result == "present"
-    assert seen["default"] == "download-504"
-    assert seen["first"] == "download-504"
-    assert downloads == ["scip-clang-504-arm64-darwin"]
+    assert seen["default"] == "download-patched"
+    assert seen["first"] == "download-patched"
+    assert downloads == ["scip-clang-patched-arm64-darwin"]
+
+
+def test_write_sidecar_roundtrips_patchset(tmp_path: Path) -> None:
+    """A patched install stamps `patchset_version` into the sidecar; `read_sidecar`
+    (what `status`/the reuse panel consume) reads it back intact."""
+    setup_cmd._write_sidecar(tmp_path, "0.4.0", "patched", "download-patched", patchset=2)
+    side = setup_cmd.read_sidecar(tmp_path)
+    assert side is not None
+    assert side["variant"] == "patched"
+    assert side["patchset_version"] == 2
+    assert side["version"] == "0.4.0"
+
+
+def test_write_sidecar_stock_has_no_patchset(tmp_path: Path) -> None:
+    """A stock install carries no patch bundle — the field is omitted, so older
+    readers see exactly the pre-patchset sidecar shape."""
+    setup_cmd._write_sidecar(tmp_path, "0.4.0", "stock", "download")
+    side = setup_cmd.read_sidecar(tmp_path)
+    assert side is not None
+    assert "patchset_version" not in side
 
 
 def _boom(_prompt: str) -> str:

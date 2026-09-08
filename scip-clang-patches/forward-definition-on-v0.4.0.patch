@@ -1,0 +1,105 @@
+# ForwardDefinition bit on bodyless-declaration occurrences — see TODO.md's
+# scip-clang section and docker/build-scip-clang-patched-linux/README.md for
+# the rationale. NOT (yet) an upstream PR.
+#
+# Applicability: generated with minimal diff context (`-U1`) so it applies
+# BOTH standalone on a clean v0.4.0 checkout (verified — this is what makes it
+# ready to become a future independent upstream PR without regenerating it)
+# AND stacked on top of enclosing_range-on-v0.4.0.patch (our actual build
+# order: apply #504 FIRST, then this one — the reverse order does NOT apply
+# cleanly, since #504's own patch carries wider context around the same
+# `saveReference` function this patch also touches).
+diff --git a/indexer/Indexer.cc b/indexer/Indexer.cc
+index c63040b..3155789 100644
+--- a/indexer/Indexer.cc
++++ b/indexer/Indexer.cc
+@@ -356,6 +356,7 @@ void ForwardDeclMap::insert(SymbolNameRef symbol, DocComment &&docComment,
+                             RootRelativePathRef projectFilePath,
+-                            FileLocalSourceRange occRange) {
++                            FileLocalSourceRange occRange,
++                            bool isDeclarationSite) {
+   auto &entry = this->map[symbol]; // deliberate default initialization
+   entry.docComment.replaceIfEmpty(std::move(docComment));
+-  entry.ranges.push_back({projectFilePath, occRange});
++  entry.ranges.emplace_back(projectFilePath, occRange, isDeclarationSite);
+ }
+@@ -375,3 +376,3 @@ void ForwardDeclMap::emit(bool deterministic, scip::ForwardDeclIndex &index) {
+         value.docComment.addTo(*fwdDecl.mutable_documentation());
+-        for (auto [path, range] : value.ranges) {
++        for (auto [path, range, isDeclarationSite] : value.ranges) {
+           scip::ForwardDecl::Reference ref{};
+@@ -380,2 +381,3 @@ void ForwardDeclMap::emit(bool deterministic, scip::ForwardDeclIndex &index) {
+           ref.set_relative_path(p.data(), p.size());
++          ref.set_is_declaration_site(isDeclarationSite);
+           *fwdDecl.add_references() = std::move(ref);
+@@ -1160,3 +1162,4 @@ void TuIndexer::saveForwardDeclaration(SymbolNameRef symbol,
+   this->forwardDeclarations.insert(symbol, std::move(docComment),
+-                                   optStableFileId->path, range);
++                                   optStableFileId->path, range,
++                                   /*isDeclarationSite=*/true);
+ }
+@@ -1181,3 +1184,4 @@ void TuIndexer::saveReference(SymbolNameRef symbol, clang::SourceLocation loc,
+     this->forwardDeclarations.insert(symbol, this->getDocComment(*maybeFwdDecl),
+-                                     optStableFileId->path, range);
++                                     optStableFileId->path, range,
++                                     /*isDeclarationSite=*/false);
+     return;
+diff --git a/indexer/Indexer.h b/indexer/Indexer.h
+index 22133cb..d19b157 100644
+--- a/indexer/Indexer.h
++++ b/indexer/Indexer.h
+@@ -7,2 +7,3 @@
+ #include <string_view>
++#include <tuple>
+ #include <utility>
+@@ -273,3 +274,8 @@ class ForwardDeclMap final {
+     // header being emitted multiple times.
+-    std::vector<std::pair<RootRelativePathRef, FileLocalSourceRange>> ranges;
++    //
++    // The bool records whether the occurrence is the site of the
++    // bodyless declaration itself (as opposed to a reference which
++    // resolved to a decl-only declaration).
++    std::vector<std::tuple<RootRelativePathRef, FileLocalSourceRange, bool>>
++        ranges;
+   };
+@@ -282,3 +288,3 @@ public:
+               RootRelativePathRef projectFilePath,
+-              FileLocalSourceRange occRange);
++              FileLocalSourceRange occRange, bool isDeclarationSite);
+ 
+diff --git a/indexer/ScipExtras.cc b/indexer/ScipExtras.cc
+index db5f8be..0192db7 100644
+--- a/indexer/ScipExtras.cc
++++ b/indexer/ScipExtras.cc
+@@ -248,2 +248,6 @@ void ForwardDeclOccurrence::addTo(scip::Occurrence &occ) {
+   }
++  if (this->isDeclarationSite) {
++    occ.set_symbol_roles(occ.symbol_roles()
++                         | scip::SymbolRole::ForwardDefinition);
++  }
+ }
+diff --git a/indexer/ScipExtras.h b/indexer/ScipExtras.h
+index 7250a22..6fc3b7d 100644
+--- a/indexer/ScipExtras.h
++++ b/indexer/ScipExtras.h
+@@ -198,2 +198,3 @@ class ForwardDeclOccurrence final {
+   std::array<int32_t, 4> range;
++  bool isDeclarationSite;
+ 
+@@ -207,2 +208,3 @@ public:
+     }
++    this->isDeclarationSite = ref.is_declaration_site();
+   }
+diff --git a/proto/fwd_decls.proto b/proto/fwd_decls.proto
+index fa4d7b3..c26bd39 100644
+--- a/proto/fwd_decls.proto
++++ b/proto/fwd_decls.proto
+@@ -16,3 +16,6 @@ message ForwardDecl {
+     string relative_path = 2;
++    // True if this occurrence is the site of the (bodyless) declaration
++    // itself; false if it is a reference resolving to a decl-only decl.
++    bool is_declaration_site = 3;
+   }
+-}
+\ No newline at end of file
++}

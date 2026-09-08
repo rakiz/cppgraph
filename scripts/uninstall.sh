@@ -99,15 +99,16 @@ if command -v claude >/dev/null 2>&1; then
   fi
 fi
 
-# 2. scip-clang binary. Warn when it looks self-built (#504) — costly to rebuild.
+# 2. scip-clang binary. Warn when it looks self-built (patched) — costly to rebuild.
 if [[ -d "$BIN_DIR" ]]; then
   variant=""
   [[ -f "$BIN_DIR/scip-clang.json" ]] && variant="$(
     "${REPO}/.venv/bin/python" -c 'import json,sys;print(json.load(open(sys.argv[1])).get("variant",""))' \
       "$BIN_DIR/scip-clang.json" 2>/dev/null || true
   )"
-  if [[ "$variant" == "enclosing_range-504" ]]; then
-    echo "  note: this scip-clang is a self-built #504 binary (30-60 min to rebuild)."
+  # Any patched-build spelling (current "patched" + pre-rename sidecar values).
+  if [[ "$variant" == "patched" || "$variant" == "enclosing_range-504" || "$variant" == "504" ]]; then
+    echo "  note: this scip-clang is a self-built patched binary (30-60 min to rebuild)."
   fi
   if ask "Delete the scip-clang binary?" y; then
     rm_path "scip-clang binary" "$BIN_DIR"
