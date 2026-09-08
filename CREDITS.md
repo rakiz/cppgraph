@@ -32,7 +32,7 @@ project's own license text is authoritative.
 ## Runtime (Python)
 
 - **protobuf** — [protocolbuffers/protobuf](https://github.com/protocolbuffers/protobuf)
-  (BSD-3-Clause). The Python runtime for the generated SCIP bindings (`protobuf>=5.0`).
+  (BSD-3-Clause). The Python runtime for the generated SCIP bindings (`protobuf>=7.35.1,<8`).
 
 ## Visualization (vendored — redistributed in the repo)
 

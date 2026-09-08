@@ -6,7 +6,17 @@ on-disk store also carries its own `schema_version` for forward-compatibility.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- **`protobuf` dependency floor** (`pyproject.toml`): was `>=5.0` (no upper
+  bound), but the committed generated bindings (`scip_pb2.py`, produced by
+  protoc 35.1) require a Python `protobuf` runtime of major version 7
+  (`ValidateProtobufRuntimeVersion(7, 35, 1, …)`) — an environment that already
+  had an older `protobuf` satisfying the loose `>=5.0` floor (e.g. 5.29.3)
+  broke at import with `VersionError: Detected mismatched Protobuf
+  Gencode/Runtime major versions`. Tightened to `>=7.35.1,<8`, matching the
+  committed gencode.
+
 
 ## [0.2.0] - 2026-09-08
 

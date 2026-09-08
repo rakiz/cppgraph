@@ -48,5 +48,5 @@ curl -fsSL -o src/cppgraph/proto/scip.proto \
 `PROTOC_VERSION=35.1` (build-arg, overridable), `BASE=ubuntu:24.04`. protoc 35.1
 is what the committed bindings were generated with — their header reads
 `# Protobuf Python Version: 7.35.1`, and the runtime `protobuf` package pinned by
-`pyproject.toml` matches. Bump `PROTOC_VERSION` only in lockstep with that
-runtime dependency.
+`pyproject.toml` (`>=7.35.1,<8`) matches. Bump `PROTOC_VERSION` only in lockstep with
+that runtime dependency.
