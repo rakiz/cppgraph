@@ -7,14 +7,7 @@ active list. Design detail is in `DESIGN.md`, shipped features in
 
 ## Other
 
-- **`versions.json` `latest` points at a tag that was never cut.** `latest`
-  says `"0.2.0"` but only `v0.1.0` exists on origin — `v0.2.0` was never
-  tagged/pushed — so a fresh `scripts/setup.sh` run today fails at
-  `git checkout v0.2.0` before the venv is even created. Fix is either
-  tagging + pushing `v0.2.0` (if main's current state is what 0.2.0 should
-  be) or reverting `latest` to `0.1.0` until it's properly cut. Found during
-  the 2026-09 doc review; flagging only — the fix touches release state, so
-  it's the maintainer's call.
+
 - **Follow-up to the declaration-site phantom-caller bug (fixed for #504 graphs):**
   `who_calls(extractShardKeyFromDoc)` used to return `getKeyPatternFields` as a caller
   because a bodyless member declaration (role 0, no `DEFINITION`/`FORWARD_DEFINITION`)
