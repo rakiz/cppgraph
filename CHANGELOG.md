@@ -6,17 +6,7 @@ on-disk store also carries its own `schema_version` for forward-compatibility.
 
 ## [Unreleased]
 
-### Fixed
-
-- **`protobuf` dependency floor** (`pyproject.toml`): was `>=5.0` (no upper
-  bound), but the committed generated bindings (`scip_pb2.py`, produced by
-  protoc 35.1) require a Python `protobuf` runtime of major version 7
-  (`ValidateProtobufRuntimeVersion(7, 35, 1, …)`) — an environment that already
-  had an older `protobuf` satisfying the loose `>=5.0` floor (e.g. 5.29.3)
-  broke at import with `VersionError: Detected mismatched Protobuf
-  Gencode/Runtime major versions`. Tightened to `>=7.35.1,<8`, matching the
-  committed gencode.
-
+_Nothing yet._
 
 ## [0.2.0] - 2026-09-08
 
@@ -38,6 +28,25 @@ from the existing `.scip` picks up the new columns — no re-index.
   resolve). `cppgraph setup` now installs it automatically into
   `~/.claude/skills/cppgraph/` and/or `~/.config/opencode/skills/cppgraph/`,
   whichever agent is detected on the machine.
+- **Existing-checkout guard in the install instructions** (`README.md`,
+  `AGENTS.md`): an agent asked to just read/explore cppgraph's source now
+  checks for an existing per-machine checkout
+  (`${XDG_DATA_HOME:-$HOME/.local/share}/cppgraph/repo`) before cloning
+  anything — reusing/pulling it instead of creating a second, divergent
+  clone elsewhere (the exact confusion a stray `~/cppgraph` caused in
+  practice: a stale checkout answering from an old commit).
+
+### Fixed
+
+- **`protobuf` dependency floor** (`pyproject.toml`): was `>=5.0` (no upper
+  bound), but the committed generated bindings (`scip_pb2.py`, produced by
+  protoc 35.1) require a Python `protobuf` runtime of major version 7
+  (`ValidateProtobufRuntimeVersion(7, 35, 1, …)`) — an environment that already
+  had an older `protobuf` satisfying the loose `>=5.0` floor (e.g. 5.29.3)
+  broke at import with `VersionError: Detected mismatched Protobuf
+  Gencode/Runtime major versions`. Tightened to `>=7.35.1,<8`, matching the
+  committed gencode.
+
 
 - **`no_incoming_calls`**: callable definitions with zero incoming `calls`
   edges — the exact primitive behind the "dead code" question, stated as a

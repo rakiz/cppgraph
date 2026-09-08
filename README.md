@@ -49,13 +49,18 @@ UI), then run the script non-interactively with those choices as flags.**
 
 ### Phase A — set up the machine (once)
 
-1. **Clone** into the per-machine tool dir (**always this path** — not the user's
+1. **Before cloning anything cppgraph-related — even just to read/explore the
+   source — check for an existing per-machine install first:** if
+   `${XDG_DATA_HOME:-$HOME/.local/share}/cppgraph/repo` exists, use *that*
+   checkout (read it, `git pull` it if stale); never clone a second copy
+   (`~/cppgraph`, a project dir, a dev checkout). Only clone fresh if absent.
+2. **Clone** into the per-machine tool dir (**always this path** — not the user's
    project, not a dev checkout; even "install from a local copy" means clone that
    copy *into* this path):
    ```bash
    git clone https://github.com/rakiz/cppgraph "${XDG_DATA_HOME:-$HOME/.local/share}/cppgraph/repo"
    ```
-2. **Get the valid sources from the tool (don't guess the platform):**
+3. **Get the valid sources from the tool (don't guess the platform):**
    ```
    ! ~/.local/share/cppgraph/repo/scripts/setup.sh --list-sources
    ```
@@ -65,7 +70,7 @@ UI), then run the script non-interactively with those choices as flags.**
    download ~1 min (stock, no #504), build (#504) ~25–60 min Docker, emulate (slower
    indexing).
    Windows → WSL2; Intel Mac → only emulate.
-3. **Run it with their choice** (`!` runs it non-interactively; `--scip-source` is
+4. **Run it with their choice** (`!` runs it non-interactively; `--scip-source` is
    what makes that work — without it a piped run stops with `ACTION NEEDED`):
    ```
    ! ~/.local/share/cppgraph/repo/scripts/setup.sh --scip-source <download-504|download|build|emulate>

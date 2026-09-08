@@ -201,14 +201,20 @@ when it's stale (it reflects the build graph at generation time).
 - Per-machine tool install — **ask the source, then run with a flag** (a `! …` run
   can't answer prompts):
 
-  1. Clone the repo to its data dir (**always this path**, even when asked to
+  1. Before cloning anything cppgraph-related — **including just to read/explore
+     the source, not to install** — check whether
+     `${XDG_DATA_HOME:-$HOME/.local/share}/cppgraph/repo` exists. If it does,
+     use that existing checkout (read it, `git pull` it if it needs updating);
+     never clone a second copy anywhere else (not `~/cppgraph`, not a project
+     dir, not any dev checkout). Only clone fresh if that path does not exist.
+  2. Clone the repo to its data dir (**always this path**, even when asked to
      install "from a local copy" — clone the local checkout *into* the data dir,
      don't point at the source checkout):
      ```
      git clone <repo> "${XDG_DATA_HOME:-$HOME/.local/share}/cppgraph/repo"
      ```
      (`<repo>` = `https://github.com/rakiz/cppgraph`, or a local path when testing.)
-  2. **Get the valid sources from the tool — do NOT guess the platform.** Run
+  3. **Get the valid sources from the tool — do NOT guess the platform.** Run
      `! ~/.local/share/cppgraph/repo/scripts/setup.sh --list-sources` (pure bash, no
      venv needed): it prints this machine's OS/arch and the sources that actually
      apply (e.g. no `download` on ARM-Linux). **Ask the user to pick from exactly
@@ -216,7 +222,7 @@ when it's stale (it reflects the build graph at generation time).
      arm64 + Linux aarch64 today), download ~1 min (native stock, no #504), build
      (#504) ~25–60 min Docker (Linux-only), emulate (slower indexing, container).
      Offering a source the tool didn't list will fail.
-  3. Run `setup.sh` with their choice as a flag (this is what lets `!` work):
+  4. Run `setup.sh` with their choice as a flag (this is what lets `!` work):
      ```
      ! ~/.local/share/cppgraph/repo/scripts/setup.sh --scip-source <download-504|download|build|emulate>
      ```
