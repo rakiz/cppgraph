@@ -51,7 +51,7 @@ from cppgraph.store import (
     read_dirty_fingerprints,
     staleness_verdict,
 )
-from cppgraph.updates import scip_update_advice, update_advice
+from cppgraph.updates import attributed_refs_cost_note, scip_update_advice, update_advice
 
 if TYPE_CHECKING:
     from cppgraph.model import Edge, Node
@@ -86,6 +86,19 @@ _STOCK_ATTRIBUTION_UNRELIABLE = (
     "a phantom caller that turns a real 0 into a false 1, exactly the answer "
     "this tool must get right. Index with a #504-built scip-clang and rebuild "
     "the store to enable it"
+)
+# `explain` reports its caller count (never refuses), but a 0 on a stock-binary
+# graph is not guaranteed — the same asymmetry `_STOCK_ATTRIBUTION_UNRELIABLE`
+# refuses `no_incoming_calls` over, stated as a caveat traveling with the fact.
+_ZERO_CALLERS_STOCK_NOTE = (
+    "0 callers is only trustworthy on a #504-built index: this graph was "
+    "indexed with a stock scip-clang, whose caller attribution "
+    "(nearest-preceding definition, no enclosing ranges) has a separate false-"
+    "positive path that can fabricate a phantom caller from a bodyless "
+    "declaration site, but this reported 0 can hide a real caller when a call "
+    "site with no preceding callable definition in its document is dropped — "
+    "so this 0 is not guaranteed to be a true 0. Index with a "
+    "#504-built scip-clang and rebuild the store for an exact 0"
 )
 # Degrade-cleanly response for the attributed-refs-gated tool: same convention,
 # naming the exact rebuild path (a #504 index AND --attributed-refs/enrich-refs).
@@ -1430,7 +1443,19 @@ def explain(
     definition site — including any default argument value, verbatim (e.g.
     `(bool useNullIfMissing = false)`) — since the graph itself never carries a
     parsed signature and a defaulted param is otherwise invisible without
-    opening the header."""
+    opening the header. When the indexed symbol has a genuine doc comment, it
+    is returned as `documentation` — extracted from
+    `SymbolInformation.documentation` at build time (scip-clang's placeholder
+    and auto-generated namespace/File text filtered out), so it needs no
+    `root`; the key is absent when there is no real doc text.
+
+    A `0` caller count is only trustworthy with exact (#504) attribution: when
+    the store lacks `has_enclosing_ranges`, the callers block carries
+    `zero_callers_reliable: false` + a `note` (the same gate `no_incoming_calls`
+    refuses on — stock-binary attribution can fabricate a phantom caller from a
+    bodyless declaration site or drop an unattributable call site). A nonzero
+    count never carries the caveat: over-capture is the documented safe
+    direction, an extra caller is verified, never acted on by omission."""
     node = store.get_node(symbol)
     if node is None:
         return {"error": _UNKNOWN.format(symbol=symbol)}
@@ -1462,6 +1487,13 @@ def explain(
     if hide_trivial:
         callers_block["trivial_hidden"] = callers_trivial
         callees_block["trivial_hidden"] = callees_trivial
+    if callers_block["total"] == 0 and store.meta().get("has_enclosing_ranges") != "true":
+        # The same capability gate `no_incoming_calls` refuses on, read the same
+        # way the other pure functions read meta flags (`references`'s
+        # `has_references`): a stock-binary 0 is not guaranteed. The count is
+        # still reported — the caveat travels with it instead of a refusal.
+        callers_block["zero_callers_reliable"] = False
+        callers_block["note"] = _ZERO_CALLERS_STOCK_NOTE
 
     result: dict[str, Any] = {
         "symbol": node.symbol,
@@ -1471,6 +1503,13 @@ def explain(
         "callers": callers_block,
         "callees": callees_block,
     }
+
+    if node.documentation is not None:
+        # Genuine doc-comment text extracted at index time (see
+        # `builder.real_documentation` for the placeholder/auto-text filter).
+        # Absent when there is none — never the placeholder; needs no `root`,
+        # unlike `signature`.
+        result["documentation"] = node.documentation
 
     if root is not None:
         # Always set the key, even when extraction failed (None) — mirrors
@@ -1546,6 +1585,10 @@ def status_report(
                 "('where is X used?' returns the functions/types that use it).",
             }
         else:
+            # Estimated cost from THIS graph's ref_count (measured per-ref
+            # constant, see `attributed_refs_cost_note`); None -> the old
+            # number-free wording rather than a fabricated "~0 bytes".
+            cost = attributed_refs_cost_note(m.get("ref_count"))
             result["usage_view"] = {
                 "granularity": "file",
                 "note": "references are exact but unattributed — 'where is X used?' "
@@ -1553,8 +1596,12 @@ def status_report(
                 "upgrade": "For symbol granularity (the using functions, not just "
                 "files), index with a #504-built scip-clang, then rebuild with "
                 "`cppgraph build --attributed-refs` or enrich in place with "
-                "`cppgraph enrich-refs --graph <db> --scip <index.scip>`. Costs extra "
-                "store space; worth it when you want symbol-level usage.",
+                "`cppgraph enrich-refs --graph <db> --scip <index.scip>`. "
+                + (
+                    f"Estimated {cost}; worth it when you want symbol-level usage."
+                    if cost is not None
+                    else "Costs extra store space; worth it when you want symbol-level usage."
+                ),
             }
     if check_updates:
         result["tool"] = update_advice(m.get("cppgraph_version"), force=force)
@@ -2304,7 +2351,15 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         With a checkout configured (`--root`), also returns `signature`: the
         parameter list read from source, including any default argument value
         verbatim (e.g. `(bool useNullIfMissing = false)`) — invisible from the
-        graph alone, which never carries a parsed signature."""
+        graph alone, which never carries a parsed signature. When the symbol
+        has a genuine doc comment, it is returned as `documentation` (extracted
+        at index time; scip-clang's placeholder/auto-generated text filtered
+        out) — no checkout needed for that one. A `callers.total`
+        of `0` carries `zero_callers_reliable: false` + a `note` when the graph
+        lacks #504 enclosing-range data — stock-binary attribution can
+        fabricate a phantom caller from a bodyless declaration site or drop an
+        unattributable call site, so only a #504 0 is exact; a nonzero count
+        carries no caveat (over-capture is the safe direction)."""
         return _call(
             explain,
             symbol,

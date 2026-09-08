@@ -12,6 +12,7 @@ from cppgraph.builder import (
     build_graph,
     is_callable_symbol,
     is_term_symbol,
+    real_documentation,
 )
 from cppgraph.proto import scip_pb2
 
@@ -566,3 +567,86 @@ def test_class_inheritance_becomes_inherits_edge() -> None:
     assert inherits[0].dst == base
     # class inheritance is `inherits`, never `implements`
     assert not [e for e in graph.edges if e.kind == "implements"]
+
+
+# --- SymbolInformation.documentation ----------------------------------------
+
+
+def test_real_documentation_keeps_genuine_doc_comment() -> None:
+    """The ~10% genuine share measured on the mongo corpus (SCIP_AUDIT.md):
+    extracted doc-comment text, kept verbatim. The proto field is `repeated
+    string` — entries are newline-joined, unobservable on real data (measured:
+    every one of the 810,919 corpus SymbolInformations carries at most ONE
+    entry)."""
+    assert real_documentation(["Returns true if the edge AB intersects."]) == (
+        "Returns true if the edge AB intersects."
+    )
+    assert real_documentation(["line one", "line two"]) == "line one\nline two"
+    # surrounding whitespace is noise, not documentation
+    assert real_documentation(["  /** Doc. */\n"]) == "/** Doc. */"
+
+
+def test_real_documentation_filters_placeholder_and_auto_text() -> None:
+    """Everything scip-clang auto-writes must come back None — surfacing
+    boilerplate as a doc comment would present a fabricated-looking "fact":
+    the literal `"No documentation available."` placeholder (84.45% of corpus
+    symbols), `namespace X` / `inline namespace X` / `anonymous namespace` on
+    namespace symbols (the last measured 4,217 symbols the audit's "genuine"
+    bucket had lumped in), and `File: Y` on the synthetic file symbol."""
+    assert real_documentation(["No documentation available."]) is None
+    assert real_documentation(["namespace mongo"]) is None
+    assert real_documentation(["inline namespace literals"]) is None
+    assert real_documentation(["anonymous namespace"]) is None
+    assert real_documentation(["File: src/mongo/db/foo.cpp"]) is None
+    # empty / whitespace-only / no entries at all
+    assert real_documentation([]) is None
+    assert real_documentation([""]) is None
+    assert real_documentation(["   "]) is None
+
+
+def test_build_graph_keeps_genuine_documentation_on_node() -> None:
+    fn = "cxx . . $ mongo/documented(d1)."
+    doc = scip_pb2.Document(relative_path="doc.cpp")
+    doc.occurrences.append(_occurrence(fn, 1, roles=DEFINITION))
+    doc.symbols.add(symbol=fn, documentation=["/** Extracts the shard key. */"])
+    graph = build_graph(scip_pb2.Index(documents=[doc]))
+
+    assert graph.nodes[fn].documentation == "/** Extracts the shard key. */"
+
+
+def test_build_graph_filters_placeholder_and_auto_documentation() -> None:
+    """One symbol per auto-text shape plus one with no documentation field at
+    all: every node keeps `documentation=None` — nothing crashes, and no
+    auto-text is surfaced as if it were a real doc comment."""
+    cases = {
+        "cxx . . $ mongo/plain(p1).": ["No documentation available."],
+        "cxx . . $ mongo/ns/": ["namespace mongo"],
+        "cxx . . $ mongo/inline_ns/": ["inline namespace literals"],
+        "cxx . . $ mongo/anon/": ["anonymous namespace"],
+        "cxx . . $ mongo/file": ["File: src/mongo/db/foo.cpp"],
+    }
+    doc = scip_pb2.Document(relative_path="auto.cpp")
+    for sym, documentation in cases.items():
+        doc.symbols.add(symbol=sym, documentation=documentation)
+    doc.symbols.add(symbol="cxx . . $ mongo/nodoc(n1).")  # no documentation field
+    graph = build_graph(scip_pb2.Index(documents=[doc]))
+
+    assert all(graph.nodes[sym].documentation is None for sym in cases)
+    assert graph.nodes["cxx . . $ mongo/nodoc(n1)."].documentation is None
+
+
+def test_build_graph_first_real_documentation_wins_across_documents() -> None:
+    """A symbol's `SymbolInformation` appears once per document (a header
+    included by N TUs). A placeholder-only visit must not block a later
+    genuine comment (None keeps the door open), and a genuine comment already
+    captured must not be overwritten by a later duplicate."""
+    fn = "cxx . . $ mongo/dup(d1)."
+    first = scip_pb2.Document(relative_path="a.cpp")
+    first.symbols.add(symbol=fn, documentation=["No documentation available."])
+    second = scip_pb2.Document(relative_path="b.cpp")
+    second.symbols.add(symbol=fn, documentation=["/** The real comment. */"])
+    third = scip_pb2.Document(relative_path="c.cpp")
+    third.symbols.add(symbol=fn, documentation=["No documentation available."])
+    graph = build_graph(scip_pb2.Index(documents=[first, second, third]))
+
+    assert graph.nodes[fn].documentation == "/** The real comment. */"

@@ -43,7 +43,7 @@ from __future__ import annotations
 import bisect
 import functools
 import gc
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 
 from cppgraph.model import Graph
 from cppgraph.proto import scip_pb2
@@ -114,6 +114,38 @@ def is_term_symbol(symbol: str) -> bool:
     whole declaration including the initializer — powering
     `global_init_references`."""
     return symbol.endswith(".") and not symbol.endswith(").")
+
+
+# The literal scip-clang writes into `SymbolInformation.documentation` whenever
+# no doc comment was found (`ScipExtras.h` `missingDocumentationPlaceholder`):
+# 84.45% of corpus symbols carry it — non-empty, but saying nothing.
+_DOCUMENTATION_PLACEHOLDER = "No documentation available."
+
+
+def real_documentation(entries: Iterable[str]) -> str | None:
+    """The genuine doc-comment text behind a `SymbolInformation.documentation`
+    field, or None when there isn't any.
+
+    scip-clang populates `documentation` on 99.99% of corpus symbols
+    (SCIP_AUDIT.md) but only ~10% carry a real extracted doc comment — the
+    rest is auto-generated text that must never be surfaced as documentation
+    (a placeholder posing as a doc comment is a fabricated-looking "fact"):
+    the literal placeholder (84.45%), `namespace X` / `inline namespace X` /
+    `anonymous namespace` on namespace symbols (the last, 4,217 corpus
+    symbols, was lumped into the audit's "genuine" bucket — it is
+    `fmt::format` output, not a comment), and `File: Y` on the synthetic file
+    symbol. All measured on the mongo corpus (810,919 symbols); every one
+    carries at most ONE documentation entry, so the newline join below is
+    unobservable on real data (kept for the proto's `repeated string` shape).
+    """
+    text = "\n".join(entries).strip()
+    if not text or text == _DOCUMENTATION_PLACEHOLDER:
+        return None
+    if text.startswith(("namespace ", "inline namespace ", "File: ")):
+        return None
+    if text == "anonymous namespace":
+        return None
+    return text
 
 
 _SINGLE_CHAR_TERMINATORS = "/#.:!"  # namespace, type, term, meta, macro
@@ -274,7 +306,14 @@ def build_graph(
 
     for doc in index.documents:
         for sym_info in doc.symbols:
-            graph.add_node(sym_info.symbol, display_name=sym_info.display_name)
+            node = graph.add_node(sym_info.symbol, display_name=sym_info.display_name)
+            # First *real* doc text wins: the same symbol's SymbolInformation
+            # appears once per document (a header included by N TUs), so a
+            # later duplicate must not overwrite a comment already captured —
+            # but a placeholder-only visit returns None here and keeps the
+            # door open for a later genuine one.
+            if node.documentation is None:
+                node.documentation = real_documentation(sym_info.documentation)
             for rel in sym_info.relationships:
                 if rel.is_implementation:
                     # scip-clang uses is_implementation for both class

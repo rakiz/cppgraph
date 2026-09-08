@@ -13,22 +13,7 @@ active list. Design detail is in `DESIGN.md`, shipped features in
   fell back to `bisect`-nearest-preceding. `build_graph` now drops such a call site
   instead of guessing, but only when the document has `callable_intervals` (#504) — a
   stock graph still has no way to tell a declaration from a real call at the same shape
-  (documented, accepted limitation, see `DESIGN.md`). Remaining item: expose an explicit
-  `caller_count` (incl. `0`) for `no_incoming_calls`; that tool would also need to gate on
-  graph type, since "0 callers" is only trustworthy on a #504 graph.
-- **Indexing progress: consume scip-clang's per-TU report instead of suppressing it.**
-  Same user, same session: a full re-index runs for an unknown duration with no signal.
-  `run_scip_clang` passes `--no-progress-report` (`pipeline.py:132`), inherited from the
-  deleted `reindex.sh` with no recorded rationale. Checked against the installed binary:
-  the flag *"suppress[es] progress information reported after a TU is indexed"* — so the
-  output is **one plain line per TU**, not an ANSI bar. The reason to suppress it is
-  therefore volume, not format: on the reported run that is ~5,955 lines into an agent's
-  context. Both needs are satisfiable at once because the denominator is already known —
-  `filter_compdb` returns `kept` (`pipeline.py:63`) — so drop the flag and *consume* the
-  stream, re-emitting it at a controlled cadence: a live `N/total` (+ elapsed, derived
-  ETA) on a TTY, one line every few percent or every N seconds under a pipe. That is a
-  real progress indicator for the human without flooding the LLM path, and it needs no
-  parsing beyond counting lines. Do it after the entry-point item, not with it.
+  (documented, accepted limitation, see `DESIGN.md`).
 - **Attributed references as first-class `uses` edges.** `impact_of`/`path` traverse
   `calls`/`inherits` only, so a *type* has no reachable callers — "what breaks if I
   change this struct?" isn't answerable transitively; the answer lives in
@@ -47,19 +32,6 @@ active list. Design detail is in `DESIGN.md`, shipped features in
   (already generic over edge kinds) would render `uses` relationships automatically. Cost
   (millions of extra edges) vs. that narrower payoff — moderate cost, modest-but-real
   value; lower priority than the headline made it sound.
-- **Show the storage cost of the symbol-granularity upgrade in `status`.** `status`
-  already prints the file→symbol upgrade hint (index with a #504 binary / `enrich-refs`);
-  add the extra `.graph.db` cost so the user can weigh it. Measure the real delta first
-  (same graph with vs without `--attributed-refs`); don't hardcode a guess.
-- **Audit which SCIP fields scip-clang actually populates (on a #504 binary).** Several
-  schema fields go unused because they're suspected empty — the builder header already
-  notes `SymbolInformation.kind` comes back `UnspecifiedKind`. Before relying on any,
-  introspect a real #504 index (`scip_introspect.py`) and record which carry data:
-  `kind`, `documentation`/`signature_documentation`, and the `symbol_roles`
-  `ReadAccess`/`WriteAccess`/`Test` bits. (`enclosing_range` on *term* globals is already
-  confirmed — the #504 `saveVarDecl` patch emits it — so it's not in this list.) Cheap;
-  gates the `scip-clang (upstream)` section below. Same "verify before promising" lesson
-  as `line_span`.
 - **Contributing notes, CI (lint + pytest), publish.** Not a 0.1.0 blocker.
 - **Make the repo discoverable to LLMs (distribution).** LLMs asked to compare
   code-intelligence tools describe cppgraph from the *name* only — the page isn't
@@ -187,8 +159,8 @@ upstream (sourcegraph/scip-clang) or, if it comes to it, to patch in our own clo
 already carry the #504 `enclosing_range` patch that way). Each links the feature of ours
 it unblocks. The field-emptiness audit has now run (`SCIP_AUDIT.md`, measured against
 `scratch/mongo_src_tests.scip` + a #504 fixture, exhaustive counts, not sampling) — every
-item below states a verified fact, not a suspicion; see `FOLLOWUP.md` §"Worth patching
-upstream" for the ranked PR shortlist this audit produced.
+item below states a verified fact, not a suspicion, and carries the effort estimate and
+`scip-clang` file:line the audit found for whoever files the PR.
 
 - **`enclosing_range` — not emitted by official scip-clang at all (PR #504 in progress).**
   The single biggest gap: enclosing ranges are the definition-body extents that drive exact
@@ -214,16 +186,60 @@ upstream" for the ranked PR shortlist this audit produced.
   `platform_sources()` (stock binary, no #504). → unblocks a no-toolchain install on Linux ARM.
 - **`SymbolInformation.kind` — confirmed unemitted (`UnspecifiedKind` on 810,919/810,919
   corpus symbols, 100%).** The builder derives node kind (callable/type/term) from the
-  SCIP descriptor suffix instead. If scip-clang filled it, we could drop that derivation
-  and make global/field/enum distinctions exact. → would unblock cleaner node typing; a
-  firmer `global_init_references` (identify globals without suffix parsing).
+  SCIP descriptor suffix instead. Small effort, moderate value: `SymbolInformationBuilder`
+  (`ScipExtras.h:89`) already funnels every symbol through `finish()`, and each
+  `save*Decl` site holds the `clang::Decl` (`saveEnumDecl:483`, `saveEnumConstantDecl:465`,
+  `saveFieldDecl:510`, `saveFunctionDecl:528`, `saveRecordDecl:685`, `saveVarDecl:931`) —
+  a Decl-kind → `scip::SymbolInformation::Kind` switch (≈40 lines) + `set_kind` in the
+  builder. Moderate not high value because cppgraph's descriptor-suffix derivation is
+  already exact for the callable/type/term split; `kind` would add finer distinctions
+  (enum vs. class, static vs. global, parameter vs. field). If scip-clang filled it, we
+  could drop that derivation and make global/field/enum distinctions exact. → would
+  unblock cleaner node typing; a firmer `global_init_references` (identify globals
+  without suffix parsing).
 - **`symbol_roles` `ReadAccess` / `WriteAccess` bits — confirmed never set (0 of
   15,176,411 corpus occurrences carry either bit).** If set, they would tag a reference
   read vs write — "who *mutates* this global/field?" vs who reads it, a capability class
-  we can't offer now. Upstream already has a `TODO` at the exact call site
-  (`Indexer.cc:1018`) — see `FOLLOWUP.md`'s PR shortlist for the concrete patch shape. →
-  would unblock mutation analysis; a sharper `global_init_references` (a write at init vs
-  a mere mention).
+  we can't offer now. Moderate effort, high value — upstream receptivity is on record:
+  `saveDeclRefExpr` carries the literal comment *"TODO: Add read-write access to the
+  symbol role here"* (`Indexer.cc:1018`), and `saveMemberExpr` (`:1024`) is the sibling
+  site — both already hold the `Expr`, so classification is a parent-expression check
+  (assignment/compound-assignment LHS, `++`/`--` operand, via clang's
+  `ParentMap`/`ASTContext::getParents`). Plumbing is ready: `saveReference` (`:1164`)
+  takes `extraRoles`, `saveOccurrenceImpl` sets roles verbatim (`:1263`, the only
+  `set_symbol_roles` call for references). A `RefersToWrite`-style classifier next to
+  `RefersToForwardDecl` (`Indexer.h:254`, `check()` at `:339`, ~15 lines) plus
+  pass-through at the two visitor sites: **~60–120 lines + tests**. State the limits
+  honestly in the PR: syntactic write detection only (no dataflow — `f(x)` passing `x`
+  by reference to an out-param isn't detectable here; ref-returning calls like
+  `a.b() = x` need a decision). → would unblock mutation analysis; a sharper
+  `global_init_references` (a write at init vs a mere mention).
+- **`symbol_roles` `ForwardDefinition` bit on bodyless-declaration occurrences —
+  small effort, the single biggest correctness win for STOCK-binary graphs (where
+  #504's `enclosing_range` isn't available to solve it by containment).** The
+  discriminator already exists and runs: `RefersToForwardDecl::check` (`Indexer.cc:339`)
+  is `!canonicalDecl->isThisDeclarationADefinition()`, and bodyless declarations (an
+  in-class method declaration, a header prototype) route through `saveFunctionDecl` →
+  `saveForwardDeclaration` (`:565` → `:1151`) into the internal forward-decl pipeline
+  (`proto/fwd_decls.proto`, `ForwardDeclMap::emit` at `:363`), re-emerging into
+  documents via `ForwardDeclOccurrence::addTo` (`ScipExtras.cc:243-249`) — which sets
+  symbol and range and **never touches `symbol_roles`**, landing as plain role-0. That
+  role-0 shape is exactly the declaration-vs-call indistinguishability that forces
+  cppgraph's stock-binary over-capture (`DESIGN.md` § Building calls: "no separating
+  signal exists"; the same declaration-site phantom-caller bug at the top of this
+  file, fixed for #504 graphs only). One bit at the source fixes what no consumer can
+  recover — an existing SCIP role, no schema change. Design caveat to resolve *in* the
+  PR: `saveReference` (`:1179`) also routes *references* that resolve to a
+  declaration-only decl into the same map, so the naive one-line version (tag every
+  `ForwardDeclOccurrence`) would also tag genuine calls to declared-here/
+  defined-elsewhere functions — the clean version needs an origin marker
+  (declaration-site vs. reference-site) in `fwd_decls.proto`'s `ForwardDecl::Reference`,
+  setting the bit only for declaration sites: **~15–30 lines** across the internal
+  proto, the two insert sites, and `addTo`. Acceptance test before relying on it: the
+  `rwmutex.h:192` / `ProcessId::asLongLong` phantom-caller fixtures from `DESIGN.md`
+  must drop out while the real inline-body calls stay. → unblocks a stock-graph fix
+  for the declaration-site phantom-caller bug at the top of this file, without needing
+  #504 at all.
 - **`symbol_roles` `Test` bit — confirmed never set (0 of 15,176,411).** We derive "is a
   test" from the file path (`exclude_tests`); if scip-clang set the Test role it would
   beat the path heuristic, though an upstream emitter would itself need a path/gtest
@@ -231,9 +247,11 @@ upstream" for the ranked PR shortlist this audit produced.
   exact test filtering, in principle.
 - **`documentation` — confirmed WORKING, contradicts this bullet's own prior claim.**
   Measured: 99.99% non-empty, but 84.45% is a literal `"No documentation available."`
-  placeholder — the genuine doc-comment rate is 10.61% (86,061 of 810,919 symbols). No
+  placeholder — the genuine doc-comment rate is 10.09% (81,844 of 810,919 symbols). No
   upstream ask here: `explain_symbol` can consume this today, cppgraph-side.
-  `signature_documentation` remains genuinely empty (0/810,919) — would render declared
+  `signature_documentation` remains genuinely empty (0/810,919) — moderate effort,
+  moderate value: nothing exists today (`set_signature_documentation` appears nowhere
+  in the indexer), would render declared
   signatures without a source read.
 - **Effective call arity per call site — not modeled.** A call occurrence carries the
   callee symbol and location but not how many arguments the call expression actually passes.

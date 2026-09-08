@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import textwrap
 from pathlib import Path
 
 from cppgraph.builder import build_graph
@@ -37,7 +38,7 @@ from cppgraph.store import (
     update_store,
     write_sqlite,
 )
-from cppgraph.updates import scip_update_advice, update_advice
+from cppgraph.updates import attributed_refs_cost_note, scip_update_advice, update_advice
 
 # Extensions the graph is built from — drift in a non-C++ file (docs, build
 # config, settings) never changes the code graph, so `status` ignores it to keep
@@ -1010,7 +1011,7 @@ def main(argv: list[str] | None = None) -> int:
 
     p_explain = sub.add_parser(
         "explain",
-        help="summarize a symbol: definition site, source snippet, callers/callees",
+        help="summarize a symbol: definition site, doc comment, source snippet, callers/callees",
     )
     p_explain.add_argument(
         "--graph",
@@ -1921,9 +1922,25 @@ def main(argv: list[str] | None = None) -> int:
                     f"                    or enrich in place: cppgraph enrich-refs "
                     f"--graph {graph_path} --scip <index.scip>"
                 )
-                print(
-                    "                 (costs extra store space — worth it for symbol-level usage)"
-                )
+                # Estimated cost from THIS graph's ref_count (measured per-ref
+                # constant, see `attributed_refs_cost_note`); None -> the old
+                # number-free wording rather than a fabricated "~0 bytes".
+                cost = attributed_refs_cost_note(m.get("ref_count"))
+                if cost is None:
+                    print(
+                        "                 (costs extra store space — worth it for "
+                        "symbol-level usage)"
+                    )
+                else:
+                    print(
+                        textwrap.fill(
+                            f"estimated {cost} — worth it for symbol-level usage",
+                            width=78,
+                            initial_indent=" " * 17,
+                            subsequent_indent=" " * 17,
+                            break_on_hyphens=False,
+                        )
+                    )
         print(
             f"  format:        schema v{m.get('schema_version', '0 (legacy)')}"
             f", cppgraph {m.get('cppgraph_version', '?')}"
@@ -2013,6 +2030,13 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[cppgraph] {node.symbol}")
         print(f"  name:       {node.display_name or '?'}")
         print(f"  defined at: {loc}")
+        if node.documentation:
+            # Genuine doc comment from the graph (extracted at index time) —
+            # no --root needed, unlike the signature below.
+            doc_lines = node.documentation.splitlines()
+            print(f"  documentation: {doc_lines[0]}")
+            for doc_line in doc_lines[1:]:
+                print(f"    {doc_line}")
         if args.root is not None:
             sig = extract_signature(args.root, node.file, node.line)
             if sig is not None:
@@ -2037,6 +2061,18 @@ def main(argv: list[str] | None = None) -> int:
             print("  (tip: pass --root <checkout> to include a source snippet)")
 
         print(f"  {len(callers)} caller(s):")
+        if not callers and store.meta().get("has_enclosing_ranges") != "true":
+            # The same stock-attribution caveat `no_incoming_calls` refuses on:
+            # the count is still reported, so the caveat travels with it.
+            print(
+                "  note: 0 callers is only trustworthy on a #504-built index — "
+                "this stock-binary graph's caller attribution (nearest-preceding "
+                "definition, no enclosing ranges) has a separate false-positive "
+                "path that can fabricate a phantom caller from a bodyless "
+                "declaration site, but this reported 0 can hide a real caller "
+                "when a call site with no preceding callable definition in its "
+                "document is dropped, so this 0 is not guaranteed"
+            )
         for edge in callers[:10]:
             line = edge.line + 1 if edge.line is not None else "?"
             print(f"    {edge.src}  ({edge.file}:{line})")

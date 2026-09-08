@@ -24,6 +24,10 @@ on-disk cache, silent when offline) and derive two independent signals:
 The comparison/advice logic (`compute_advice`) is pure and unit-tested; the
 network+cache layer around it fails soft, so `status` never breaks or hangs on a
 missing network.
+
+A third, offline piece of `status` advice lives here too: the usage-view
+upgrade's estimated store cost (`attributed_refs_cost_note`), extrapolated from
+a measured per-reference A/B delta — pure, no registry involved.
 """
 
 from __future__ import annotations
@@ -380,3 +384,51 @@ def scip_update_advice(graph_scip: dict[str, Any] | None, *, force: bool = False
     if data is None:
         return {"checked": False, "reason": "version registry unreachable (offline?)"}
     return compute_scip_advice(scip_clang_pin(data), installed_scip_clang(), graph_scip)
+
+
+# ---- usage-view upgrade: estimated store cost --------------------------------
+# `status`'s file->symbol granularity upgrade hint needs a store-cost figure,
+# measured, not guessed. A/B on rakiz80 (a real 224-TU C++ project), indexed
+# with the local #504 scip-clang, the SAME .scip built both ways:
+#   `build --references`:                    4,681,728 bytes
+#   `build --references --attributed-refs`:  4,714,496 bytes
+# for the same 84,598 reference rows (16,497 attributed) => 32,768 / 84,598
+# ~= 0.39 bytes per reference. Scaled by the TOTAL ref count — the figure every
+# graph's `status` already reports — rather than the attributed subset, so an
+# estimate for an arbitrary codebase needs no attribution-rate guess. A real
+# counterpoint is on record: the in-place `enrich-refs` path measured far
+# larger per ref on mongo (+146 MB, DESIGN.md) — in-place UPDATEs plus a
+# temporary composite index rewrite pages a fresh build never touches — which
+# is exactly why the hint words its number as an extrapolation. Re-measure
+# (and update this constant) if scip-clang or the store schema changes enough
+# to invalidate it.
+BYTES_PER_ATTRIBUTED_REF = 32_768 / 84_598  # ~= 0.387 bytes per reference row
+
+
+def attributed_refs_cost_note(ref_count: str | int | None) -> str | None:
+    """The estimated-extra-size sentence for `status`'s usage-view upgrade hint
+    on a graph with `ref_count` references, or None when that is 0/unknown —
+    no estimate beats a fabricated "~0 bytes". The same text on CLI and MCP.
+
+    This graph's ref count times a per-ref cost measured on ONE other project
+    (see `BYTES_PER_ATTRIBUTED_REF` for provenance): an extrapolation, worded
+    so it can never be read as a measurement of this graph.
+    """
+    try:
+        n = int(ref_count)  # store meta values are strings; tolerate an int
+    except (TypeError, ValueError):
+        return None
+    if n <= 0:
+        return None
+    extra = n * BYTES_PER_ATTRIBUTED_REF
+    if extra >= 1024 * 1024:
+        size = f"~{extra / 1024 / 1024:.1f} MB"
+    elif extra >= 1024:
+        size = f"~{extra / 1024:.0f} KB"
+    else:
+        size = f"~{extra:.1f} B"
+    return (
+        f"{size} extra (extrapolated from a real measurement: "
+        f"{BYTES_PER_ATTRIBUTED_REF:.2f} bytes/ref on a 224-TU test project — "
+        "larger/smaller codebases may scale differently)"
+    )

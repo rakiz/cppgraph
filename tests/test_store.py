@@ -99,6 +99,74 @@ def test_get_node_returns_definition_location(tmp_path: Path) -> None:
     assert node.line == 41
 
 
+def test_get_node_returns_documentation(tmp_path: Path) -> None:
+    graph = Graph()
+    graph.add_node(METHOD, display_name="makeResumeToken")
+    graph.nodes[METHOD].file = "foo.cpp"
+    graph.nodes[METHOD].line = 41
+    graph.nodes[METHOD].documentation = "/** Doc comment. */"
+    store = _store(tmp_path, graph)
+    node = store.get_node(METHOD)
+    assert node is not None
+    assert node.documentation == "/** Doc comment. */"
+
+
+def test_get_node_documentation_none_when_absent(tmp_path: Path) -> None:
+    store = _sample(tmp_path)
+    node = store.get_node(METHOD)
+    assert node is not None
+    assert node.documentation is None
+
+
+def test_get_node_degrades_on_v3_store_without_documentation(tmp_path: Path) -> None:
+    """A v3 store (end_line present, documentation not) is only migrated when
+    an update/enrich touches it; a plain read-only `get_node` must degrade to
+    the store's shape — documentation None, end_line still read — not crash."""
+    db = tmp_path / "graph.db"
+    graph = Graph()
+    graph.add_node(METHOD, display_name="makeResumeToken")
+    graph.nodes[METHOD].file = "foo.cpp"
+    graph.nodes[METHOD].line = 41
+    graph.nodes[METHOD].end_line = 60
+    write_sqlite(graph, db)
+    con = sqlite3.connect(db)
+    con.execute("ALTER TABLE symbols DROP COLUMN documentation")
+    con.execute("UPDATE meta SET value = '3' WHERE key = 'schema_version'")
+    con.commit()
+    con.close()
+
+    node = GraphStore(db).get_node(METHOD)
+    assert node is not None
+    assert node.documentation is None
+    assert node.end_line == 60  # the v3 fallback still reads what v3 has
+
+
+def test_get_node_degrades_on_v2_store_without_end_line_or_documentation(
+    tmp_path: Path,
+) -> None:
+    """The innermost fallback (v2: no end_line either) still answers with the
+    v2 shape — both optional columns None, definition site intact."""
+    db = tmp_path / "graph.db"
+    graph = Graph()
+    graph.add_node(METHOD, display_name="makeResumeToken")
+    graph.nodes[METHOD].file = "foo.cpp"
+    graph.nodes[METHOD].line = 41
+    write_sqlite(graph, db)
+    con = sqlite3.connect(db)
+    con.execute("ALTER TABLE symbols DROP COLUMN end_line")
+    con.execute("ALTER TABLE symbols DROP COLUMN documentation")
+    con.execute("UPDATE meta SET value = '2' WHERE key = 'schema_version'")
+    con.commit()
+    con.close()
+
+    node = GraphStore(db).get_node(METHOD)
+    assert node is not None
+    assert node.file == "foo.cpp"
+    assert node.line == 41
+    assert node.end_line is None
+    assert node.documentation is None
+
+
 def test_shortest_call_path_multi_hop(tmp_path: Path) -> None:
     graph = Graph()
     graph.add_edge("calls", "a", "b", file="f.cpp", line=1)
@@ -1395,6 +1463,7 @@ def test_update_upgrades_a_v2_store_adding_end_line(tmp_path: Path) -> None:
     write_sqlite(_no_callers_graph(), db)
     con = sqlite3.connect(db)
     con.execute("ALTER TABLE symbols DROP COLUMN end_line")
+    con.execute("ALTER TABLE symbols DROP COLUMN documentation")
     con.execute("UPDATE meta SET value = '2' WHERE key = 'schema_version'")
     # A real v2 store predates the feature entirely — it never had this key.
     con.execute("DELETE FROM meta WHERE key = 'has_enclosing_ranges'")
@@ -1415,6 +1484,37 @@ def test_update_upgrades_a_v2_store_adding_end_line(tmp_path: Path) -> None:
     assert (fn, 20) in ranked
 
 
+def test_update_upgrades_a_v3_store_adding_documentation(tmp_path: Path) -> None:
+    """An older (schema v3) store has no `documentation` column; an incremental
+    update whose partial carries genuine doc text must add it on demand (the
+    same ALTER pattern the end_line/v2 migration uses), write the text, and
+    stamp the current schema version."""
+    db = tmp_path / "graph.db"
+    graph = Graph()
+    graph.add_node(METHOD, display_name="makeResumeToken")
+    graph.nodes[METHOD].file = "foo.cpp"
+    graph.nodes[METHOD].line = 41
+    write_sqlite(graph, db)
+    con = sqlite3.connect(db)
+    con.execute("ALTER TABLE symbols DROP COLUMN documentation")
+    con.execute("UPDATE meta SET value = '3' WHERE key = 'schema_version'")
+    con.commit()
+    con.close()
+
+    partial = _partial_index("foo.cpp")
+    d = partial.documents[0]
+    occ = d.occurrences.add(symbol=METHOD, symbol_roles=scip_pb2.SymbolRole.Definition)
+    occ.range.extend([41, 0, 3])
+    d.symbols.add(symbol=METHOD, documentation=["/** Extracts the shard key. */"])
+    update_store(db, partial)
+
+    store = GraphStore(db)
+    assert store.schema_version() == SCHEMA_VERSION
+    node = store.get_node(METHOD)
+    assert node is not None
+    assert node.documentation == "/** Extracts the shard key. */"
+
+
 def test_update_clears_end_line_when_definition_site_is_removed(tmp_path: Path) -> None:
     """A symbol's definition can be cleared (file re-indexed with no occurrence
     for it anymore) while it survives GC because something elsewhere still
@@ -1423,7 +1523,13 @@ def test_update_clears_end_line_when_definition_site_is_removed(tmp_path: Path) 
     `end_line - line` as NULL and crash CLI formatting."""
     db = tmp_path / "graph.db"
     original = Graph()
-    original.nodes["shared()."] = Node(symbol="shared().", file="foo.cpp", line=10, end_line=60)
+    original.nodes["shared()."] = Node(
+        symbol="shared().",
+        file="foo.cpp",
+        line=10,
+        end_line=60,
+        documentation="/** Shared implementation. */",
+    )
     original.add_edge("calls", "b().", "shared().", file="bar.cpp", line=7)
     write_sqlite(original, db)
 
@@ -1438,6 +1544,7 @@ def test_update_clears_end_line_when_definition_site_is_removed(tmp_path: Path) 
     assert node.file is None
     assert node.line is None
     assert node.end_line is None  # not left stale
+    assert node.documentation is None  # not left stale
     ranked, _total = store.line_span()
     assert all(symbol != "shared()." for symbol, _span in ranked)
 
@@ -1597,6 +1704,32 @@ def test_enrich_references_backfills_from_scip(tmp_path: Path) -> None:
     store = GraphStore(db)
     assert [r.enclosing_symbol for r in store.references_of(typ)] == [user]
     assert store.meta().get("has_attributed_refs") == "true"
+
+
+def test_enrich_references_migrates_a_v3_store_documentation_column(tmp_path: Path) -> None:
+    graph = Graph()
+    graph.add_reference(TYPE, "render.cpp", 8)
+    db = tmp_path / "g.db"
+    write_sqlite(graph, db)
+    con = sqlite3.connect(db)
+    con.execute("ALTER TABLE symbols DROP COLUMN documentation")
+    con.execute("UPDATE meta SET value = '3' WHERE key = 'schema_version'")
+    con.commit()
+    con.close()
+
+    doc = scip_pb2.Document(relative_path="render.cpp")
+    use = doc.occurrences.add(symbol=TYPE)
+    use.range.extend([8, 0, 6])
+    index = scip_pb2.Index(documents=[doc])
+
+    from cppgraph.store import enrich_references
+
+    enrich_references(db, index)
+
+    con = sqlite3.connect(db)
+    columns = {row[1] for row in con.execute("PRAGMA table_info(symbols)")}
+    con.close()
+    assert "documentation" in columns
 
 
 def test_enrich_references_errors_without_reference_index(tmp_path: Path) -> None:

@@ -18,7 +18,10 @@ from __future__ import annotations
 import json
 import multiprocessing
 import os
+import re
 import subprocess
+import sys
+import time
 from pathlib import Path
 
 from cppgraph.builder import build_graph
@@ -35,6 +38,16 @@ from cppgraph.store import (
 )
 
 _HEADER_EXTS = (".h", ".hpp", ".hh", ".hxx", ".ipp", ".inl")
+
+# scip-clang's per-TU report (verified against the v0.4.0 binary): one
+# "[N/total] Indexed <file>" line per TU on stdout — N is space-padded, a
+# completion-order counter, and arrives flushed while indexing goes on. Each TU
+# also logs a "[N/total] Merged partial index" line, so the report is ~2 lines
+# per TU: counting raw lines would double-count, hence matching the prefix.
+_TU_DONE = re.compile(r"^\[\s*(\d+)/\d+\] Indexed ")
+_TTY_REDRAW_INTERVAL = 0.3  # s between live single-line redraws on a TTY
+_PIPE_PCT_STEP = 20  # 100 // 5: under a pipe, one line per 5% of total crossed
+_PIPE_MAX_QUIET = 60.0  # s between pipe-mode lines even within one 5% bucket
 
 
 class PipelineError(RuntimeError):
@@ -114,10 +127,39 @@ def git_head(project_root: Path) -> tuple[str | None, bool]:
     return commit, dirty
 
 
-def run_scip_clang(project_root: Path, compdb: Path, out_scip: Path, *, print_fn=print) -> None:
+def _progress_text(done: int, total: int | None, elapsed: float) -> str:
+    """The progress line: `N/total` (+ elapsed, derived ETA) when the denominator
+    is known, a plain indexed count otherwise (nothing to divide by)."""
+    if not total:
+        return f"  indexed {done} TU(s), {elapsed:.0f}s elapsed"
+    remaining = total - done
+    eta = f", ETA {elapsed / done * remaining:.0f}s" if done and remaining > 0 else ""
+    return f"  indexed {done}/{total} TU(s) ({done * 100 // total}%{eta}), {elapsed:.0f}s elapsed"
+
+
+def run_scip_clang(
+    project_root: Path,
+    compdb: Path,
+    out_scip: Path,
+    *,
+    total_tus: int | None = None,
+    print_fn=print,
+) -> None:
     """Index `compdb` into `out_scip` by running the native scip-clang from
     `project_root` (its cwd sets the project_root recorded in the index). Raises
-    `PipelineError` if the binary is absent or the run fails."""
+    `PipelineError` if the binary is absent or the run fails.
+
+    `total_tus` is the denominator (the compdb entry count, known to both
+    callers before the run starts). scip-clang's per-TU report is consumed and
+    re-emitted at a bounded cadence instead of being suppressed: a live
+    `N/total` single line on a TTY (redrawn at most every
+    `_TTY_REDRAW_INTERVAL` s), one line every 5% of `total_tus` or
+    `_PIPE_MAX_QUIET` s under a pipe — a handful of lines however many TUs
+    there are. TTY redraws write to `sys.stdout` directly (in-place overwrite
+    needs `end=""`, which `print_fn`'s single-string contract can't express);
+    piped lines go through `print_fn`. stderr stays inherited: the report goes
+    to stdout only, so error output still reaches the user live, and with a
+    single piped stream there is no second buffer to fill — no deadlock."""
     binary = scip_clang_path()
     if not os.access(binary, os.X_OK):
         raise PipelineError(
@@ -127,7 +169,7 @@ def run_scip_clang(project_root: Path, compdb: Path, out_scip: Path, *, print_fn
         )
     jobs = num_jobs()
     print_fn(f"  running scip-clang (-j {jobs}, cwd={project_root}) ...")
-    proc = subprocess.run(
+    proc = subprocess.Popen(
         [
             str(binary),
             "--compdb-path",
@@ -136,12 +178,60 @@ def run_scip_clang(project_root: Path, compdb: Path, out_scip: Path, *, print_fn
             str(out_scip),
             "-j",
             str(jobs),
-            "--no-progress-report",
         ],
         cwd=str(project_root),
+        stdout=subprocess.PIPE,
+        text=True,
     )
-    if proc.returncode != 0:
-        raise PipelineError(f"scip-clang exited with status {proc.returncode}")
+    tty = sys.stdout.isatty()
+    start = time.monotonic()
+    done = 0
+    last_redraw = -_TTY_REDRAW_INTERVAL  # negative: the first TU reports at once
+    last_line = -_PIPE_MAX_QUIET
+    bucket = -1  # last 5%-boundary emitted under a pipe
+    live_width = 0
+    summary: str | None = None
+    try:
+        for line in proc.stdout:
+            line = line.rstrip("\n")
+            m = _TU_DONE.match(line)
+            if m is None:
+                if line.startswith("Finished indexing "):
+                    summary = line
+                continue
+            done = int(m.group(1))
+            now = time.monotonic()
+            if tty:
+                if now - last_redraw >= _TTY_REDRAW_INTERVAL:
+                    last_redraw = now
+                    text = _progress_text(done, total_tus, now - start)
+                    sys.stdout.write(f"\r{text}" + " " * max(0, live_width - len(text)))
+                    sys.stdout.flush()
+                    live_width = len(text)
+            else:
+                step = done * _PIPE_PCT_STEP // total_tus if total_tus else None
+                if (step is not None and step != bucket) or now - last_line >= _PIPE_MAX_QUIET:
+                    if step is not None:
+                        bucket = step
+                    last_line = now
+                    print_fn(_progress_text(done, total_tus, now - start))
+    except BaseException:
+        proc.kill()  # don't leave the child blocked writing to a pipe nobody reads
+        proc.wait()
+        raise
+    finally:
+        if proc.stdout is not None:
+            proc.stdout.close()
+    returncode = proc.wait()
+    if tty and live_width:
+        # Final state on the live line, terminated so the next line starts clean.
+        text = _progress_text(done, total_tus, time.monotonic() - start)
+        sys.stdout.write(f"\r{text}" + " " * max(0, live_width - len(text)) + "\n")
+        sys.stdout.flush()
+    if summary:
+        print_fn(f"  {summary}")  # the one summary line scip-clang itself prints
+    if returncode != 0:
+        raise PipelineError(f"scip-clang exited with status {returncode}")
 
 
 def build_store(
@@ -233,7 +323,7 @@ def full_build(
     else:
         print_fn("[2/3] Running scip-clang ...")
         try:
-            run_scip_clang(project_root, out_compdb, out_scip, print_fn=print_fn)
+            run_scip_clang(project_root, out_compdb, out_scip, total_tus=kept, print_fn=print_fn)
         except PipelineError as e:
             print_fn(f"  error: {e}")
             return 1
@@ -336,7 +426,9 @@ def incremental_update(
     print_fn("[3/4] Re-indexing the changed TUs ...")
     if matched:
         try:
-            run_scip_clang(project_root, part_compdb, part_scip, print_fn=print_fn)
+            run_scip_clang(
+                project_root, part_compdb, part_scip, total_tus=len(matched), print_fn=print_fn
+            )
         except PipelineError as e:
             print_fn(f"  error: {e}")
             return 1

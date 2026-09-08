@@ -16,6 +16,7 @@ import pytest
 from cppgraph import mcp_server
 from cppgraph.model import Graph, Node
 from cppgraph.store import GraphStore, write_sqlite
+from cppgraph.updates import BYTES_PER_ATTRIBUTED_REF
 
 
 @pytest.fixture(autouse=True)
@@ -1381,6 +1382,30 @@ def test_explain_signature_is_none_not_absent_when_root_given_but_unextractable(
     assert result["signature"] is None
 
 
+def test_explain_includes_documentation_from_the_graph(tmp_path: Path) -> None:
+    """A genuine doc comment is carried by the store (extracted at index time,
+    placeholder/auto-text filtered by the builder), so it needs no `root` and
+    no source read — unlike `signature`. Present only when there is real
+    text: absent, never the placeholder."""
+    path = tmp_path / "graph.db"
+    graph = Graph()
+    graph.nodes[FOO] = Node(
+        symbol=FOO,
+        display_name="makeResumeToken",
+        file="foo.cpp",
+        line=234,
+        documentation="/** Extracts the change stream resume token. */",
+    )
+    write_sqlite(graph, path)
+    result = mcp_server.explain(GraphStore(path), FOO)
+    assert result["documentation"] == "/** Extracts the change stream resume token. */"
+
+
+def test_explain_omits_documentation_when_none(store: GraphStore) -> None:
+    result = mcp_server.explain(store, FOO)
+    assert "documentation" not in result
+
+
 def test_explain_limit_is_overridable(store: GraphStore) -> None:
     # FOO has one caller (mid); force a limit of 0 to prove the cap is honored
     # and truncation flagged, so an LLM can raise it back when it needs more.
@@ -1388,6 +1413,42 @@ def test_explain_limit_is_overridable(store: GraphStore) -> None:
     assert result["callers"]["items"] == []
     assert result["callers"]["truncated"] is True
     assert result["callers"]["total"] == 1
+
+
+def test_explain_zero_callers_reliable_on_504_graph(spans_store: GraphStore) -> None:
+    """A 0-caller count on a #504-shaped graph is exact (containment
+    attribution): no caveat fields, the 0 speaks for itself."""
+    result = mcp_server.explain(spans_store, TINY)
+    assert result["callers"]["total"] == 0
+    assert "zero_callers_reliable" not in result["callers"]
+    assert "note" not in result["callers"]
+
+
+def test_explain_zero_callers_unreliable_on_stock_graph(store: GraphStore) -> None:
+    """The default fixture is a stock-binary graph: a reported 0 is not
+    guaranteed there — the nearest-preceding fallback can fabricate a phantom
+    caller from a bodyless declaration site or drop a call site with no
+    preceding callable definition in its document (the same asymmetry that
+    makes `no_incoming_calls` refuse) — so the count carries the caveat."""
+    result = mcp_server.explain(store, CALLER)
+    assert result["callers"]["total"] == 0
+    assert result["callers"]["zero_callers_reliable"] is False
+    assert "phantom caller" in result["callers"]["note"]
+    assert "#504" in result["callers"]["note"]
+
+
+def test_explain_nonzero_callers_carry_no_caveat(
+    store: GraphStore, spans_store: GraphStore
+) -> None:
+    """A nonzero count needs no caveat on either graph type: over-capture is
+    the documented safe direction (an extra caller is verified, never acted on
+    by omission) — the caveat exists for the 0, the dangerous direction."""
+    stock = mcp_server.explain(store, FOO)  # 1 caller, stock-binary graph
+    shaped = mcp_server.explain(spans_store, MIDFN)  # 1 caller, #504-shaped graph
+    for result in (stock, shaped):
+        assert result["callers"]["total"] > 0
+        assert "zero_callers_reliable" not in result["callers"]
+        assert "note" not in result["callers"]
 
 
 def _init_repo(root: Path) -> str:
@@ -1413,6 +1474,67 @@ def test_status_reports_commit_without_root(tmp_path: Path) -> None:
     assert result["source_commit"] == "abc123"
     assert result["drift"]["checked"] is False
     assert result["transport"] == "mcp"
+
+
+def test_status_upgrade_hint_estimates_cost_from_ref_count(tmp_path: Path) -> None:
+    """The file-granularity upgrade hint carries a store-cost estimate computed
+    from THIS graph's ref_count times the measured per-ref constant — asserted
+    against the number recomputed from the constant, so refining it after a
+    re-measurement keeps both the hint and this test honest."""
+    graph = Graph()
+    graph.add_node(FOO, display_name="x")
+    path = tmp_path / "g.db"
+    write_sqlite(graph, path, meta={"has_references": "true", "ref_count": "84598"})
+    with GraphStore(path) as st:
+        result = mcp_server.status_report(st)
+    upgrade = result["usage_view"]["upgrade"]
+    extra = 84_598 * BYTES_PER_ATTRIBUTED_REF
+    assert f"~{extra / 1024:.0f} KB extra" in upgrade
+    assert f"{BYTES_PER_ATTRIBUTED_REF:.2f} bytes/ref" in upgrade  # provenance travels with it
+    assert "extrapolated" in upgrade  # never worded as a measurement of THIS graph
+
+
+@pytest.mark.parametrize(
+    "meta",
+    [{"has_references": "true", "ref_count": "0"}, {"has_references": "true"}],
+    ids=["ref-count-zero", "ref-count-missing"],
+)
+def test_status_upgrade_hint_omits_estimate_without_ref_count(
+    tmp_path: Path, meta: dict[str, str]
+) -> None:
+    """ref_count 0/unknown: the upgrade path is still surfaced, but no estimate
+    is fabricated (no crash, no nonsensical '~0 bytes')."""
+    graph = Graph()
+    graph.add_node(FOO, display_name="x")
+    path = tmp_path / "g.db"
+    write_sqlite(graph, path, meta=meta)
+    with GraphStore(path) as st:
+        result = mcp_server.status_report(st)
+    upgrade = result["usage_view"]["upgrade"]
+    assert "enrich-refs" in upgrade
+    assert "extrapolated" not in upgrade
+
+
+def test_status_attributed_graph_gets_no_upgrade_hint(tmp_path: Path) -> None:
+    """Already symbol-granularity: nothing to upgrade to — no hint (and so no
+    cost estimate) at all; the pre-existing behavior."""
+    graph = Graph()
+    graph.add_node(FOO, display_name="x")
+    path = tmp_path / "g.db"
+    write_sqlite(
+        graph,
+        path,
+        meta={
+            "has_references": "true",
+            "has_attributed_refs": "true",
+            "ref_count": "84598",
+            "attributed_ref_count": "16497",
+        },
+    )
+    with GraphStore(path) as st:
+        result = mcp_server.status_report(st)
+    assert result["usage_view"]["granularity"] == "symbol"
+    assert "upgrade" not in result["usage_view"]
 
 
 def test_status_up_to_date_with_root(tmp_path: Path) -> None:

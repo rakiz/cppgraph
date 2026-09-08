@@ -8,6 +8,108 @@ on-disk store also carries its own `schema_version` for forward-compatibility.
 
 ### Added
 
+- **`status`: estimated store cost on the usage-view upgrade hint.** The
+  file→symbol granularity hint said "costs extra store space" with no number;
+  it now computes one from the graph's own `ref_count`. Measured A/B first (the
+  TODO item's own demand — no hardcoded guess): rakiz80, a real 224-TU
+  project, indexed with the local #504 binary, the same `.scip` built both
+  ways — `--references` 4,681,728 B vs `--references --attributed-refs`
+  4,714,496 B, the same 84,598 reference rows (16,497 attributed) ⇒ **0.39
+  bytes/ref** (`BYTES_PER_ATTRIBUTED_REF` in `cppgraph.updates`; the comment
+  carries the full provenance so a future change to scip-clang or the store
+  schema can be re-measured against it). Scaled by the TOTAL ref count — the
+  figure every `status` already reports — so no attribution-rate guess is
+  needed for an arbitrary codebase. Worded as what it is, an extrapolation
+  from one different-scale measurement ("larger/smaller codebases may scale
+  differently"), never as a measurement of this graph — the in-place
+  `enrich-refs` path measured ≈20 B/ref on mongo (+146 MB, DESIGN.md), a
+  different write path, which is exactly why the hedge is explicit. Degrades
+  to the old number-free wording when `ref_count` is 0/unknown (no fabricated
+  "~0 bytes"), and a graph that already has attribution never sees the hint
+  at all. Same sentence on CLI and MCP (`attributed_refs_cost_note`, the
+  shared pure function). Closes the "Show the storage cost of the
+  symbol-granularity upgrade in `status`" TODO.
+- **`explain`/`explain_symbol`: doc comments straight from the graph
+  (`SymbolInformation.documentation`).** scip-clang populates `documentation`
+  on 99.99% of corpus symbols, but most of it is auto-generated text: the
+  literal `"No documentation available."` placeholder (84.45%), `namespace X`
+  / `inline namespace X` on namespace symbols, `File: Y` on the synthetic file
+  symbol (SCIP_AUDIT.md). The builder now keeps only the genuine extracted
+  doc comment on the node — `real_documentation`
+  (`src/cppgraph/builder.py`) filters the placeholder, the namespace/File
+  auto-text, and the exact `"anonymous namespace"` string (4,217 corpus
+  symbols, 0.52%, which the audit's 10.61% "genuine" bucket had lumped in —
+  re-measured here as 81,844 kept of 810,919, 10.09%) so no boilerplate is
+  ever surfaced as if it were a doc comment (a placeholder posing as
+  documentation is a fabricated-looking "fact"). The proto field is `repeated
+  string`; entries are newline-joined before the filter — unobservable on
+  real data, measured: every corpus `SymbolInformation` carries at most ONE
+  entry. Capture is first-real-wins across a header's duplicate
+  `SymbolInformation`s (a placeholder-only visit doesn't block a later real
+  comment; a captured one is never overwritten). Surfaced where `signature`
+  can't go without: no `--root`/checkout needed — `explain_symbol` gains a
+  `documentation` field (present only when there is real text, absent never
+  placeholder) and CLI `explain` a `documentation:` line, both reading the
+  store. Store: new `symbols.documentation` column, schema **v4**, the exact
+  `end_line`/v3 migration precedent — `write_sqlite` writes it,
+  `apply_update`/`enrich_references` ALTER it in on older stores (fresh
+  definition site replaces the text, cleared with the site, so a deleted
+  comment doesn't linger), and `get_node` degrades on unmigrated v3/v2 stores
+  (`documentation=None`) instead of crashing. No meta gate, unlike
+  `has_enclosing_ranges`: a doc comment is optional payload, not a
+  correctness-critical signal — `None` per symbol is the whole story.
+- **Indexing progress: consume scip-clang's per-TU report instead of
+  suppressing it.** `run_scip_clang` dropped `--no-progress-report` (inherited
+  from the deleted `reindex.sh` with no recorded rationale) and now streams the
+  binary's stdout instead of blocking on a silent `subprocess.run`. Verified
+  against the v0.4.0 binary first: the report is one `[N/total] Indexed <file>`
+  line per TU on **stdout** (flushed as it goes; stderr stays empty, so it is
+  left inherited for live error output — a single piped stream, no deadlock),
+  plus one `[N/total] Merged partial index` line per TU and a final
+  `Finished indexing …` summary — so progress parses the `Indexed` prefix
+  (N is a completion-order counter, space-padded) rather than counting lines,
+  which the Merged lines would double. The denominator comes from the caller
+  (`filter_compdb`'s `kept` on a full build, `len(matched)` on an incremental
+  update), both known before the run starts. Re-emission is cadence-bound: on a
+  TTY a single in-place line (`\r`, redrawn at most every 0.3 s) with
+  `N/total`, elapsed and a linear ETA; under a pipe one newline-terminated line
+  every 5% of the total or every 60 s, whichever comes first — ~21 lines for a
+  300-TU run measured end-to-end (the raw report is ~2 lines per TU), so the
+  reported ~5,955-line flood into an agent's context becomes a couple dozen
+  lines whatever the TU count. A caller without the denominator
+  (`total_tus=None`) degrades to a plain `N indexed` count, no percentage/ETA.
+  The `Finished indexing …` summary line and the nonzero-exit `PipelineError`
+  are unchanged.
+- **`explain_symbol`: zero-caller reliability flag.** `explain`'s caller count
+  has always reported `total` including `0` — what was missing is the
+  reliability signal `no_incoming_calls` already gates on: a `0` is only
+  trustworthy with exact (#504) attribution. On a stock-binary graph the
+  nearest-preceding fallback can fabricate a phantom caller from a bodyless
+  declaration site *and* drops a call site that precedes every callable
+  definition in its document, so a reported `0` can be a false negative. When
+  `callers.total == 0` and the store lacks `has_enclosing_ranges`, the MCP
+  `callers` block now carries `zero_callers_reliable: false` plus a `note`
+  with the reason and the rebuild pointer — the same gate `no_incoming_calls`
+  refuses on, stated as a caveat that travels with the reported fact instead —
+  and CLI `explain` prints the same caveat after its `0 caller(s)` line. No
+  caveat anywhere else: a `0` on a #504-shaped graph is exact (containment
+  attribution), and a nonzero count never carries one — over-capture is the
+  documented safe direction (an extra caller is verified, never acted on by
+  omission; DESIGN.md "Known limitation"). Closes the "Remaining item" of the
+  declaration-site phantom-caller TODO bullet.
+- **`SCIP_AUDIT.md`**: an exhaustive (not sampled) field-by-field measurement
+  of what `scip-clang` v0.4.0 actually populates — `SymbolInformation.kind`,
+  `documentation`/`signature_documentation`, `display_name`,
+  `enclosing_symbol`, every `Relationship` flag, every `symbol_roles` bit,
+  `syntax_kind`, `enclosing_range`, `external_symbols`, and more — against a
+  real ~810k-symbol MongoDB index plus a #504 fixture. Written because a
+  prior assumption (`is_type_definition` "already in every `.scip`") turned
+  out false; corrects one in the other direction too (`documentation` was
+  believed 0% populated, measured 99.99% non-empty, 10.61% genuine doc
+  comments once the `"No documentation available."` placeholder is excluded).
+  `TODO.md`'s `scip-clang (upstream)` bullets are updated from "suspected"
+  to the verified numbers; `FOLLOWUP.md` gains a ranked upstream-PR shortlist
+  distilled from the findings.
 - **`global_init_references`**: which globals a global's initializer references
   — the graph fact behind the "static initialization order fiasco" (global A's
   initializer reads global B; across translation units the initialization

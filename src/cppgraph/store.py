@@ -55,13 +55,18 @@ CREATE TABLE files (
 -- `end_line` = the definition's `enclosing_range` body extent, present only
 -- when the binary emits it (#504); NULL on stock. Powers `line_span`, gates
 -- `no_incoming_calls` (flagged `has_enclosing_ranges` in meta).
+-- `documentation` = the symbol's genuine doc-comment text
+-- (`SymbolInformation.documentation`, placeholder/auto-generated text filtered
+-- at build time — see `builder.real_documentation`); NULL when there is none.
+-- Powers `explain`'s documentation field, no source read needed.
 CREATE TABLE symbols (
-    id           INTEGER PRIMARY KEY,
-    symbol       TEXT NOT NULL,
-    display_name TEXT,
-    file_id      INTEGER,
-    line         INTEGER,
-    end_line     INTEGER
+    id            INTEGER PRIMARY KEY,
+    symbol        TEXT NOT NULL,
+    display_name  TEXT,
+    file_id       INTEGER,
+    line          INTEGER,
+    end_line      INTEGER,
+    documentation TEXT
 );
 CREATE TABLE edges (
     kind    TEXT NOT NULL,
@@ -119,7 +124,9 @@ _FILE_LINE_RE = re.compile(r"^(.+):([1-9][0-9]*)$")
 # `GraphStore` refuses to open a store whose version is *newer* than this — an
 # old binary must not silently misread a format it doesn't understand.
 # v3: `symbols.end_line` (definition body extents, #504 binaries only).
-SCHEMA_VERSION = 3
+# v4: `symbols.documentation` (genuine doc-comment text; placeholder and
+# auto-generated namespace/File text filtered at build time).
+SCHEMA_VERSION = 4
 
 
 class IncompatibleStoreError(RuntimeError):
@@ -441,7 +448,15 @@ def write_sqlite(graph: Graph, path: str | Path, *, meta: dict[str, str] | None 
         for i, node in enumerate(graph.nodes.values()):
             sym_ids[node.symbol] = i
             sym_rows.append(
-                (i, node.symbol, node.display_name, file_id(node.file), node.line, node.end_line)
+                (
+                    i,
+                    node.symbol,
+                    node.display_name,
+                    file_id(node.file),
+                    node.line,
+                    node.end_line,
+                    node.documentation,
+                )
             )
 
         edge_rows = [
@@ -480,7 +495,7 @@ def write_sqlite(graph: Graph, path: str | Path, *, meta: dict[str, str] | None 
         con.executemany(
             "INSERT INTO files VALUES (?, ?)", [(fid, p) for p, fid in file_ids.items()]
         )
-        con.executemany("INSERT INTO symbols VALUES (?, ?, ?, ?, ?, ?)", sym_rows)
+        con.executemany("INSERT INTO symbols VALUES (?, ?, ?, ?, ?, ?, ?)", sym_rows)
         con.executemany("INSERT INTO edges VALUES (?, ?, ?, ?, ?)", edge_rows)
         con.executemany("INSERT INTO refs VALUES (?, ?, ?, ?)", ref_rows)
         con.executemany("INSERT INTO meta VALUES (?, ?)", all_meta.items())
@@ -573,12 +588,18 @@ def enrich_references(path: str | Path, index: scip_pb2.Index) -> tuple[int, int
         if "enclosing_id" not in cols:
             con.execute("ALTER TABLE refs ADD COLUMN enclosing_id INTEGER")
         # Old (v2) stores lack `symbols.end_line` too. This function stamps
-        # schema_version=3 below, so a store it touches must actually be
-        # v3-shaped — otherwise a later `line_span` query ("no such column:
-        # s.end_line") would crash on a store that only ever ran enrichment.
+        # the current schema_version below, so a store it touches must
+        # actually be that shape — otherwise a later `line_span` query ("no
+        # such column: s.end_line") would crash on a store that only ever ran
+        # enrichment.
         sym_cols = {row[1] for row in con.execute("PRAGMA table_info(symbols)")}
         if "end_line" not in sym_cols:
             con.execute("ALTER TABLE symbols ADD COLUMN end_line INTEGER")
+        # Same for `symbols.documentation` (v3 stores): the stamped schema
+        # version says v4, so the store must be v4-shaped — `get_node`'s full
+        # SELECT and `apply_update`'s re-insert both read the column.
+        if "documentation" not in sym_cols:
+            con.execute("ALTER TABLE symbols ADD COLUMN documentation TEXT")
 
         sym_ids = dict(con.execute("SELECT symbol, id FROM symbols"))
         file_ids = dict(con.execute("SELECT path, id FROM files"))
@@ -791,31 +812,52 @@ class GraphStore:
         try:
             row = self._con.execute(
                 """
-                SELECT s.symbol, s.display_name, f.path, s.line, s.end_line
+                SELECT s.symbol, s.display_name, f.path, s.line, s.end_line, s.documentation
                 FROM symbols s LEFT JOIN files f ON f.id = s.file_id
                 WHERE s.symbol = ?
                 """,
                 (symbol,),
             ).fetchone()
         except sqlite3.OperationalError:
-            # Store predates `symbols.end_line` (schema v2, never migrated by
-            # apply_update/enrich_references) — degrade to the v2 shape rather
-            # than crash a plain read-only query.
-            row = self._con.execute(
-                """
-                SELECT s.symbol, s.display_name, f.path, s.line
-                FROM symbols s LEFT JOIN files f ON f.id = s.file_id
-                WHERE s.symbol = ?
-                """,
-                (symbol,),
-            ).fetchone()
+            # Store predates `symbols.documentation` (schema v3, never migrated
+            # by apply_update/enrich_references) — degrade to the v3 shape
+            # rather than crash a plain read-only query.
+            try:
+                row = self._con.execute(
+                    """
+                    SELECT s.symbol, s.display_name, f.path, s.line, s.end_line
+                    FROM symbols s LEFT JOIN files f ON f.id = s.file_id
+                    WHERE s.symbol = ?
+                    """,
+                    (symbol,),
+                ).fetchone()
+            except sqlite3.OperationalError:
+                # Nor even `end_line` (schema v2) — the original fallback.
+                row = self._con.execute(
+                    """
+                    SELECT s.symbol, s.display_name, f.path, s.line
+                    FROM symbols s LEFT JOIN files f ON f.id = s.file_id
+                    WHERE s.symbol = ?
+                    """,
+                    (symbol,),
+                ).fetchone()
+                if row is None:
+                    return None
+                return Node(symbol=row[0], display_name=row[1] or "", file=row[2], line=row[3])
             if row is None:
                 return None
-            return Node(symbol=row[0], display_name=row[1] or "", file=row[2], line=row[3])
+            return Node(
+                symbol=row[0], display_name=row[1] or "", file=row[2], line=row[3], end_line=row[4]
+            )
         if row is None:
             return None
         return Node(
-            symbol=row[0], display_name=row[1] or "", file=row[2], line=row[3], end_line=row[4]
+            symbol=row[0],
+            display_name=row[1] or "",
+            file=row[2],
+            line=row[3],
+            end_line=row[4],
+            documentation=row[5],
         )
 
     def find(self, query: str, fuzzy: bool = False) -> list[Node]:
@@ -2153,13 +2195,20 @@ class GraphStore:
         con = self._con
         changed_files = list(changed_files)
         with con:  # atomic: commit on success, rollback on error
-            # (0) an older (v2) store lacks `end_line`; add it on demand — the
-            # same ALTER pattern `enrich_references` uses for `refs.enclosing_id`
-            # — so the re-insert below can write body extents. The store is now
-            # v3-shaped, so stamp it.
+            # (0) an older store may lack `end_line` (v2) or `documentation`
+            # (v3); add them on demand — the same ALTER pattern
+            # `enrich_references` uses for `refs.enclosing_id` — so the
+            # re-insert below can write body extents and doc text. The store
+            # is now v4-shaped, so stamp it.
             cols = {row[1] for row in con.execute("PRAGMA table_info(symbols)")}
+            stale_shape = False
             if "end_line" not in cols:
                 con.execute("ALTER TABLE symbols ADD COLUMN end_line INTEGER")
+                stale_shape = True
+            if "documentation" not in cols:
+                con.execute("ALTER TABLE symbols ADD COLUMN documentation TEXT")
+                stale_shape = True
+            if stale_shape:
                 con.execute(
                     "INSERT INTO meta(key, value) VALUES ('schema_version', ?) "
                     "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -2191,8 +2240,8 @@ class GraphStore:
                 edges_removed += cur.rowcount
                 con.execute(f"DELETE FROM refs WHERE file_id IN ({ph})", chunk)
                 con.execute(
-                    f"UPDATE symbols SET file_id = NULL, line = NULL, end_line = NULL "
-                    f"WHERE file_id IN ({ph})",
+                    f"UPDATE symbols SET file_id = NULL, line = NULL, end_line = NULL, "
+                    f"documentation = NULL WHERE file_id IN ({ph})",
                     chunk,
                 )
 
@@ -2218,7 +2267,12 @@ class GraphStore:
                 # Only when the partial has *no* fresh site (file_id param is
                 # NULL, e.g. a symbol only seen as an edge endpoint) does the
                 # old end_line survive untouched.
-                "end_line = CASE WHEN ? IS NOT NULL THEN ? ELSE end_line END "
+                "end_line = CASE WHEN ? IS NOT NULL THEN ? ELSE end_line END, "
+                # `documentation` travels the same way: a fresh definition
+                # site replaces the doc text too — even with NULL (comment
+                # deleted since, or never real) — instead of leaking text
+                # captured at the previous site; no fresh site keeps it.
+                "documentation = CASE WHEN ? IS NOT NULL THEN ? ELSE documentation END "
                 "WHERE id = ?",
                 [
                     (
@@ -2227,6 +2281,8 @@ class GraphStore:
                         n.line,
                         file_id.get(n.file) if n.file else None,
                         n.end_line,
+                        file_id.get(n.file) if n.file else None,
+                        n.documentation,
                         sym_id[n.symbol],
                     )
                     for n in partial.nodes.values()

@@ -23,6 +23,11 @@ class Node:
     # present only when the indexing binary emits it (#504); None on stock.
     # Drives `line_span` (rank by body size) and gates `no_incoming_calls`.
     end_line: int | None = None
+    # The symbol's genuine doc-comment text, extracted by scip-clang into
+    # `SymbolInformation.documentation` (placeholder/auto-generated text
+    # filtered out — see `builder.real_documentation`); None when there is
+    # none. Surfaced by `explain` without a source read.
+    documentation: str | None = None
 
 
 @dataclass(slots=True)
@@ -195,6 +200,7 @@ class Graph:
                     "file": n.file,
                     "line": n.line,
                     "end_line": n.end_line,
+                    "documentation": n.documentation,
                 }
                 for n in self.nodes.values()
             ],

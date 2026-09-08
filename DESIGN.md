@@ -49,8 +49,12 @@ auditing the schema are all off to the side: **visibility** (public/protected/
 private — no SCIP field at all; the format models privacy as *local symbols*, a
 name-scope notion that doesn't map C++'s compile-time access rule), **`kind`**
 (emitted `UnspecifiedKind`, but derivable from the descriptor suffix, which we
-already do), and doc/signature/read-write-access (empty or unverified,
-nice-to-have). None touch the core graph.
+already do), and signature/read-write-access (unpopulated, nice-to-have).
+`documentation` was in this gap list until the audit measured it: 99.99%
+non-empty, ~10% genuine doc-comment text once scip-clang's placeholder and
+auto-generated namespace/File text are filtered — consumed by `explain`
+since (the filter is `builder.real_documentation`, see SCIP_AUDIT.md). None
+touch the core graph.
 
 The key point for build-vs-buy: **because we already patch scip-clang (#504),
 the SCIP *format*'s limits are not hard limits.** scip-clang is itself a clang
@@ -118,7 +122,14 @@ id per reference; the store records `has_attributed_refs`, and `status` (CLI +
 MCP) advertises the granularity and the upgrade path. Measured on mongo: the
 enrich attributed **3,032,620 / 7,237,345 references (42%)** and grew the store
 **+146 MB (+23%)**, 626 → 773 MB, in **~3.5 min** (8.8 GB RSS, single-thread on
-an 8-vCPU Graviton2). The unattributed 58% is expected, not a
+an 8-vCPU Graviton2). The `status` upgrade hint turns the cost into a
+per-graph estimate — the graph's own `ref_count` × 0.39 B/ref — extrapolated
+from a second, smaller A/B (a 224-TU project: 4,681,728 → 4,714,496 B for the
+same 84,598 refs, attribution at build time), not from this number: the mongo
+figure is the *in-place* `enrich-refs` path (row UPDATEs plus a temporary
+composite index), a different write path that measured ≈20 B/ref — so the
+hint is deliberately hedged as an extrapolation, never a measurement of the
+graph it is shown on. The unattributed 58% is expected, not a
 short-fall: they are the references that live *outside* any callable body —
 file/namespace scope and, above all, class bodies (field/param/return types),
 which aren't callable definitions. It powers the
@@ -203,7 +214,8 @@ fallback (`src/cppgraph/builder.py`):
    separating signal exists: `SymbolInformation.kind`, `syntax_kind`, and
    `enclosing_range` are all unpopulated, and definition `range`s cover only
    the identifier, never the body. So we keep the over-capture — it is in the
-   *safe* direction (an extra caller, never a dropped real call).
+   *safe* direction for over-capture (an extra caller); a separate drop path is
+   documented below.
 
    The clean fix is `enclosing_range` (attribute a reference to a definition
    iff it is contained in that definition's body range). Stock scip-clang does
@@ -223,12 +235,18 @@ fallback (`src/cppgraph/builder.py`):
    document has no interval data at all. The "keep the over-capture" call above
    stands only for stock graphs, which have no such signal to detect the case.
 
-   This asymmetry is why `no_incoming_calls` (definitions with zero incoming
-   `calls` edges) refuses to answer on a stock graph: a phantom caller from a
-   mis-attributed declaration site turns a real 0 into a false 1 — exactly the
-   answer that tool exists to get right. It gates on the store's
-   enclosing-range data (`has_enclosing_ranges`, the same signal as
-   `line_span`) and reports unavailability with the reason instead.
+    This asymmetry is why `no_incoming_calls` (definitions with zero incoming
+    `calls` edges) refuses to answer on a stock graph: a phantom caller from a
+    mis-attributed declaration site turns a real 0 into a false 1 — exactly the
+    answer that tool exists to get right. It gates on the store's
+    enclosing-range data (`has_enclosing_ranges`, the same signal as
+    `line_span`) and reports unavailability with the reason instead.
+    `explain_symbol`'s caller count applies the same signal as a caveat rather
+    than a refusal — the count is always reported, but a `0` on a stock graph
+    carries `zero_callers_reliable: false` + the reason (the stock fallback
+    also *drops* a call site that precedes every callable definition in its
+    document, so a reported 0 can be a false negative); a nonzero count needs
+    no caveat, over-capture being the safe direction above.
 
 This is where semantic identity still pays off even with the fallback: the
 callee is the *exact* symbol, so the two `makeResumeToken` never mix,
@@ -262,7 +280,9 @@ Store schema (stdlib `sqlite3`):
 files(id INTEGER PRIMARY KEY, path TEXT)
 -- end_line: the definition's enclosing_range body extent (#504 binaries only,
 -- NULL on stock); flagged has_enclosing_ranges in meta. Powers line_span.
-symbols(id INTEGER PRIMARY KEY, symbol TEXT, display_name TEXT, file_id INT, line INT, end_line INT)
+-- documentation: the symbol's genuine doc-comment text (SymbolInformation.documentation,
+-- placeholder/auto-generated text filtered at build time); NULL when none. Powers explain.
+symbols(id INTEGER PRIMARY KEY, symbol TEXT, display_name TEXT, file_id INT, line INT, end_line INT, documentation TEXT)
 CREATE INDEX ix_sym ON symbols(symbol);   -- keeps `find`'s LIKE substring search
 -- HOT: topology walked by traversal — indexed, all-integer, never compressed
 edges(kind TEXT, src_id INT, dst_id INT, file_id INT, line INT)
@@ -288,7 +308,7 @@ when index→build run back-to-back. Non-git projects simply record no commit
 (the tool stays general, `git`-optional). This commit is the **anchor for
 incremental updates** — see below.
 
-The `meta` table also carries a **`schema_version`** (currently 3): the on-disk
+The `meta` table also carries a **`schema_version`** (currently 4): the on-disk
 *format* version, distinct from `cppgraph_version` (the code that wrote it).
 It's the enabler for format migrations — a future schema change bumps it, and
 migration code can branch on the stored value. `GraphStore` refuses to open a
@@ -359,9 +379,11 @@ designing the builder so this isn't a later rewrite:
   = all transitive subclasses), `reachable-from` (forward reachability from an
   entry point — a **lower bound** per the corollary below: "at least these are
   reachable", never a set to act on by exclusion; `--kind inherits` = the
-  transitive base hierarchy above a derived type), `references` (exact use sites, present unless the
+  transitive base hierarchy above a derived type),   `references` (exact use sites, present unless the
   graph was built `--no-references`; `--root` for snippets, else coordinates), `explain`
-  (definition + neighbors; pass `--root` to also get a source snippet, omit it
+  (definition + neighbors + the symbol's doc comment when the index carries
+  one — no `--root` needed for that, unlike the source-read signature/snippet;
+  pass `--root` to also get a source snippet, omit it
   for coordinates only), `line_span` (definitions ranked by body extent,
   #504-gated), `no_incoming_calls` (zero-caller definitions — a fact, never a
   "dead" verdict; #504-gated), `global_init_references <symbol>` (the globals a

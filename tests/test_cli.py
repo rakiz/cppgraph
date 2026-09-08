@@ -11,6 +11,7 @@ from cppgraph.cli import main
 from cppgraph.model import Graph, Node
 from cppgraph.proto import scip_pb2
 from cppgraph.store import GraphStore, write_sqlite
+from cppgraph.updates import BYTES_PER_ATTRIBUTED_REF
 
 
 @pytest.fixture
@@ -308,6 +309,7 @@ def test_build_attributed_refs_reports_and_status_shows_symbol_granularity(
     assert main(["status", "--graph", str(out)]) == 0
     status = capsys.readouterr().out
     assert "usage view:    SYMBOL granularity" in status
+    assert "-> upgrade" not in status  # nothing to upgrade to — no hint at all
 
 
 def test_status_recommends_attribution_when_absent(
@@ -322,6 +324,44 @@ def test_status_recommends_attribution_when_absent(
     status = capsys.readouterr().out
     assert "file granularity" in status
     assert "enrich-refs" in status  # the upgrade path is surfaced
+
+
+def test_status_upgrade_hint_estimates_cost_from_ref_count(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The same estimate as the MCP `usage_view.upgrade` (shared pure function),
+    printed in the CLI status block — asserted against the number recomputed
+    from the constant, not a hardcoded string."""
+    graph = Graph()
+    graph.add_node("cxx . . $ mongo/Foo#makeResumeToken(a1).", display_name="x")
+    path = tmp_path / "g.db"
+    write_sqlite(graph, path, meta={"has_references": "true", "ref_count": "84598"})
+    assert main(["status", "--graph", str(path)]) == 0
+    flat = " ".join(capsys.readouterr().out.split())  # the hint wraps at 78 cols
+    assert "file granularity" in flat
+    extra = 84_598 * BYTES_PER_ATTRIBUTED_REF
+    assert f"~{extra / 1024:.0f} KB extra" in flat
+    assert f"{BYTES_PER_ATTRIBUTED_REF:.2f} bytes/ref" in flat
+
+
+@pytest.mark.parametrize(
+    "meta",
+    [{"has_references": "true", "ref_count": "0"}, {"has_references": "true"}],
+    ids=["ref-count-zero", "ref-count-missing"],
+)
+def test_status_upgrade_hint_omits_estimate_without_ref_count(
+    tmp_path: Path, meta: dict[str, str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """ref_count 0/unknown: the upgrade path is still surfaced, but no estimate
+    is fabricated (no crash, no nonsensical '~0 bytes')."""
+    graph = Graph()
+    graph.add_node("cxx . . $ mongo/Foo#makeResumeToken(a1).", display_name="x")
+    path = tmp_path / "g.db"
+    write_sqlite(graph, path, meta=meta)
+    assert main(["status", "--graph", str(path)]) == 0
+    flat = " ".join(capsys.readouterr().out.split())
+    assert "enrich-refs" in flat
+    assert "extrapolated" not in flat
 
 
 def test_enrich_refs_upgrades_existing_store(
@@ -503,7 +543,9 @@ def test_update_with_no_args_auto_discovers_and_runs_incremental_update(
     monkeypatch.setattr(pipeline.os, "access", lambda *a, **k: True)  # pretend scip-clang exists
     reindexed: list[list[str]] = []
 
-    def _fake_run_scip_clang(project_root, compdb_path, out_scip, *, print_fn=print):
+    def _fake_run_scip_clang(
+        project_root, compdb_path, out_scip, *, total_tus=None, print_fn=print
+    ):
         data = json.loads(compdb_path.read_text())
         reindexed.append([e["file"] for e in data])
         empty = scip_pb2.Index()
@@ -553,7 +595,9 @@ def test_update_with_explicit_graph_uses_recorded_project_root(
     monkeypatch.setattr(pipeline.os, "access", lambda *a, **k: True)
     reindexed: list[list[str]] = []
 
-    def _fake_run_scip_clang(project_root, compdb_path, out_scip, *, print_fn=print):
+    def _fake_run_scip_clang(
+        project_root, compdb_path, out_scip, *, total_tus=None, print_fn=print
+    ):
         data = json.loads(compdb_path.read_text())
         reindexed.append([e["file"] for e in data])
         empty = scip_pb2.Index()
@@ -568,11 +612,13 @@ def test_update_with_explicit_graph_uses_recorded_project_root(
 
 @pytest.fixture
 def explain_graph(tmp_path: Path) -> Path:
-    """A graph whose symbol has a real definition site (file + line)."""
+    """A graph whose symbol has a real definition site (file + line) and a
+    genuine doc comment."""
     graph = Graph()
     node = graph.add_node("cxx . . $ mongo/Foo#bar(a1).", display_name="bar")
     node.file = "src/foo.cpp"
     node.line = 3  # 0-indexed -> source line 4
+    node.documentation = "/** Builds the resume token from the event. */"
     # one caller and one callee so explain can summarize both directions
     graph.add_edge(
         "calls",
@@ -705,6 +751,73 @@ def test_explain_omits_signature_without_root(
     out = capsys.readouterr().out
     assert exit_code == 0
     assert "signature:" not in out
+
+
+def test_explain_prints_documentation_without_root(
+    explain_graph: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The doc comment comes from the graph itself (extracted at index time):
+    # printed with no --root, unlike the source-read signature.
+    exit_code = main(["explain", "--graph", str(explain_graph), "cxx . . $ mongo/Foo#bar(a1)."])
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "documentation:" in out
+    assert "Builds the resume token from the event." in out
+
+
+def test_explain_no_documentation_line_when_absent(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    graph = Graph()
+    node = graph.add_node("cxx . . $ mongo/Foo#nodoc(n1).", display_name="nodoc")
+    node.file = "src/x.cpp"
+    node.line = 2
+    path = tmp_path / "graph.db"
+    write_sqlite(graph, path)
+    exit_code = main(["explain", "--graph", str(path), "cxx . . $ mongo/Foo#nodoc(n1)."])
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "documentation" not in out
+
+
+def test_explain_zero_callers_note_on_stock_graph(
+    explain_graph: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`caller` has no incoming edges on the stock-binary explain fixture: the
+    0-caller line carries the stock-attribution caveat — the same reasoning
+    `no_incoming_calls` refuses on, stated as a note on the reported count."""
+    exit_code = main(["explain", "--graph", str(explain_graph), "cxx . . $ mongo/Foo#caller(a2)."])
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "0 caller(s)" in out
+    assert "0 callers is only trustworthy on a #504-built index" in out
+    assert "phantom caller" in out
+
+
+def test_explain_zero_callers_no_note_on_504_graph(
+    spans_graph: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # TINY has no callers on the #504-shaped spans fixture: an exact 0, no caveat.
+    exit_code = main(["explain", "--graph", str(spans_graph), TINY])
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "0 caller(s)" in out
+    assert "only trustworthy" not in out
+
+
+def test_explain_nonzero_callers_no_note(
+    explain_graph: Path, spans_graph: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A nonzero count carries no caveat on either graph type (over-capture is
+    # the safe direction): bar on the stock fixture, mid on the #504 one.
+    for graph, symbol in (
+        (explain_graph, "cxx . . $ mongo/Foo#bar(a1)."),
+        (spans_graph, MIDFN),
+    ):
+        assert main(["explain", "--graph", str(graph), symbol]) == 0
+    out = capsys.readouterr().out
+    assert out.count("1 caller(s)") == 2
+    assert "only trustworthy" not in out
 
 
 def _init_repo(root: Path) -> str:
