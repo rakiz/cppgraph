@@ -79,8 +79,8 @@ active list. Design detail is in `DESIGN.md`, shipped features in
   wrong decision, which a session-header instruction cannot. Keep it **advisory**, never
   `deny`: grep over comments, string literals and non-indexed files stays correct;
   (3) `SessionStart` — emit the scope + freshness line instead of waiting for the agent to
-  think of calling `status`. Complements the `SKILL.md` item above (skill descriptions are
-  permanently in context; hooks are positional). External validation of the general
+  think of calling `status`. Complements the shipped `skills/cppgraph/SKILL.md` (skill
+  descriptions are permanently in context; hooks are positional). External validation of the general
   pattern (not our measurement, so not a substitute for the benchmark items below, but
   a reason to prioritize this): Graft (nanonets/graft), a competing tool wiring similar
   hooks into Claude Code, reports 46% fewer tool calls and 60% less latency in its own
