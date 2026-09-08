@@ -8,6 +8,23 @@ on-disk store also carries its own `schema_version` for forward-compatibility.
 
 ### Added
 
+- **`CLI_REFERENCE.md`: one page for the whole CLI.** `cppgraph --help` lists 30
+  subcommands, each with its own `--help`, but there was no single page a
+  human could read to pick the right command (QUICKSTART.md showed 3 examples).
+  The new reference doc groups them by purpose (getting/keeping a graph,
+  finding a symbol, call-graph traversal, types/files/members, where a symbol
+  is used, whole-graph facts, reading/viewing) with one real example per
+  command and the shared facts stated once (graph auto-discovery, plain-name
+  resolution, `*` = required). Drift-proofing per the TODO item's own ask: the
+  per-command table rows (name, aliases, purpose, arguments) are generated
+  from the argparse subparsers by `scripts/gen-cli-reference.py` — it captures
+  the parser `cli.main()` builds (there is no standalone build_parser to
+  import), rewrites the tables between `cppgraph-gen` markers in the markdown,
+  and exits non-zero naming any subcommand not yet placed in a section, so a
+  new command cannot silently miss the doc. The grouping/prose/examples are
+  curated in the markdown; `tests/test_gen_cli_reference.py` fails if the
+  checked-in page is stale. Pointers added in README.md, QUICKSTART.md, and
+  scripts/README.md. Closes the "Human-oriented CLI reference doc" TODO.
 - **`status`: estimated store cost on the usage-view upgrade hint.** The
   file→symbol granularity hint said "costs extra store space" with no number;
   it now computes one from the graph's own `ref_count`. Measured A/B first (the

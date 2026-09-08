@@ -118,6 +118,24 @@ Run it with the repository's Python environment so it can import cppgraph. The
 graph database must already exist. `TARGET_SUBSTR` selects which resolved symbol
 to benchmark; otherwise the symbol with the most callers is selected.
 
+## `gen-cli-reference.py`
+
+Rewrites the per-command tables in [`CLI_REFERENCE.md`](../CLI_REFERENCE.md)
+from the CLI's own argparse subparsers, so the reference page cannot drift from
+the real `--help` text. The grouping, section prose, and examples are
+hand-written in the markdown; only the command/purpose/argument rows are
+generated, between `cppgraph-gen` markers.
+
+```sh
+scripts/gen-cli-reference.py
+```
+
+Run it with the repository's Python environment. It exits non-zero when a
+subcommand exists in the CLI but is placed in no section of the doc (or a marker
+names a command that no longer exists) — the prompt to curate the newcomer's
+place, not a silent omission. `tests/test_gen_cli_reference.py` checks the
+checked-in page is always fresh.
+
 ## `build-scip-clang-macos.sh`
 
 Builds the `scip-clang` v0.4.0 + `enclosing_range` (#504) binary natively for

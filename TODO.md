@@ -7,6 +7,14 @@ active list. Design detail is in `DESIGN.md`, shipped features in
 
 ## Other
 
+- **`versions.json` `latest` points at a tag that was never cut.** `latest`
+  says `"0.2.0"` but only `v0.1.0` exists on origin — `v0.2.0` was never
+  tagged/pushed — so a fresh `scripts/setup.sh` run today fails at
+  `git checkout v0.2.0` before the venv is even created. Fix is either
+  tagging + pushing `v0.2.0` (if main's current state is what 0.2.0 should
+  be) or reverting `latest` to `0.1.0` until it's properly cut. Found during
+  the 2026-09 doc review; flagging only — the fix touches release state, so
+  it's the maintainer's call.
 - **Follow-up to the declaration-site phantom-caller bug (fixed for #504 graphs):**
   `who_calls(extractShardKeyFromDoc)` used to return `getKeyPatternFields` as a caller
   because a bodyless member declaration (role 0, no `DEFINITION`/`FORWARD_DEFINITION`)
@@ -41,16 +49,6 @@ active list. Design detail is in `DESIGN.md`, shipped features in
   setup flow) is still the right default now that the two heaviest costs (compile
   time, disk space) can often be skipped entirely — and publish an `x86_64-linux` #504
   asset too, the one platform still without one.
-- **Human-oriented CLI reference doc.** `cppgraph --help` now lists 27 subcommands
-  (`build`, `find`, `callers`, `impact`, `boundary-violations`, `outline`,
-  `strongly-connected-components`, …) grown incrementally over many sessions, each with
-  its own `--help`, but there is no single page a human can read to see what exists and
-  when to reach for which one — `QUICKSTART.md`'s "Or use the CLI directly" section shows
-  only 3 example commands. A reference doc (generated from the subparsers where
-  possible, to avoid drifting from the real `--help` text, rather than hand-maintained
-  prose that goes stale) grouping commands by purpose (symbol lookup, call-graph
-  traversal, structural facts, lifecycle/setup) would help a human pick the right tool
-  without reading argparse output for 27 commands one at a time.
 - **Contributing notes, CI (lint + pytest), publish.** Not a 0.1.0 blocker.
 - **Make the repo discoverable to LLMs (distribution).** LLMs asked to compare
   code-intelligence tools describe cppgraph from the *name* only — the page isn't

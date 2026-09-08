@@ -12,16 +12,16 @@ Z"), in a handful of commands.
 - **Supported platforms for indexing** (limited by the `scip-clang` binary):
   - macOS Apple Silicon (arm64) ✅
   - Linux x86_64 ✅
-  - **ARM-Linux (aarch64, e.g. Ubuntu arm64)** → no prebuilt binary. Two options:
-    **build scip-clang natively** (the setup wizard's *build* option, ~25-60 min,
-    Docker — recommended, and gets PR #504), or run the x86_64 binary via a
-    container (emulated, slow — for a subsystem only). See
-    [INSTALL.md](INSTALL.md) → "ARM-Linux / Windows: index via a container" and
-    `docker/build-scip-clang/`.
+  - **ARM-Linux (aarch64, e.g. Ubuntu arm64)** ✅ — natively, via this project's
+    prebuilt **#504** binary (the setup wizard's `download-504`, ~1 min, no
+    Docker). Alternatives: **build** scip-clang locally (~25–60 min, Docker), or
+    run the x86_64 binary via a container (emulated, slow — for a subsystem
+    only). See [INSTALL.md](INSTALL.md) → "Intel Mac / Windows: index via a
+    container" and `docker/build-scip-clang/`.
   - **Windows** → run everything inside **WSL2 (Ubuntu)**; it behaves as Linux x86_64.
-  - **Intel Mac** → not supported (no `scip-clang` binary). You can still *use* a
-    graph someone else built — ask the maintainer for a prebuilt `graph.db` and
-    jump to step 3.
+  - **Intel Mac** → no native `scip-clang` binary — **only emulate** (index via
+    an x86 container, slower). You can still *use* a graph someone else built —
+    ask the maintainer for a prebuilt `graph.db` and jump to step 3.
 
 Two phases: **set up the machine once** (§1, light) then **index each project**
 (§2, the heavy one-time-per-project step). §1 is done once and reused for every
@@ -39,9 +39,11 @@ git clone https://github.com/rakiz/cppgraph "${XDG_DATA_HOME:-$HOME/.local/share
 ```
 
 `setup.sh` (needs [`uv`](https://docs.astral.sh/uv/)) asks how to obtain scip-clang
-from a menu — **download** the prebuilt binary (~1 min; macOS arm64 / Linux
-x86_64), **build** it locally with PR #504 (~25–60 min, Docker, Linux only), or
-**emulate** via an x86 container — with an "abort" choice throughout. It then
+from a menu — **download-504**, this project's prebuilt #504 binary (~1 min,
+native, no Docker; macOS arm64 + Linux aarch64), **download** the stock prebuilt
+(~1 min; macOS arm64 / Linux x86_64), **build** it locally with PR #504 (~25–60
+min, Docker, Linux only), or **emulate** via an x86 container — with an "abort"
+choice throughout. It then
 registers the MCP server (globally, auto-discovering each project's `.cppgraph/` at
 launch) and hands off to the project index wizard. Every stage checks what already
 exists and asks before (re)doing it.
@@ -123,6 +125,9 @@ cppgraph view    someMethod --depth 1
 If a name is ambiguous (e.g. same-named overloads), the CLI lists the candidates
 so you can pass the exact SCIP symbol; `find` shows those strings too. Outside a
 project, or to target a specific store, pass `--graph <path/to/.cppgraph/name.graph.db>`.
+
+Every subcommand — grouped by purpose, with an example each — is in
+[CLI_REFERENCE.md](CLI_REFERENCE.md).
 
 ## Keeping it fresh
 

@@ -44,14 +44,17 @@ when you want to measure at scale; keep such paths out of the shipped code.)
   error (a stock binary and a #504 build must both index without crashing).
   Regenerate the binding only to start reading a *new* field, never to avoid a
   crash.
-- **scip-clang runs NATIVELY on macOS arm64 and Linux x86_64 — indexing there
-  needs NO Docker.** Docker enters only for (a) PR #504 (`--attributed-refs`,
-  symbol-granularity refs — a *Linux-only build*), or (b) hosts with no native
-  binary (Intel Mac, ARM-Linux, Windows) via `emulate`. Do **not** tell a user
-  macOS can't index without Docker, and do **not** generalize "#504 build is
-  Linux-only" into "scip-clang is Linux-only" — they are different claims. When
-  unsure of a host's options, run `setup.sh --list-sources` (it prints them); on
-  macOS arm64 it lists `download` = the native binary. Re-indexing a stale
+- **scip-clang runs NATIVELY on macOS arm64, Linux x86_64, and Linux aarch64 —
+  indexing there needs NO Docker.** macOS arm64 + Linux aarch64 get #504
+  (`--attributed-refs`, symbol-granularity refs) natively via `download-504`;
+  Linux x86_64 gets the stock prebuilt via `download` (no #504), or #504 via a
+  local build. Docker enters only for (a) that #504 *build* (a Linux-only
+  compile), or (b) hosts with no native binary at all (Intel Mac, Windows) via
+  `emulate`. Do **not** tell a user macOS can't index without Docker, and do
+  **not** generalize "#504 build is Linux-only" into "scip-clang is
+  Linux-only" — they are different claims. When unsure of a host's options, run
+  `setup.sh --list-sources` (it prints them); on macOS arm64 it lists
+  `download-504` and `download`, both native binaries. Re-indexing a stale
   project on macOS arm64 uses that native binary directly — no container.
 - Tests with `pytest` under `tests/`. Prefer small fixtures (a tiny checked-in
   or synthetic `.scip`) over depending on a full external index.
