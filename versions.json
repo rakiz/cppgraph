@@ -16,7 +16,7 @@
     {
       "version": "0.2.0",
       "rebuild": "store",
-      "notes": "Store schema v3 (`symbols.end_line`, powers `line_span`/`no_incoming_calls`): v2 stores keep working but the migration is not automatic — `update` short-circuits with 'nothing changed' and never migrates — so rebuild the store from the existing .scip (`cppgraph build`); `enrich-refs` migrates the schema in place but does not backfill the `end_line` extents the features read.",
+      "notes": "Store schema v4 across the release (`symbols.end_line` at v3 for `line_span`, `symbols.documentation` at v4 for `explain` doc comments), plus a dozen new read-only query commands (ranking/stats, `outline`/`class_members`, architecture facts like `boundary_violations`/`api_surface`/`dependency_cost`, `file:line` symbol resolution) and a generated CLI reference doc. v2/v3 stores keep working — the migration is store-level, no re-index: rebuild from the existing .scip (`cppgraph build`) to get the new columns; `update` migrates only files it actually touches, and `enrich-refs` migrates the schema shape without backfilling `end_line`/`documentation`.",
       "url": "https://github.com/rakiz/cppgraph/releases/tag/v0.2.0"
     }
   ]

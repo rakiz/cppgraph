@@ -6,8 +6,91 @@ on-disk store also carries its own `schema_version` for forward-compatibility.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [0.2.0] - 2026-09-08
+
+Second release: the read surface grows from graph traversal to whole-graph
+analysis — ranking and stats, file/class structure, architecture facts,
+`file:line` symbol resolution, and doc comments in `explain` — with the store
+schema moving v2 → v4 along the way (`symbols.end_line` at v3, then
+`symbols.documentation` at v4). Older stores keep working; a store rebuild
+from the existing `.scip` picks up the new columns — no re-index.
+
 ### Added
 
+- **`no_incoming_calls`**: callable definitions with zero incoming `calls`
+  edges — the exact primitive behind the "dead code" question, stated as a
+  graph fact, never a verdict (vtable dispatch, exported API, templates, entry
+  points all have no static caller yet are live; the MCP response carries that
+  caveat as a standing `note`). Gated on the same `has_enclosing_ranges` signal
+  as `line_span`: on a stock-binary graph it refuses with the reason — the
+  nearest-preceding attribution fallback can fabricate a phantom caller from a
+  bodyless declaration site, turning a real 0 into a false 1 — rather than
+  answer unreliably. On the CLI and as an MCP tool, both backed by the same
+  `GraphStore.no_incoming_calls` (a SQL anti-join over `edges`, callability
+  from the shared `is_callable_symbol`); bounded output (`limit` + `total`),
+  same `exclude_tests`/path-prefix filters, and only symbols with a recorded
+  definition site (a test-only caller still counts as a caller).
+- **`line_span`**: definitions ranked by body extent (`end_line - start line`,
+  largest first) — where the biggest bodies live, from the exact
+  `enclosing_range` extents, not a def→next-symbol heuristic. #504-only: on a
+  stock-binary graph the tool reports `available: false` with the rebuild
+  pointer (the same degrade-cleanly contract as the reference-attribution
+  features) instead of a silently empty list. On the CLI and as an MCP tool,
+  both backed by the same `GraphStore.line_span`; bounded output (`limit` +
+  `total`) and the same `exclude_tests`/path-prefix filters as `hotspots`.
+  Persists `Node.end_line` in the store — **schema v3**: older stores keep
+  working (a store rebuild, or an incremental `update` that actually touches
+  affected files, adds the column on demand), and an older
+  cppgraph refuses a v3 store with the usual upgrade/rebuild error.
+- **`stats`**: module-level aggregate counts per file (`--group-by file`) or
+  rolled up per directory via `dirname` (`--group-by dir`) — symbols defined,
+  `calls` edges whose call site, and reference use sites, sorted by the three
+  summed descending. A "how big / how dense is this part of the codebase" view
+  to size up an unfamiliar module without reading files, next to `hotspots`'
+  "what's most-called". On the CLI and as an MCP tool, both backed by the same
+  `GraphStore.stats` (three SQL `GROUP BY file_id` aggregations merged, dir
+  rollup in Python); bounded output (`limit` + `total`), and the same
+  `include_paths`/`exclude_paths` prefix filters as `hotspots`, applied to the
+  counted file before aggregation.
+- **Per-query staleness flag (`stale`), no auto-update**: every query tool's
+  response (MCP) and every query command's stderr (CLI) now carries a cheap
+  "has this graph drifted from its source commit?" signal — a single `git
+  diff` against the recorded commit (reusing `changed_files_since`/dirty
+  fingerprints), never a rebuild. MCP's `_call` attaches `stale` best-effort
+  (a failure to compute it never crashes an otherwise-successful query); the
+  CLI's `_open_store_checked` prints a one-line warning, resolving `root` from
+  the store's own recorded `project_root` (falling back to `discover_graph`)
+  so an explicit `--graph` pointing at another project never diffs the wrong
+  checkout. External validation of the same pattern: a competing tool, Graft
+  (nanonets/graft), runs an equivalent structural freshness check before every
+  query — independent evidence this is worth doing cheaply rather than only
+  on an explicit `status` call.
+- **`hotspots`**: ranks symbols by fan-in, fan-out, or total edge count across the
+  whole graph — one call instead of N manual `who_calls`/`what_it_calls` queries.
+  On the CLI and as an MCP tool, both backed by the same `GraphStore.hotspots`.
+  Bounded output (`limit` + a `total` count), `exclude_tests` supported like other
+  query tools.
+- **`include_paths`/`exclude_paths`**: per-query `Node.file`-prefix filtering
+  (simple prefix match, no glob/regex) on `find`, `who_calls`, `what_it_calls`,
+  `find_references`, `impact_of`, and `hotspots` — on both the CLI
+  (`--include-path`/`--exclude-path`, repeatable) and the MCP tools, driven by
+  the shared `cppgraph.filters.matches_path_prefix`/`filter_by_path`. Scopes a
+  query to "my code, not vendored deps" (e.g. `--exclude-path vendor/`).
+  `hotspots` applies the filter in SQL (a `cpg_path_ok` function registered
+  alongside the existing `cpg_is_test_file`), keeping its whole-graph
+  aggregation off the Python side.
+- **`transport` in `status`**: `"cli"` or `"mcp"`, so a copied status block (e.g.
+  from a Task subagent without direct MCP access) says which surface produced
+  it instead of resting on an agent's say-so.
+- **`signature` in `explain`/`explain_symbol`**: a source-derived parameter list
+  for the definition, including any default argument value verbatim (e.g.
+  `(bool useNullIfMissing = false)`) — invisible from the graph alone, which
+  never carries a parsed signature. Needs `--root`/a configured checkout, like
+  the existing `include_source`. Shares `extract_signature` with `find`'s
+  overload-signature grouping (moved to `cppgraph.cli` alongside
+  `read_source_snippet`, its only dependency).
 - **`CLI_REFERENCE.md`: one page for the whole CLI.** `cppgraph --help` lists 30
   subcommands, each with its own `--help`, but there was no single page a
   human could read to pick the right command (QUICKSTART.md showed 3 examples).
@@ -368,83 +451,6 @@ on-disk store also carries its own `schema_version` for forward-compatibility.
   output (`limit` + `total`); malformed rules raise/`parser.error` on the CLI
   and come back as an error dict on MCP (a typo must never silently read as
   "layering holds").
-
-## [0.2.0] - 2026-09-04
-
-### Added
-
-- **`no_incoming_calls`**: callable definitions with zero incoming `calls`
-  edges — the exact primitive behind the "dead code" question, stated as a
-  graph fact, never a verdict (vtable dispatch, exported API, templates, entry
-  points all have no static caller yet are live; the MCP response carries that
-  caveat as a standing `note`). Gated on the same `has_enclosing_ranges` signal
-  as `line_span`: on a stock-binary graph it refuses with the reason — the
-  nearest-preceding attribution fallback can fabricate a phantom caller from a
-  bodyless declaration site, turning a real 0 into a false 1 — rather than
-  answer unreliably. On the CLI and as an MCP tool, both backed by the same
-  `GraphStore.no_incoming_calls` (a SQL anti-join over `edges`, callability
-  from the shared `is_callable_symbol`); bounded output (`limit` + `total`),
-  same `exclude_tests`/path-prefix filters, and only symbols with a recorded
-  definition site (a test-only caller still counts as a caller).
-- **`line_span`**: definitions ranked by body extent (`end_line - start line`,
-  largest first) — where the biggest bodies live, from the exact
-  `enclosing_range` extents, not a def→next-symbol heuristic. #504-only: on a
-  stock-binary graph the tool reports `available: false` with the rebuild
-  pointer (the same degrade-cleanly contract as the reference-attribution
-  features) instead of a silently empty list. On the CLI and as an MCP tool,
-  both backed by the same `GraphStore.line_span`; bounded output (`limit` +
-  `total`) and the same `exclude_tests`/path-prefix filters as `hotspots`.
-  Persists `Node.end_line` in the store — **schema v3**: older stores keep
-  working (a store rebuild, or an incremental `update` that actually touches
-  affected files, adds the column on demand), and an older
-  cppgraph refuses a v3 store with the usual upgrade/rebuild error.
-- **`stats`**: module-level aggregate counts per file (`--group-by file`) or
-  rolled up per directory via `dirname` (`--group-by dir`) — symbols defined,
-  `calls` edges whose call site, and reference use sites, sorted by the three
-  summed descending. A "how big / how dense is this part of the codebase" view
-  to size up an unfamiliar module without reading files, next to `hotspots`'
-  "what's most-called". On the CLI and as an MCP tool, both backed by the same
-  `GraphStore.stats` (three SQL `GROUP BY file_id` aggregations merged, dir
-  rollup in Python); bounded output (`limit` + `total`), and the same
-  `include_paths`/`exclude_paths` prefix filters as `hotspots`, applied to the
-  counted file before aggregation.
-- **Per-query staleness flag (`stale`), no auto-update**: every query tool's
-  response (MCP) and every query command's stderr (CLI) now carries a cheap
-  "has this graph drifted from its source commit?" signal — a single `git
-  diff` against the recorded commit (reusing `changed_files_since`/dirty
-  fingerprints), never a rebuild. MCP's `_call` attaches `stale` best-effort
-  (a failure to compute it never crashes an otherwise-successful query); the
-  CLI's `_open_store_checked` prints a one-line warning, resolving `root` from
-  the store's own recorded `project_root` (falling back to `discover_graph`)
-  so an explicit `--graph` pointing at another project never diffs the wrong
-  checkout. External validation of the same pattern: a competing tool, Graft
-  (nanonets/graft), runs an equivalent structural freshness check before every
-  query — independent evidence this is worth doing cheaply rather than only
-  on an explicit `status` call.
-- **`hotspots`**: ranks symbols by fan-in, fan-out, or total edge count across the
-  whole graph — one call instead of N manual `who_calls`/`what_it_calls` queries.
-  On the CLI and as an MCP tool, both backed by the same `GraphStore.hotspots`.
-  Bounded output (`limit` + a `total` count), `exclude_tests` supported like other
-  query tools.
-- **`include_paths`/`exclude_paths`**: per-query `Node.file`-prefix filtering
-  (simple prefix match, no glob/regex) on `find`, `who_calls`, `what_it_calls`,
-  `find_references`, `impact_of`, and `hotspots` — on both the CLI
-  (`--include-path`/`--exclude-path`, repeatable) and the MCP tools, driven by
-  the shared `cppgraph.filters.matches_path_prefix`/`filter_by_path`. Scopes a
-  query to "my code, not vendored deps" (e.g. `--exclude-path vendor/`).
-  `hotspots` applies the filter in SQL (a `cpg_path_ok` function registered
-  alongside the existing `cpg_is_test_file`), keeping its whole-graph
-  aggregation off the Python side.
-- **`transport` in `status`**: `"cli"` or `"mcp"`, so a copied status block (e.g.
-  from a Task subagent without direct MCP access) says which surface produced
-  it instead of resting on an agent's say-so.
-- **`signature` in `explain`/`explain_symbol`**: a source-derived parameter list
-  for the definition, including any default argument value verbatim (e.g.
-  `(bool useNullIfMissing = false)`) — invisible from the graph alone, which
-  never carries a parsed signature. Needs `--root`/a configured checkout, like
-  the existing `include_source`. Shares `extract_signature` with `find`'s
-  overload-signature grouping (moved to `cppgraph.cli` alongside
-  `read_source_snippet`, its only dependency).
 
 ### Fixed
 
