@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 import platform
+import shutil
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
@@ -299,6 +300,50 @@ def register_mcp(
     return "registered"
 
 
+def install_skill(p: Prompter) -> dict[str, str]:
+    """Stage S3b. Installs the bundled skill (`skills/cppgraph/SKILL.md`) into the
+    per-user skill dirs of every detected agent tool. Returns per-target status:
+    `installed`, `kept`, `not_detected`, or `failed`."""
+    source = _repo_root() / "skills" / "cppgraph" / "SKILL.md"
+    home = Path.home()
+    claude_dir = home / ".claude"
+    opencode_dir = Path(os.environ.get("XDG_CONFIG_HOME") or (home / ".config")) / "opencode"
+    targets = {
+        "claude": (
+            shutil.which("claude") is not None or claude_dir.is_dir(),
+            claude_dir / "skills" / "cppgraph" / "SKILL.md",
+        ),
+        "opencode": (
+            shutil.which("opencode") is not None or opencode_dir.is_dir(),
+            opencode_dir / "skills" / "cppgraph" / "SKILL.md",
+        ),
+    }
+    if not source.is_file():
+        p.note(f"note: {source} not found — skipping skill install.")
+        return {name: "failed" for name in targets}
+    data = source.read_bytes()
+    statuses: dict[str, str] = {}
+    for name, (detected, dest) in targets.items():
+        if not detected:
+            statuses[name] = "not_detected"
+            continue
+        try:
+            if dest.is_file() and dest.read_bytes() == data:
+                statuses[name] = "kept"
+                continue
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(data)
+        except OSError as exc:
+            p.note(f"error: failed to install the skill for {name}: {exc}")
+            statuses[name] = "failed"
+            continue
+        p.note(f"==> Installed the cppgraph skill for {name} at {dest}.")
+        statuses[name] = "installed"
+    if all(v == "not_detected" for v in statuses.values()):
+        p.note("note: no Claude Code or OpenCode installation found — skipping skill install.")
+    return statuses
+
+
 def run_setup(
     *,
     prompter: Prompter | None = None,
@@ -327,6 +372,8 @@ def run_setup(
         return 1 if scip == "failed" else 3
 
     register_mcp(p, from_scratch=from_scratch, assume_yes=assume_yes, can_prompt=can_prompt)
+
+    install_skill(p)
 
     p.note("", "Tool setup complete.")
     if not chain_index:

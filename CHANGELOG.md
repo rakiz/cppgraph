@@ -19,6 +19,16 @@ from the existing `.scip` picks up the new columns — no re-index.
 
 ### Added
 
+- **`skills/cppgraph/SKILL.md`**, an Agent Skill steering an agent toward
+  cppgraph's tools over the `Read`/`grep` reflex — for graph questions (who
+  calls X, impact, references, cycles, …) and everyday structural ones
+  (`outline` over `Read`, scoped `find` over `grep`, `explain_symbol` over
+  opening a header) — plus a correction of an observed misconception
+  (`find_references`/`who_calls` take a plain name directly, no two-step
+  resolve). `cppgraph setup` now installs it automatically into
+  `~/.claude/skills/cppgraph/` and/or `~/.config/opencode/skills/cppgraph/`,
+  whichever agent is detected on the machine.
+
 - **`no_incoming_calls`**: callable definitions with zero incoming `calls`
   edges — the exact primitive behind the "dead code" question, stated as a
   graph fact, never a verdict (vtable dispatch, exported API, templates, entry

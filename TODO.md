@@ -67,23 +67,6 @@ active list. Design detail is in `DESIGN.md`, shipped features in
   sections are — no unearned superiority claims on axes we haven't measured (their
   SWE-bench Verified numbers are real and we have no equivalent yet, see the benchmark
   items above).
-- **Ship a `SKILL.md` (agent steering + distribution).** A short Claude Code skill
-  that steers the agent to the cppgraph tools (`who_calls`, `impact_of`,
-  `find_references`, …) over grep for in-scope C++, plus the install pointer. Two
-  payoffs: it activates *before* an MCP connection (complementing the MCP
-  `instructions` field, which only steers on connect) and it's a distribution
-  artifact — third-party skill collections (e.g. MassGen bundles a Serena skill)
-  are an inbound-link/adoption channel that feeds the discoverability item. Keep it
-  short; the value is reach and pre-connect activation, not new capability. Real usage
-  shows the `Read`/`grep` reflex beats the tools even on an indexed repo ("when I want
-  to read code I reach for `Read`; a word, `grep`") — so the skill must target the
-  *reflex* tasks, not only graph questions: use `outline` instead of `Read` for a
-  file's/class's structure, a scoped `find` instead of `grep`, `explain_symbol` instead
-  of opening the header. Correct one specific misconception seen in real use: agents
-  think `find_references`/`who_calls` need a two-step "resolve the SCIP symbol, then
-  query" and fall back to `grep` for a one-shot `file:line` list — but these tools
-  **already take a unique human name in a single call** (shared `resolve`). Say so
-  explicitly so the one-call path is used.
 - **Hook-based triggering: `SubagentStart`, `PreToolUse`, `SessionStart`.** The only
   steering channel today is the MCP `instructions` string (`mcp_server.py:_server_instructions`),
   delivered once at `initialize` — so it is weakly attended and, critically, **not inherited

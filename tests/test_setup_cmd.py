@@ -259,3 +259,85 @@ def test_register_mcp_skips_without_claude(tmp_path: Path, monkeypatch) -> None:
     p, out = _scripted_prompter([])
     assert setup_cmd.register_mcp(p) == "skipped"
     assert any("claude" in line.lower() for line in out)
+
+
+def _skill_env(tmp_path: Path, monkeypatch) -> tuple[Path, Path]:
+    """Isolate HOME/XDG_CONFIG_HOME/PATH; return (claude_dest, opencode_dest)."""
+    home = tmp_path / "home"
+    xdg = tmp_path / "xdg"
+    (home / ".claude").mkdir(parents=True)
+    (xdg / "opencode").mkdir(parents=True)
+    (tmp_path / "bin").mkdir()  # no claude/opencode CLI on PATH
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))
+    monkeypatch.setenv("PATH", str(tmp_path / "bin"))
+    return home / ".claude/skills/cppgraph/SKILL.md", xdg / "opencode/skills/cppgraph/SKILL.md"
+
+
+def test_install_skill_installs_for_both_detected(tmp_path: Path, monkeypatch) -> None:
+    claude_dest, opencode_dest = _skill_env(tmp_path, monkeypatch)
+    p, out = _scripted_prompter([])
+    statuses = setup_cmd.install_skill(p)
+    assert statuses == {"claude": "installed", "opencode": "installed"}
+    source = setup_cmd._repo_root() / "skills" / "cppgraph" / "SKILL.md"
+    assert claude_dest.read_bytes() == source.read_bytes()
+    assert opencode_dest.read_bytes() == source.read_bytes()
+    assert any("Installed the cppgraph skill" in line for line in out)
+
+
+def test_install_skill_skips_when_neither_detected(tmp_path: Path, monkeypatch) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    (tmp_path / "bin").mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    monkeypatch.setenv("PATH", str(tmp_path / "bin"))
+    p, out = _scripted_prompter([])
+    statuses = setup_cmd.install_skill(p)
+    assert statuses == {"claude": "not_detected", "opencode": "not_detected"}
+    assert not (home / ".claude" / "skills").exists()
+    assert any("no Claude Code or OpenCode" in line for line in out)
+
+
+def test_install_skill_keeps_identical(tmp_path: Path, monkeypatch) -> None:
+    claude_dest, opencode_dest = _skill_env(tmp_path, monkeypatch)
+    source = setup_cmd._repo_root() / "skills" / "cppgraph" / "SKILL.md"
+    for dest in (claude_dest, opencode_dest):
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(source.read_bytes())
+    p, _ = _scripted_prompter([])
+    statuses = setup_cmd.install_skill(p)
+    assert statuses == {"claude": "kept", "opencode": "kept"}
+    assert claude_dest.read_bytes() == source.read_bytes()
+    assert opencode_dest.read_bytes() == source.read_bytes()
+
+
+def test_install_skill_overwrites_stale(tmp_path: Path, monkeypatch) -> None:
+    claude_dest, opencode_dest = _skill_env(tmp_path, monkeypatch)
+    source = setup_cmd._repo_root() / "skills" / "cppgraph" / "SKILL.md"
+    for dest in (claude_dest, opencode_dest):
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"stale content")
+    p, out = _scripted_prompter([])
+    statuses = setup_cmd.install_skill(p)
+    assert statuses == {"claude": "installed", "opencode": "installed"}
+    assert claude_dest.read_bytes() == source.read_bytes()
+    assert opencode_dest.read_bytes() == source.read_bytes()
+
+
+def test_install_skill_claude_cli_only(tmp_path: Path, monkeypatch) -> None:
+    """claude found on PATH but no ~/.claude dir: the skill is still installed."""
+    home = tmp_path / "home"
+    home.mkdir()
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "claude").write_text("#!/bin/sh\n")
+    (bin_dir / "claude").chmod(0o755)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    monkeypatch.setenv("PATH", str(bin_dir))
+    p, _ = _scripted_prompter([])
+    statuses = setup_cmd.install_skill(p)
+    dest = home / ".claude/skills/cppgraph/SKILL.md"
+    assert statuses["claude"] == "installed"
+    assert dest.read_bytes() == (setup_cmd._repo_root() / "skills/cppgraph/SKILL.md").read_bytes()
