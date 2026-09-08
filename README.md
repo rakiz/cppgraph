@@ -80,6 +80,18 @@ UI), then run the script non-interactively with those choices as flags.**
    project. Never tell the user to run `cppgraph setup` / `.venv/bin/cppgraph …` /
    anything under a dev checkout: none of that exists on a fresh machine until
    `setup.sh` has run.
+5. **Never `pip install cppgraph` (or add it as a dependency) into a target
+   project's own venv/virtualenv.** It's a single per-machine tool with one
+   dedicated venv (`~/.local/share/cppgraph/repo/.venv`); invoke its binaries
+   from there directly (optionally alias `cppgraph` to that binary), never
+   re-install it into another project's environment — that creates a second
+   divergent install with its own dependency versions that can conflict with the
+   committed generated bindings (observed: a project venv's pinned `protobuf`
+   vs cppgraph's). Convenience alias for the user's shell rc (`~/.bashrc` /
+   `~/.zshrc`):
+   ```bash
+   alias cppgraph="${XDG_DATA_HOME:-$HOME/.local/share}/cppgraph/repo/.venv/bin/cppgraph"
+   ```
 
 ### Phase B — index a project (per-project; the heavy step)
 

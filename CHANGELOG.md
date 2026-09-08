@@ -35,6 +35,15 @@ from the existing `.scip` picks up the new columns — no re-index.
   anything — reusing/pulling it instead of creating a second, divergent
   clone elsewhere (the exact confusion a stray `~/cppgraph` caused in
   practice: a stale checkout answering from an old commit).
+- **No-per-project-install guard** (`README.md`, `AGENTS.md`): never
+  `pip install cppgraph` into a target project's own venv — it's a single
+  per-machine tool with one dedicated venv
+  (`~/.local/share/cppgraph/repo/.venv`); invoke its binaries from there
+  directly (an `alias cppgraph=".../repo/.venv/bin/cppgraph"` snippet is
+  included). Re-installing it into another project's environment creates a
+  second divergent install whose own pinned deps can conflict with the
+  committed generated bindings (observed: a project venv's pinned `protobuf`
+  vs cppgraph's).
 
 ### Fixed
 

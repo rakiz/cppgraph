@@ -240,6 +240,13 @@ when it's stale (it reflects the build graph at generation time).
   `CPPGRAPH_BIN_DIR`). A data dir, not a cache, so a self-built binary and the
   checkout the global MCP registration points at aren't wiped by cache cleaners.
   Not under `scratch/`, which is dev-only throwaway (example graphs, etc.).
+- **Never `pip install cppgraph` (or add it as a dependency) into a target
+  project's own venv/virtualenv.** It's a single per-machine tool with one
+  dedicated venv (`~/.local/share/cppgraph/repo/.venv`); invoke its binaries from
+  there directly (optionally alias `cppgraph` to that binary), never re-install it
+  into another project's environment — that creates a second divergent install
+  with its own dependency versions that can conflict with the committed generated
+  bindings (observed: a project venv's pinned `protobuf` vs cppgraph's).
 - Uninstall — **always use the script; never improvise `rm -rf`.** There is no
   uninstall *flag* on `setup.sh`; the tool is a separate script that lives with the
   installed tool (not a dev checkout). Hand the user this exact path:
