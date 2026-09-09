@@ -1826,6 +1826,180 @@ def test_enrich_references_errors_without_reference_index(tmp_path: Path) -> Non
         enrich_references(tmp_path / "graph.db", scip_pb2.Index())
 
 
+# --- symbols.scip_kind / has_symbol_kind -------------------------------------
+#
+# The fine-grained SCIP `SymbolInformation.kind` (kind-patch binaries only,
+# patchset 4), following the `has_access_roles` pattern exactly: a data-driven
+# meta flag + a nullable column; absent/UnspecifiedKind is "no info", never an
+# error — a stock .scip must behave exactly as before this feature.
+
+
+def test_symbol_kind_round_trip(tmp_path: Path) -> None:
+    graph = Graph()
+    graph.nodes[METHOD] = Node(
+        symbol=METHOD,
+        display_name="makeResumeToken",
+        file="a.cpp",
+        line=4,
+        scip_kind="StaticMethod",
+    )
+    graph.add_node(OTHER)  # no kind: NULL column, no flag contribution
+    store = _store(tmp_path, graph)
+
+    node = store.get_node(METHOD)
+    assert node is not None
+    assert node.scip_kind == "StaticMethod"
+    assert store.get_node(OTHER).scip_kind is None
+    assert store.meta().get("has_symbol_kind") == "true"
+
+
+def test_store_without_kinds_has_no_symbol_kind_flag(tmp_path: Path) -> None:
+    """Stock-binary graph: no node carries a kind -> the flag stays absent (the
+    `has_access_roles` write_sqlite convention), nodes read back scip_kind=None,
+    and nothing raises."""
+    graph = Graph()
+    graph.add_node(METHOD, display_name="makeResumeToken")
+    store = _store(tmp_path, graph)
+
+    assert store.get_node(METHOD).scip_kind is None
+    assert store.meta().get("has_symbol_kind") is None
+
+
+def test_find_returns_scip_kind_when_present(tmp_path: Path) -> None:
+    graph = Graph()
+    graph.nodes[METHOD] = Node(
+        symbol=METHOD,
+        display_name="makeResumeToken",
+        file="a.cpp",
+        line=4,
+        scip_kind="StaticMethod",
+    )
+    store = _store(tmp_path, graph)
+
+    (node,) = store.find("makeResumeToken")
+    assert node.scip_kind == "StaticMethod"
+
+
+def test_get_node_and_find_on_a_pre_kind_store_degrade(tmp_path: Path) -> None:
+    """A store built before `symbols.scip_kind` (released schema v4) must read
+    back with scip_kind=None — never crash — and the fallback cascade must NOT
+    lose `documentation`, the datum the released shape already carries."""
+    graph = Graph()
+    graph.nodes[METHOD] = Node(
+        symbol=METHOD,
+        display_name="makeResumeToken",
+        file="a.cpp",
+        line=4,
+        documentation="/** Doc. */",
+    )
+    db = tmp_path / "g.db"
+    write_sqlite(graph, db)
+    con = sqlite3.connect(db)
+    con.execute("ALTER TABLE symbols DROP COLUMN scip_kind")
+    con.commit()
+    con.close()
+
+    store = GraphStore(db)
+    node = store.get_node(METHOD)
+    assert node.scip_kind is None
+    assert node.documentation == "/** Doc. */"
+    assert [n.scip_kind for n in store.find("makeResumeToken")] == [None]
+
+
+def test_enrich_references_backfills_symbol_kinds(tmp_path: Path) -> None:
+    """Re-running enrich-refs with a kind-patch .scip backfills the fine-grained
+    kinds alongside attribution — the no-rebuild path must carry them too (the
+    same decision `refs.roles` made)."""
+    typ = "cxx . . $ pkg/Widget#"
+    doc = scip_pb2.Document(relative_path="widget.cpp")
+    doc.symbols.add(symbol=typ, kind=scip_pb2.SymbolInformation.Struct)
+    def_occ = doc.occurrences.add(symbol=typ, symbol_roles=scip_pb2.SymbolRole.Definition)
+    def_occ.range.extend([4, 0, 8])
+    index = scip_pb2.Index(documents=[doc])
+
+    graph = Graph()
+    graph.add_reference(typ, "widget.cpp", 6)
+    db = tmp_path / "g.db"
+    write_sqlite(graph, db)
+
+    from cppgraph.store import enrich_references
+
+    enrich_references(db, index)
+
+    store = GraphStore(db)
+    assert store.get_node(typ).scip_kind == "Struct"
+    assert store.meta().get("has_symbol_kind") == "true"
+
+
+def test_enrich_references_with_a_kindless_scip_fabricates_nothing(tmp_path: Path) -> None:
+    """A stock .scip carries no kinds: the enrich writes none and the flag is
+    stamped 'false' — degrading cleanly, never inventing data."""
+    doc = scip_pb2.Document(relative_path="widget.cpp")
+    doc.symbols.add(symbol="cxx . . $ pkg/Widget#")
+    index = scip_pb2.Index(documents=[doc])
+
+    graph = Graph()
+    graph.add_reference("cxx . . $ pkg/Widget#", "widget.cpp", 6)
+    db = tmp_path / "g.db"
+    write_sqlite(graph, db)
+
+    from cppgraph.store import enrich_references
+
+    enrich_references(db, index)
+
+    store = GraphStore(db)
+    assert store.get_node("cxx . . $ pkg/Widget#").scip_kind is None
+    assert store.meta().get("has_symbol_kind") == "false"
+
+
+def test_update_carries_symbol_kinds_from_the_partial(tmp_path: Path) -> None:
+    """An incremental update from a kind-carrying binary: the fresh definition
+    site's kind replaces the stored one, and `has_symbol_kind` flips on."""
+    db = tmp_path / "graph.db"
+    original = Graph()
+    original.add_node(METHOD, display_name="makeResumeToken")
+    write_sqlite(original, db)
+
+    partial = scip_pb2.Index()
+    doc = partial.documents.add(relative_path="foo.cpp")
+    doc.symbols.add(symbol=METHOD, kind=scip_pb2.SymbolInformation.StaticMethod)
+    d = doc.occurrences.add(symbol=METHOD, symbol_roles=scip_pb2.SymbolRole.Definition)
+    d.range.extend([4, 0, 6])
+    update_store(db, partial)
+
+    store = GraphStore(db)
+    assert store.get_node(METHOD).scip_kind == "StaticMethod"
+    assert store.meta().get("has_symbol_kind") == "true"
+
+
+def test_update_with_a_kindless_partial_degrades_changed_files(tmp_path: Path) -> None:
+    """A partial re-index from a stock binary (no kinds): the changed file's
+    kind degrades to the partial's level (None) — a fresh definition site wins
+    even with NULL, the exact semantics of `documentation`/`end_line` on a
+    stock update — while the flag never flips off and nothing crashes."""
+    db = tmp_path / "graph.db"
+    original = Graph()
+    original.nodes[METHOD] = Node(
+        symbol=METHOD,
+        display_name="makeResumeToken",
+        file="foo.cpp",
+        line=4,
+        scip_kind="StaticMethod",
+    )
+    write_sqlite(original, db)
+
+    partial = scip_pb2.Index()
+    doc = partial.documents.add(relative_path="foo.cpp")
+    doc.symbols.add(symbol=METHOD)  # no kind field
+    d = doc.occurrences.add(symbol=METHOD, symbol_roles=scip_pb2.SymbolRole.Definition)
+    d.range.extend([4, 0, 6])
+    update_store(db, partial)
+
+    store = GraphStore(db)
+    assert store.get_node(METHOD).scip_kind is None  # degraded with the fresh site
+    assert store.meta().get("has_symbol_kind") == "true"  # never flipped off
+
+
 def test_references_empty_when_not_built(tmp_path: Path) -> None:
     # a graph with no references at all -> no has_references flag, empty query
     store = _sample(tmp_path)

@@ -124,6 +124,25 @@ def is_term_symbol(symbol: str) -> bool:
 _DOCUMENTATION_PLACEHOLDER = "No documentation available."
 
 
+def symbol_kind_name(kind: int) -> str | None:
+    """The name of a SCIP `SymbolInformation.kind` enum value ("StaticMethod"),
+    or None when it carries no information.
+
+    proto3 scalar default: a stock binary never sets the field, so it reads
+    back as 0 = `UnspecifiedKind` — "no info", never an error. An out-of-range
+    value (a Kind added after this vendored proto) also degrades to None: the
+    vendored proto is a superset of what any supported binary emits, and every
+    optional field is read defensively — a partially-patched binary must never
+    take a query down.
+    """
+    if kind == scip_pb2.SymbolInformation.UnspecifiedKind:
+        return None
+    try:
+        return scip_pb2.SymbolInformation.Kind.Name(kind)
+    except ValueError:
+        return None
+
+
 def real_documentation(entries: Iterable[str]) -> str | None:
     """The genuine doc-comment text behind a `SymbolInformation.documentation`
     field, or None when there isn't any.
@@ -316,6 +335,12 @@ def build_graph(
             # door open for a later genuine one.
             if node.documentation is None:
                 node.documentation = real_documentation(sym_info.documentation)
+            if node.scip_kind is None:
+                # Fine-grained SCIP kind (kind-patched binary only; a stock one
+                # leaves it 0/UnspecifiedKind -> None). Same "first wins" door
+                # as documentation: the field is identical across a symbol's
+                # per-document duplicates anyway.
+                node.scip_kind = symbol_kind_name(sym_info.kind)
             for rel in sym_info.relationships:
                 if rel.is_implementation:
                     # scip-clang uses is_implementation for both class

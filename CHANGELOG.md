@@ -6,7 +6,7 @@ on-disk store also carries its own `schema_version` for forward-compatibility.
 
 ## [Unreleased]
 
-Store schema v4 → v5 (`refs.roles`); two new scip-clang patches and a rename
+Store schema v4 → v5 (`refs.roles`); three new scip-clang patches and a rename
 of the binary "variant" concept.
 
 ### Added
@@ -29,15 +29,34 @@ of the binary "variant" concept.
   annotations and a new `--access {read,write}` filter on `cppgraph references`
   / MCP `find_references`. Degrades cleanly (no annotation, filter refused with
   a clear reason) on a graph built without this patch.
+- **`SymbolInformation.kind` syntactic classifier** (`scip-clang-patches/kind-on-v0.4.0.patch`):
+  a scip-clang patch filling SCIP's `SymbolInformation.kind`, which upstream
+  leaves at `UnspecifiedKind` on 100% of symbols: `classifySymbolKind` in
+  `Indexer.cc` maps the `clang::Decl` at each `SymbolInformation`-creating
+  site to its kind (Class/Struct/Union/Enum, EnumMember, Field,
+  Function/Method/StaticMethod/PureVirtualMethod/Constructor,
+  Variable/StaticDataMember, Namespace, TypeAlias; macros and the synthetic
+  file symbol get Macro/File), carried through the TU-merge pipeline by a new
+  `SymbolInformationBuilder::kind` field. Syntactic classification only, no
+  semantic analysis — local variables and parameters get no
+  `SymbolInformation` emitted today, and destructors classify as Method (SCIP
+  has no Destructor kind). Fourth patch in the bundle (`patchset_version` 3 →
+  4 in `versions.json`), order-independent with the other three.
+  Consumed by cppgraph: `symbols.scip_kind` (store schema v5, +
+  `has_symbol_kind` meta flag), surfaced as a `scip_kind` field on
+  `explain_symbol`/`find` and a `has_symbol_kind` capability line in `status`,
+  on the CLI and as MCP tools alike. Degrades cleanly (field absent, never a
+  crash) on a graph built without this patch or an older store.
 - **Dual versioning for the scip-clang patch bundle**: `versions.json`'s
   `scip_clang.patchset_version` now tracks our own patch bundle independently
   of the upstream `version` pin (history: 1 = #504 `enclosing_range` only; 2 =
-  + `ForwardDefinition`; 3 = + `ReadAccess`/`WriteAccess`). `cppgraph status`
+  + `ForwardDefinition`; 3 = + `ReadAccess`/`WriteAccess`; 4 = +
+  `SymbolInformation.kind`). `cppgraph status`
   advises when an installed patched binary's patchset predates the pin.
-- All three scip-clang patches (`enclosing_range`, `forward-definition`,
-  `read-write-access`) verified mutually **order-independent** — any of the 6
-  possible application orders produces byte-identical final files, and each
-  applies standalone. Matters for a future independent upstream PR per patch.
+- All four scip-clang patches (`enclosing_range`, `forward-definition`,
+  `read-write-access`, `kind`) verified mutually **order-independent** — any of
+  the 24 possible application orders produces byte-identical final files, and
+  each applies standalone. Matters for a future independent upstream PR per patch.
 
 ### Changed
 

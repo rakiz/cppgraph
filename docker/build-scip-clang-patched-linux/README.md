@@ -1,7 +1,7 @@
 # build-scip-clang-patched-linux — compile scip-clang natively, with our patches on top of v0.4.0
 
 Builds a `scip-clang` binary **from source, for the host's own CPU architecture**,
-carrying three patches stacked on the `v0.4.0` tag:
+carrying four patches stacked on the `v0.4.0` tag:
 
 1. `enclosing_range` ([PR #504](https://github.com/sourcegraph/scip-clang/pull/504))
 2. the `ForwardDefinition` bit on bodyless-declaration occurrences (our own fix,
@@ -12,9 +12,14 @@ carrying three patches stacked on the `v0.4.0` tag:
    upstreamed — see `read-write-access-on-v0.4.0.patch`). Tags `symbol_roles`
    with `WriteAccess` (and `ReadAccess` on read-modify-write sites) from the
    syntactic AST parent alone; plain reads stay untagged.
+4. the `SymbolInformation.kind` syntactic classifier (our own fix, not yet
+   upstreamed — see `kind-on-v0.4.0.patch`). Fills SCIP's
+   `SymbolInformation.kind`, which upstream leaves at `UnspecifiedKind` on 100%
+   of symbols, by mapping the `clang::Decl` at each `SymbolInformation`-creating
+   site to its kind.
 
-All three patches are bundled into one binary deliberately — there's no un-patched
-variant shipped, so every consumer of the patched binary gets all three fixes.
+All four patches are bundled into one binary deliberately — there's no un-patched
+variant shipped, so every consumer of the patched binary gets all four fixes.
 
 ## Why this exists
 
@@ -61,6 +66,7 @@ Graviton `m6g.2xlarge` (Neoverse-N1, 8 vCPU, 30 GiB, ARM64). Where it goes:
 | apply PR #504 patch                    | <1 s        |
 | apply ForwardDefinition patch           | <1 s        |
 | apply ReadAccess/WriteAccess patch      | <1 s        |
+| apply SymbolInformation.kind patch      | <1 s        |
 | **Bazel compile (LLVM+Clang) + LTO link** | **~31 min** |
 
 So **~99 % is the Bazel compile** — scip-clang embeds Clang as a library, so it
@@ -98,7 +104,7 @@ cleaner:
   patch files (see that directory's own README) — not self-contained anymore
   since those patches also serve `scripts/build-scip-clang-patched-macos.sh`.
 - `enclosing_range-on-v0.4.0.patch`, `forward-definition-on-v0.4.0.patch`,
-  `read-write-access-on-v0.4.0.patch` —
+  `read-write-access-on-v0.4.0.patch`, `kind-on-v0.4.0.patch` —
   live in `../../scip-clang-patches/` (shared with the macOS build script), not
   in this directory. See that directory's own README for what each patch does,
   the build's apply order (not actually required — see that README's
@@ -108,9 +114,11 @@ cleaner:
 ## Not yet upstreamed
 
 Only `enclosing_range` (#504) is an upstream PR in progress. The
-`ForwardDefinition` fix (`../../scip-clang-patches/forward-definition-on-v0.4.0.patch`)
-and the `ReadAccess`/`WriteAccess` classifier
-(`../../scip-clang-patches/read-write-access-on-v0.4.0.patch`) live only as our
+`ForwardDefinition` fix (`../../scip-clang-patches/forward-definition-on-v0.4.0.patch`),
+the `ReadAccess`/`WriteAccess` classifier
+(`../../scip-clang-patches/read-write-access-on-v0.4.0.patch`), and the
+`SymbolInformation.kind` classifier
+(`../../scip-clang-patches/kind-on-v0.4.0.patch`) live only as our
 patches for now, but each already applies to a clean `v0.4.0` on its own
 (reduced diff context — see each patch's own header), so proposing either
 upstream (independent of whether #504 or the other lands) needs no rework of

@@ -28,6 +28,15 @@ class Node:
     # filtered out — see `builder.real_documentation`); None when there is
     # none. Surfaced by `explain` without a source read.
     documentation: str | None = None
+    # The symbol's fine-grained SCIP `SymbolInformation.kind` enum name (e.g.
+    # "StaticMethod", "Enum"), emitted only by a kind-patched binary (patchset
+    # 4); None when there is none (stock binary, or a Decl the patch leaves
+    # unclassified — proto3's 0/UnspecifiedKind reads as "no info", never an
+    # error). Additive info on top of the descriptor-suffix classification
+    # (`builder.is_callable_symbol`/`is_type_symbol`/`is_term_symbol`), which
+    # stays the source of truth for edge typing; surfaced by `explain`/`find`
+    # and flagged `has_symbol_kind` in meta.
+    scip_kind: str | None = None
 
 
 @dataclass(slots=True)
@@ -209,6 +218,7 @@ class Graph:
                     "line": n.line,
                     "end_line": n.end_line,
                     "documentation": n.documentation,
+                    "scip_kind": n.scip_kind,
                 }
                 for n in self.nodes.values()
             ],

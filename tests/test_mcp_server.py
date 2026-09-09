@@ -1464,6 +1464,51 @@ def test_explain_omits_documentation_when_none(store: GraphStore) -> None:
     assert "documentation" not in result
 
 
+def test_explain_includes_scip_kind(tmp_path: Path) -> None:
+    """The fine-grained SCIP kind (kind-patch binary, `has_symbol_kind`):
+    present only when the node carries one — absent, never null (the same
+    presence convention as `documentation`)."""
+    path = tmp_path / "graph.db"
+    graph = Graph()
+    graph.nodes[FOO] = Node(
+        symbol=FOO,
+        display_name="makeResumeToken",
+        file="foo.cpp",
+        line=234,
+        scip_kind="StaticMethod",
+    )
+    write_sqlite(graph, path)
+    result = mcp_server.explain(GraphStore(path), FOO)
+    assert result["scip_kind"] == "StaticMethod"
+
+
+def test_explain_omits_scip_kind_when_absent(store: GraphStore) -> None:
+    """A stock-binary graph carries no kinds: the key is absent entirely (no
+    data collected), not None (data collected, negative)."""
+    result = mcp_server.explain(store, FOO)
+    assert "scip_kind" not in result
+
+
+def test_find_includes_scip_kind_when_graph_has_it(tmp_path: Path) -> None:
+    path = tmp_path / "graph.db"
+    graph = Graph()
+    graph.nodes[FOO] = Node(
+        symbol=FOO,
+        display_name="makeResumeToken",
+        file="foo.cpp",
+        line=234,
+        scip_kind="StaticMethod",
+    )
+    write_sqlite(graph, path)
+    result = mcp_server.find_symbols(GraphStore(path), "makeResumeToken")
+    assert result["results"][0]["scip_kind"] == "StaticMethod"
+
+
+def test_find_omits_scip_kind_when_absent(store: GraphStore) -> None:
+    result = mcp_server.find_symbols(store, "makeResumeToken")
+    assert "scip_kind" not in result["results"][0]
+
+
 def test_explain_limit_is_overridable(store: GraphStore) -> None:
     # FOO has one caller (mid); force a limit of 0 to prove the cap is honored
     # and truncation flagged, so an LLM can raise it back when it needs more.
@@ -1595,6 +1640,25 @@ def test_status_attributed_graph_gets_no_upgrade_hint(tmp_path: Path) -> None:
     assert "upgrade" not in result["usage_view"]
 
 
+@pytest.mark.parametrize(
+    "meta",
+    [{"has_symbol_kind": "true"}, {}],
+    ids=["kind-patched", "stock-binary"],
+)
+def test_status_reports_symbol_kind_flag(tmp_path: Path, meta: dict[str, str]) -> None:
+    """`graph_meta.has_symbol_kind` mirrors the meta flag as a bool, the same
+    way `has_access_roles` is surfaced: true only when the graph carries
+    kinds, false when it doesn't — never missing."""
+    graph = Graph()
+    graph.add_node(FOO, display_name="x")
+    path = tmp_path / "g.db"
+    write_sqlite(graph, path, meta=meta)
+    with GraphStore(path) as st:
+        result = mcp_server.status_report(st)
+    expected = meta.get("has_symbol_kind") == "true"
+    assert result["graph_meta"]["has_symbol_kind"] is expected
+
+
 def test_status_up_to_date_with_root(tmp_path: Path) -> None:
     root = tmp_path / "co"
     root.mkdir()
@@ -1721,8 +1785,10 @@ def test_find_groups_overloads(tmp_path: Path) -> None:
     p1 = "cxx . . $ mongo/ResumeToken#parse(aaaaaa)."
     p2 = "cxx . . $ mongo/ResumeToken#parse(bbbbbb)."
     graph = Graph()
-    graph.nodes[p1] = Node(symbol=p1, display_name="parse", file="rt.h", line=1)
-    graph.nodes[p2] = Node(symbol=p2, display_name="parse", file="rt.cpp", line=2)
+    graph.nodes[p1] = Node(symbol=p1, display_name="parse", file="rt.h", line=1, scip_kind="Method")
+    graph.nodes[p2] = Node(
+        symbol=p2, display_name="parse", file="rt.cpp", line=2, scip_kind="StaticMethod"
+    )
     path = tmp_path / "ov.db"
     write_sqlite(graph, path)
     result = mcp_server.find_symbols(GraphStore(path), "parse")
@@ -1732,6 +1798,10 @@ def test_find_groups_overloads(tmp_path: Path) -> None:
     entry = result["results"][0]
     assert entry["overloads"] == 2
     assert {s["symbol"] for s in entry["signatures"]} == {p1, p2}
+    # Each arm keeps its own fine-grained kind (kind-patched graph only) —
+    # grouping must not collapse the arms to the first one's kind.
+    kinds = {s["symbol"]: s["scip_kind"] for s in entry["signatures"]}
+    assert kinds == {p1: "Method", p2: "StaticMethod"}
 
 
 def test_impact_on_type_redirects_to_references(tmp_path: Path) -> None:

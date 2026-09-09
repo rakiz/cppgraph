@@ -724,3 +724,64 @@ def test_build_graph_first_real_documentation_wins_across_documents() -> None:
     graph = build_graph(scip_pb2.Index(documents=[first, second, third]))
 
     assert graph.nodes[fn].documentation == "/** The real comment. */"
+
+
+# --- SymbolInformation.kind (kind-patched binaries only) ---------------------
+
+
+def test_build_graph_captures_symbol_kind_on_node() -> None:
+    """A kind-patched binary (patchset 4) fills `SymbolInformation.kind`: the
+    builder carries the enum NAME on the node — additive info on top of the
+    descriptor-suffix classification (`is_callable_symbol`/`is_type_symbol`/
+    `is_term_symbol`), which stays the source of truth for edge typing."""
+    sym = "cxx . . $ mongo/Counter#increment(a1)."
+    doc = scip_pb2.Document(relative_path="counter.cpp")
+    doc.symbols.add(symbol=sym, kind=scip_pb2.SymbolInformation.StaticMethod)
+    doc.occurrences.append(_occurrence(sym, 1, roles=DEFINITION))
+    graph = build_graph(scip_pb2.Index(documents=[doc]))
+
+    assert graph.nodes[sym].scip_kind == "StaticMethod"
+
+
+def test_build_graph_stock_scip_yields_no_kind() -> None:
+    """A stock binary never sets `kind` — proto3 reads it back as 0
+    (UnspecifiedKind). That is "no info", never an error: nodes keep
+    `scip_kind=None` and the graph builds exactly as before this feature."""
+    doc = scip_pb2.Document(relative_path="plain.cpp")
+    doc.symbols.add(symbol="cxx . . $ mongo/Widget#")  # field absent
+    doc.symbols.add(symbol="cxx . . $ mongo/step(d1).", kind=0)  # explicit default
+    doc.occurrences.append(_occurrence("cxx . . $ mongo/Widget#", 3, roles=DEFINITION))
+    graph = build_graph(scip_pb2.Index(documents=[doc]))
+
+    assert all(n.scip_kind is None for n in graph.nodes.values())
+
+
+def test_build_graph_unknown_kind_value_degrades_to_none() -> None:
+    """A Kind enum value newer than the vendored proto must degrade to no-data,
+    not crash — the same read-defensively rule as any other optional field
+    (a partially-patched or future binary must never take the tool down)."""
+    sym = "cxx . . $ mongo/Future(f1)."
+    doc = scip_pb2.Document(relative_path="future.cpp")
+    si = doc.symbols.add(symbol=sym)
+    si.kind = 9999  # not in this vendored proto's Kind enum
+    graph = build_graph(scip_pb2.Index(documents=[doc]))
+
+    assert graph.nodes[sym].scip_kind is None
+
+
+def test_build_graph_first_real_scip_kind_wins_across_documents() -> None:
+    """Same first-real-wins rule as documentation: a symbol's
+    `SymbolInformation` appears once per document (a header included by N TUs).
+    A kind-less visit must not block a later kinded one (None keeps the door
+    open), and a kind already captured must not be overwritten by a later
+    duplicate."""
+    sym = "cxx . . $ mongo/dup(d1)."
+    first = scip_pb2.Document(relative_path="a.cpp")
+    first.symbols.add(symbol=sym)  # stock binary: kind field absent
+    second = scip_pb2.Document(relative_path="b.cpp")
+    second.symbols.add(symbol=sym, kind=scip_pb2.SymbolInformation.StaticMethod)
+    third = scip_pb2.Document(relative_path="c.cpp")
+    third.symbols.add(symbol=sym, kind=0)  # explicit proto3 default = no info
+    graph = build_graph(scip_pb2.Index(documents=[first, second, third]))
+
+    assert graph.nodes[sym].scip_kind == "StaticMethod"

@@ -283,6 +283,10 @@ def find_symbols(
 
     Grouped overloads carry a best-effort `signature` read from source (when
     `root` is available), since scip-clang distinguishes them only by hash.
+    When the graph was built from a kind-patched binary (`has_symbol_kind`),
+    the symbol's fine-grained SCIP kind is returned as `scip_kind` (e.g.
+    "StaticMethod") on the entry and on each `signatures[i]` arm — also absent
+    when the graph carries none.
     """
     matches = store.find(query)
     relaxation: str | None = None
@@ -324,6 +328,10 @@ def find_symbols(
     for key in shown_keys:
         members = groups[key]
         entry = _node_dict(members[0], full_symbols=True)
+        if members[0].scip_kind is not None:
+            # Fine-grained SCIP kind (kind-patched binary, `has_symbol_kind`);
+            # absent when the graph carries none — never null.
+            entry["scip_kind"] = members[0].scip_kind
         if len(members) > 1:
             # An overload set: keep every signature's exact symbol + site, plus a
             # source-derived parameter signature so the arms are distinguishable.
@@ -331,6 +339,8 @@ def find_symbols(
             sigs: list[dict[str, Any]] = []
             for m in members:
                 d = _node_dict(m, full_symbols=True)
+                if m.scip_kind is not None:
+                    d["scip_kind"] = m.scip_kind
                 sig = extract_signature(root, m.file, m.line)
                 if sig:
                     d["signature"] = sig
@@ -1473,7 +1483,10 @@ def explain(
     is returned as `documentation` — extracted from
     `SymbolInformation.documentation` at build time (scip-clang's placeholder
     and auto-generated namespace/File text filtered out), so it needs no
-    `root`; the key is absent when there is no real doc text.
+    `root`; the key is absent when there is no real doc text. When the graph
+    was built from a kind-patched binary (`has_symbol_kind`), the symbol's
+    fine-grained SCIP kind is returned as `scip_kind` (e.g. "StaticMethod") —
+    also absent when the graph carries none.
 
     A `0` caller count is only trustworthy with exact (#504) attribution: when
     the store lacks `has_enclosing_ranges`, the callers block carries
@@ -1537,6 +1550,13 @@ def explain(
         # unlike `signature`.
         result["documentation"] = node.documentation
 
+    if node.scip_kind is not None:
+        # Fine-grained SCIP kind ("StaticMethod"), from a kind-patched binary
+        # (`has_symbol_kind` in meta); absent otherwise — never null, the same
+        # presence convention as `documentation`. Additive to the descriptor-
+        # suffix classification, which stays the source of truth for typing.
+        result["scip_kind"] = node.scip_kind
+
     if root is not None:
         # Always set the key, even when extraction failed (None) — mirrors
         # `source`'s "None means requested but unavailable, absent means not
@@ -1594,6 +1614,7 @@ def status_report(
             "has_attributed_refs": m.get("has_attributed_refs") == "true",
             "has_access_roles": m.get("has_access_roles") == "true",
             "has_enclosing_ranges": m.get("has_enclosing_ranges") == "true",
+            "has_symbol_kind": m.get("has_symbol_kind") == "true",
             "node_count": m.get("node_count"),
             "edge_count": m.get("edge_count"),
             "ref_count": m.get("ref_count"),
@@ -1834,7 +1855,11 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         when several symbols share a name and inspect signatures/overloads. A multi-word query is an
         order-free AND (every word must appear); overloads sharing a qualified
         name group under one result, each with a source-derived `signature` so
-        the arms are distinguishable. If nothing matches exactly, `find` relaxes
+        the arms are distinguishable. When the graph was built from a
+        kind-patched scip-clang (`has_symbol_kind`), the symbol's fine-grained
+        SCIP kind is returned as `scip_kind` (e.g. "StaticMethod") on the entry
+        and each `signatures[i]` arm — absent on graphs without that data. If
+        nothing matches exactly, `find` relaxes
         once (case/separator-insensitive — `changestream` ~ `change_stream` —
         then, for a `Class#method` guess, the bare leaf name) and flags the
         response `relaxed`. Set `hide_trivial=True` to drop compiler-generated /
@@ -2387,7 +2412,10 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         graph alone, which never carries a parsed signature. When the symbol
         has a genuine doc comment, it is returned as `documentation` (extracted
         at index time; scip-clang's placeholder/auto-generated text filtered
-        out) — no checkout needed for that one. A `callers.total`
+        out) — no checkout needed for that one. When the graph was built from a
+        kind-patched scip-clang (`has_symbol_kind`), the symbol's fine-grained
+        SCIP kind is returned as `scip_kind` (e.g. "StaticMethod"); the key is
+        absent on graphs without that data. A `callers.total`
         of `0` carries `zero_callers_reliable: false` + a `note` when the graph
         lacks #504 enclosing-range data — stock-binary attribution can
         fabricate a phantom caller from a bodyless declaration site or drop an

@@ -69,7 +69,7 @@ RUN git apply --verbose /tmp/forward_definition.patch \
     && grep -q 'is_declaration_site' proto/fwd_decls.proto  # fail fast if patch is a no-op
 
 # Apply the ReadAccess/WriteAccess syntactic classifier (applied here after
-# the two patches above purely for build consistency — all three patches are
+# the three patches above purely for build consistency — all four patches are
 # actually order-independent, see scip-clang-patches/README.md). Tags
 # symbol_roles with WriteAccess (ReadAccess alongside it on read-modify-write
 # sites) based on the syntactic AST parent of the reference site; plain reads
@@ -77,6 +77,17 @@ RUN git apply --verbose /tmp/forward_definition.patch \
 COPY scip-clang-patches/read-write-access-on-v0.4.0.patch /tmp/read_write_access.patch
 RUN git apply --verbose /tmp/read_write_access.patch \
     && grep -q 'classifyAccessRoles' indexer/Indexer.cc  # fail fast if patch is a no-op
+
+# Apply the SymbolInformation.kind syntactic classifier (applied here after
+# the three patches above purely for build consistency — all four patches are
+# actually order-independent, see scip-clang-patches/README.md). Fills SCIP's
+# SymbolInformation.kind (upstream leaves it at UnspecifiedKind on 100% of
+# symbols) by mapping the clang::Decl at each SymbolInformation-creating site
+# to its kind; the kind survives the TU-merge pipeline via
+# SymbolInformationBuilder::kind.
+COPY scip-clang-patches/kind-on-v0.4.0.patch /tmp/kind.patch
+RUN git apply --verbose /tmp/kind.patch \
+    && grep -q 'classifySymbolKind' indexer/Indexer.cc  # fail fast if patch is a no-op
 
 # Optimized release build (same config upstream uses for its linux binaries).
 RUN echo "startup --host_jvm_args=-Xmx${BAZEL_JVM_HEAP}" > ci.bazelrc \

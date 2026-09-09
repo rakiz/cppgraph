@@ -64,10 +64,13 @@ SOURCE_EXTS = (
 
 def _print_node(node: Node, *, full_symbols: bool = True) -> None:
     loc = f"{node.file}:{node.line + 1}" if node.file is not None and node.line is not None else "?"
+    # Fine-grained SCIP kind (kind-patched binary only); nodes from queries
+    # that don't select the column simply carry None and print unchanged.
+    kind = f"  [{node.scip_kind}]" if node.scip_kind else ""
     if full_symbols:
-        print(f"  {node.symbol}  ({node.display_name or '?'} @ {loc})")
+        print(f"  {node.symbol}  ({node.display_name or '?'} @ {loc}){kind}")
     else:
-        print(f"  {node.display_name or short_label(node.symbol)}  ({loc})")
+        print(f"  {node.display_name or short_label(node.symbol)}  ({loc}){kind}")
 
 
 def read_source_snippet(
@@ -1972,6 +1975,17 @@ def main(argv: list[str] | None = None) -> int:
                     "index with a scip-clang binary"
                 )
                 print("                    carrying the ReadAccess/WriteAccess patch, then rebuild")
+        if m.get("has_symbol_kind") == "true":
+            print("  symbol kinds:  fine-grained SCIP kinds present (Class/Method/Enum/...)")
+        else:
+            print("  symbol kinds:  none (symbols carry no SCIP kind data)")
+            print(
+                "                 -> to get them (Class vs Struct, Method vs StaticMethod, …), "
+                "index with a scip-clang"
+            )
+            print(
+                "                    binary carrying the SymbolInformation.kind patch, then rebuild"
+            )
         print(
             f"  format:        schema v{m.get('schema_version', '0 (legacy)')}"
             f", cppgraph {m.get('cppgraph_version', '?')}"
@@ -2063,6 +2077,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[cppgraph] {node.symbol}")
         print(f"  name:       {node.display_name or '?'}")
         print(f"  defined at: {loc}")
+        if node.scip_kind is not None:
+            # Fine-grained SCIP kind from a kind-patched binary
+            # (`has_symbol_kind`); additive to the descriptor-suffix
+            # classification, absent on stock graphs — never an empty value.
+            print(f"  kind:       {node.scip_kind}")
         if node.documentation:
             # Genuine doc comment from the graph (extracted at index time) —
             # no --root needed, unlike the signature below.

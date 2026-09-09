@@ -443,6 +443,32 @@ def test_status_upgrade_hint_omits_estimate_without_ref_count(
     assert "extrapolated" not in flat
 
 
+@pytest.mark.parametrize(
+    "meta",
+    [{"has_symbol_kind": "true"}, {}],
+    ids=["kind-patched", "stock-binary"],
+)
+def test_status_reports_symbol_kind_line(
+    tmp_path: Path, meta: dict[str, str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The `has_symbol_kind` flag drives the `symbol kinds:` line of the CLI
+    status block, the same way `has_access_roles` drives `access roles:` —
+    present when the graph carries kinds, `none` + the upgrade hint when it
+    doesn't."""
+    graph = Graph()
+    graph.add_node("cxx . . $ mongo/Foo#makeResumeToken(a1).", display_name="x")
+    path = tmp_path / "g.db"
+    write_sqlite(graph, path, meta=meta)
+    assert main(["status", "--graph", str(path)]) == 0
+    status = capsys.readouterr().out
+    if meta.get("has_symbol_kind") == "true":
+        assert "fine-grained SCIP kinds present" in status
+        assert "-> to get them" not in status  # nothing to upgrade to
+    else:
+        assert "symbols carry no SCIP kind data" in status
+        assert "SymbolInformation.kind patch" in status  # the upgrade path is surfaced
+
+
 def test_enrich_refs_upgrades_existing_store(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -857,6 +883,56 @@ def test_explain_no_documentation_line_when_absent(
     out = capsys.readouterr().out
     assert exit_code == 0
     assert "documentation" not in out
+
+
+def test_explain_prints_scip_kind_without_root(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The fine-grained SCIP kind comes from the graph itself (kind-patched
+    # binary): printed with no --root, like documentation.
+    graph = Graph()
+    node = graph.add_node("cxx . . $ mongo/Foo#bar(a1).", display_name="bar")
+    node.file = "src/x.cpp"
+    node.line = 2
+    node.scip_kind = "StaticMethod"
+    path = tmp_path / "graph.db"
+    write_sqlite(graph, path)
+    exit_code = main(["explain", "--graph", str(path), "cxx . . $ mongo/Foo#bar(a1)."])
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "kind:       StaticMethod" in out
+
+
+def test_explain_no_kind_line_when_absent(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Stock-binary graph: no kind line at all — absent, not an empty value.
+    graph = Graph()
+    node = graph.add_node("cxx . . $ mongo/Foo#nokind(n1).", display_name="nokind")
+    node.file = "src/x.cpp"
+    node.line = 2
+    path = tmp_path / "graph.db"
+    write_sqlite(graph, path)
+    exit_code = main(["explain", "--graph", str(path), "cxx . . $ mongo/Foo#nokind(n1)."])
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "kind:" not in out
+
+
+def test_find_shows_scip_kind_when_present(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    graph = Graph()
+    node = graph.add_node("cxx . . $ mongo/Foo#bar(a1).", display_name="bar")
+    node.file = "src/x.cpp"
+    node.line = 2
+    node.scip_kind = "StaticMethod"
+    path = tmp_path / "graph.db"
+    write_sqlite(graph, path)
+    exit_code = main(["find", "--graph", str(path), "bar"])
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "[StaticMethod]" in out
 
 
 def test_explain_zero_callers_note_on_stock_graph(

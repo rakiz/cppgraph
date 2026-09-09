@@ -187,18 +187,27 @@ item below states a verified fact, not a suspicion, and carries the effort estim
   asset exists, wire the `Linux/aarch64` `download` case in `setup_cmd.py`
   `platform_sources()` (stock binary, no #504). → unblocks a no-toolchain install on Linux ARM.
 - **`SymbolInformation.kind` — confirmed unemitted (`UnspecifiedKind` on 810,919/810,919
-  corpus symbols, 100%).** The builder derives node kind (callable/type/term) from the
-  SCIP descriptor suffix instead. Small effort, moderate value: `SymbolInformationBuilder`
-  (`ScipExtras.h:89`) already funnels every symbol through `finish()`, and each
-  `save*Decl` site holds the `clang::Decl` (`saveEnumDecl:483`, `saveEnumConstantDecl:465`,
-  `saveFieldDecl:510`, `saveFunctionDecl:528`, `saveRecordDecl:685`, `saveVarDecl:931`) —
-  a Decl-kind → `scip::SymbolInformation::Kind` switch (≈40 lines) + `set_kind` in the
-  builder. Moderate not high value because cppgraph's descriptor-suffix derivation is
-  already exact for the callable/type/term split; `kind` would add finer distinctions
-  (enum vs. class, static vs. global, parameter vs. field). If scip-clang filled it, we
-  could drop that derivation and make global/field/enum distinctions exact. → would
-  unblock cleaner node typing; a firmer `global_init_references` (identify globals
-  without suffix parsing).
+  corpus symbols, 100%).** DONE on our side:
+  `scip-clang-patches/kind-on-v0.4.0.patch` adds a syntactic classifier
+  (`classifySymbolKind` in `Indexer.cc`, same style as read-write-access's
+  `classifyAccessRoles`) mapping the `clang::Decl` at each SymbolInformation-creating
+  site to its SCIP kind — Class/Struct/Union/Enum (via `TagDecl::getTagKind`),
+  EnumMember, Field, Function/Method/StaticMethod/PureVirtualMethod/Constructor
+  (FunctionDecl shape), Variable/StaticDataMember (VarDecl), Namespace, TypeAlias,
+  plus Macro on macros and File on the synthetic file symbol — carried through the
+  TU-merge pipeline by a new `SymbolInformationBuilder::kind` field re-emitted in
+  `finish()`. Documented limits (the classifier's own doc comment): syntactic only,
+  no semantic analysis — local variables and parameters get no `SymbolInformation`
+  emitted at all today, so they're unaffected (their classifier arms exist for
+  completeness); using-shadow decls, template type parameters and concepts stay
+  `UnspecifiedKind`; destructors classify as Method (SCIP has no Destructor kind).
+  Moderate not high value, exactly as the audit concluded: cppgraph's descriptor-suffix
+  derivation is already exact for the callable/type/term split, so cppgraph consumes
+  it additively, not as a derivation drop — `symbols.scip_kind` (store schema v5, the
+  same one as `refs.roles`, + the data-driven `has_symbol_kind` meta gate, mirroring
+  `has_access_roles`), surfaced as a `scip_kind` field on `explain_symbol`/`find` and
+  a `has_symbol_kind` capability line in `status`, on the CLI and as MCP tools alike;
+  absent/`UnspecifiedKind` degrades to no field, never a crash. Not yet upstreamed.
 - **`symbol_roles` `ReadAccess` / `WriteAccess` bits — confirmed never set (0 of
   15,176,411 corpus occurrences carry either bit) by the OFFICIAL upstream binary
   (measurement stands, `SCIP_AUDIT.md`).** DONE on our side:

@@ -22,36 +22,56 @@ binary) — hence living here at the repo root instead of inside either one.
   read-modify-write sites); constructor-initializer field references are
   unconditional writes; plain reads stay untagged. Not yet upstreamed. Generated
   with reduced diff context (`-U1`).
+- `kind-on-v0.4.0.patch` — fills SCIP's `SymbolInformation.kind` (field 5),
+  which upstream leaves at `UnspecifiedKind` on 100% of symbols. A syntactic
+  classifier (`classifySymbolKind` in `indexer/Indexer.cc`, same style as
+  `classifyAccessRoles`) maps the `clang::Decl` at each
+  `SymbolInformation`-creating site to its kind: Class/Struct/Union/Enum,
+  EnumMember, Field, Function/Method/StaticMethod/PureVirtualMethod/
+  Constructor, Variable/StaticDataMember, Namespace, TypeAlias — plus Macro
+  and File for the non-`Decl` sites. The kind survives the TU-merge pipeline
+  via a new `SymbolInformationBuilder::kind` field. Symbols which get no
+  `SymbolInformation` emitted today (local variables, parameters) are
+  unaffected. Not yet upstreamed. Generated with reduced diff context
+  (`-U1`).
 
 ## Independence
 
-Each patch applies **standalone** on a clean `v0.4.0` checkout, and all three
-apply cleanly together in **any of the 6 possible orderings** — verified
-empirically (every ordering tried against a fresh `v0.4.0` clone; the
-resulting files are byte-identical regardless of order). None of the three
-requires either of the others.
+Each patch applies **standalone** on a clean `v0.4.0` checkout, and all four
+apply cleanly together in **any of the 24 possible orderings** — verified
+empirically (every ordering tried against a fresh `v0.4.0` checkout; the
+resulting files are byte-identical regardless of order). None of the four
+requires any of the others.
 
 This wasn't true by default: at the standard 3-line diff context, two of
 these patches touch overlapping lines near `TuIndexer::saveReference`
 (`enclosing_range` and `forward-definition` both edit that function), so
 whichever applied second would see stale context from the other and fail.
-Reducing all three to `-U1` context removes that coupling entirely — none of
-the actual *content* changes overlap, only the diff format's context window
-did. This matters for upstreaming: a maintainer reviewing these independently
-(in whatever order they pick, possibly rejecting one) won't hit an artificial
-"depends on patch X" requirement that was never semantically real.
+Reducing all patches to `-U1` context removes that coupling entirely — none
+of the actual *content* changes overlap, only the diff format's context
+window did. The `kind` patch needs the same care from the other direction:
+several of its one-line insertions sit two lines away from a
+`read-write-access` edit (the `saveDefinition(...)` calls inside
+`saveFieldDecl`/`saveTypedefNameDecl`/`saveVarDecl`), which is close enough
+that even `-U1` hunks would merge — there, its insertions are anchored on
+the `scip::SymbolInformation symbolInfo{};` / `getDocComment(...)` lines
+that no other patch touches, keeping the hunks separable. This matters for
+upstreaming: a maintainer reviewing these independently (in whatever order
+they pick, possibly rejecting one) won't hit an artificial "depends on
+patch X" requirement that was never semantically real.
 
 ## Apply order
 
 Our own build applies them in a fixed order — `enclosing_range` →
-`forward-definition` → `read-write-access` — purely for consistency (it's the
-one sequence that's actually end-to-end tested), not because any of them
-requires it:
+`forward-definition` → `read-write-access` → `kind` — purely for consistency
+(it's the one sequence that's actually end-to-end tested), not because any of
+them requires it:
 
 ```sh
 git apply enclosing_range-on-v0.4.0.patch      # order-independent
 git apply forward-definition-on-v0.4.0.patch   # order-independent
 git apply read-write-access-on-v0.4.0.patch    # order-independent
+git apply kind-on-v0.4.0.patch                 # order-independent
 ```
 
 Each is also ready to become an independent upstream PR without regenerating
@@ -66,7 +86,7 @@ added/changed) are two independent numbers — see `versions.json`'s
 
 ## Consumers
 
-- `docker/build-scip-clang-patched-linux/Dockerfile` — copies all three patches
+- `docker/build-scip-clang-patched-linux/Dockerfile` — copies all four patches
   into the Docker build context and applies them in order.
 - `scripts/build-scip-clang-patched-macos.sh` — applies them directly to a
   local clone, in the same order.
