@@ -152,7 +152,7 @@ shows what one global's initializer touches.
 <!-- cppgraph-gen:references api-surface global_init_references -->
 | Command | Purpose (from `--help`) | Arguments |
 |---|---|---|
-| `references` | exact use sites of a symbol (unless the graph was built --no-references) | --graph, <symbol>, --root, --context N, --limit, --include-path PREFIX, --exclude-path PREFIX |
+| `references` | exact use sites of a symbol (unless the graph was built --no-references) | --graph, <symbol>, --root, --context N, --limit, --access, --include-path PREFIX, --exclude-path PREFIX |
 | `api-surface` | the actually-used external surface of a module: definitions inside a prefix called/referenced from outside it | --graph, <module_prefix>, --limit, --exclude-tests/--no-exclude-tests, --full-symbols |
 | `global_init_references` | globals referenced by one global's initializer region (the fact behind the static-init-order question, not a verdict); needs a #504-built graph with --attributed-refs | --graph, <symbol>, --limit, --full-symbols |
 <!-- /cppgraph-gen -->

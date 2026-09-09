@@ -52,7 +52,12 @@ auditing the schema are all off to the side: **visibility** (public/protected/
 private — no SCIP field at all; the format models privacy as *local symbols*, a
 name-scope notion that doesn't map C++'s compile-time access rule), **`kind`**
 (emitted `UnspecifiedKind`, but derivable from the descriptor suffix, which we
-already do), and signature/read-write-access (unpopulated, nice-to-have).
+already do), and signature (unpopulated, nice-to-have). `read-write-access` was
+in this gap list too: still unpopulated by the official upstream binary, but set
+by our `read-write-access-on-v0.4.0` scip-clang patch and consumed since —
+`Reference.roles` tags each use site `(write)`/`(read+write)` and powers the
+`--access {read,write}` filter on `references`/`find_references` (absent on a
+stock binary: silence, never a guess).
 `documentation` was in this gap list until the audit measured it: 99.99%
 non-empty, ~10% genuine doc-comment text once scip-clang's placeholder and
 auto-generated namespace/File text are filtered — consumed by `explain`
@@ -116,6 +121,14 @@ is this type/symbol used?" — a dependency the call graph can't express (e.g.
 pipeline subsystem). Measured cost is modest — on a large index: 5.3M deduped
 locations, store 323 MB → 468 MB (+45%), build ~40 s vs ~23 s — so it's on by
 default; `--no-references` gives the leaner store when the index isn't wanted.
+
+Each location can also carry the occurrence's `ReadAccess`/`WriteAccess` role
+bits (`Reference.roles`, store column `refs.roles`, gated by the
+`has_access_roles` meta flag) — set only by a scip-clang binary carrying the
+`read-write-access-on-v0.4.0` patch; a stock binary sets neither bit, and the
+query stays silent rather than guess. Where present, the `references` query
+(CLI + MCP) tags each use site `(write)`/`(read+write)` and offers an
+`--access {read,write}` filter ("who *writes* this?" vs plain reads).
 
 When scip-clang emits `enclosing_range` (a #504-built binary), each reference can
 additionally be *attributed* to the definition that contains it — exact via
@@ -238,6 +251,20 @@ fallback (`src/cppgraph/builder.py`):
    document has no interval data at all. The "keep the over-capture" call above
    stands only for stock graphs, which have no such signal to detect the case.
 
+   **Update: a patched (non-#504) graph now also has the signal.**
+   `scip-clang-patches/forward-definition-on-v0.4.0.patch` tags the bodyless
+   declaration occurrence itself with `ForwardDefinition` — an existing SCIP
+   role, never previously set — so a graph built from a patched binary (even
+   without #504's `enclosing_range`) excludes it via the same
+   `DEFINITION | FORWARD_DEFINITION` filter `build_graph` already applied for
+   #504 graphs, before either the call-site or reference-site heuristic runs.
+   Verified end-to-end: on an identical fixture, a stock official binary
+   fabricates the phantom caller described above; our patched binary doesn't.
+   "No such signal" above describes the OFFICIAL upstream binary specifically
+   (still accurate, still the corpus this file's measurements were taken
+   against) — not a patched one. Not yet upstreamed; see `TODO.md`'s scip-clang
+   section.
+
     This asymmetry is why `no_incoming_calls` (definitions with zero incoming
     `calls` edges) refuses to answer on a stock graph: a phantom caller from a
     mis-attributed declaration site turns a real 0 into a false 1 — exactly the
@@ -311,7 +338,7 @@ when index→build run back-to-back. Non-git projects simply record no commit
 (the tool stays general, `git`-optional). This commit is the **anchor for
 incremental updates** — see below.
 
-The `meta` table also carries a **`schema_version`** (currently 4): the on-disk
+The `meta` table also carries a **`schema_version`** (currently 5): the on-disk
 *format* version, distinct from `cppgraph_version` (the code that wrote it).
 It's the enabler for format migrations — a future schema change bumps it, and
 migration code can branch on the stored value. `GraphStore` refuses to open a

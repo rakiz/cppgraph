@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Build scip-clang (v0.4.0 + our patches from scip-clang-patches/: enclosing_range
-# / PR #504, plus the ForwardDefinition bit fix) NATIVELY on macOS, for
+# / PR #504, the ForwardDefinition bit fix, and the ReadAccess/WriteAccess
+# classifier) NATIVELY on macOS, for
 # THIS Mac's CPU architecture. Mirrors docker/build-scip-clang-patched-linux/build.sh's role
 # but skips Docker entirely — a Linux container on a Mac can only ever produce
 # a Linux binary, so getting a native macOS binary means building on the host.
@@ -123,9 +124,9 @@ else
     || die "patch applied but grep for 'enclosingRange' still failed — patch may be a no-op"
 fi
 
-# Apply the ForwardDefinition bit fix (on top of #504, in that order — see
-# scip-clang-patches/README.md; the two patches touch the same function and
-# do not apply cleanly in the reverse order).
+# Apply the ForwardDefinition bit fix (applied here after enclosing_range
+# purely for build consistency — all three patches are actually order-independent,
+# see scip-clang-patches/README.md).
 FWD_PATCH="$(pwd)/scip-clang-patches/forward-definition-on-v0.4.0.patch"
 [ -f "$FWD_PATCH" ] || die "patch not found at $FWD_PATCH"
 if grep -q 'is_declaration_site' "$BUILD_ROOT/proto/fwd_decls.proto" 2>/dev/null; then
@@ -135,6 +136,22 @@ else
   git -C "$BUILD_ROOT" apply --verbose "$FWD_PATCH"
   grep -q 'is_declaration_site' "$BUILD_ROOT/proto/fwd_decls.proto" \
     || die "patch applied but grep for 'is_declaration_site' still failed — patch may be a no-op"
+fi
+
+# Apply the ReadAccess/WriteAccess syntactic classifier (applied here after
+# the two patches above purely for build consistency — all three patches are
+# actually order-independent, see scip-clang-patches/README.md). Tags
+# symbol_roles with WriteAccess (ReadAccess alongside it on read-modify-write
+# sites) based on the syntactic AST parent of the reference site.
+RW_PATCH="$(pwd)/scip-clang-patches/read-write-access-on-v0.4.0.patch"
+[ -f "$RW_PATCH" ] || die "patch not found at $RW_PATCH"
+if grep -q 'classifyAccessRoles' "$BUILD_ROOT/indexer/Indexer.cc" 2>/dev/null; then
+  echo "  already patched (classifyAccessRoles present) — skipping git apply"
+else
+  echo "==> Applying ReadAccess/WriteAccess classifier patch"
+  git -C "$BUILD_ROOT" apply --verbose "$RW_PATCH"
+  grep -q 'classifyAccessRoles' "$BUILD_ROOT/indexer/Indexer.cc" \
+    || die "patch applied but grep for 'classifyAccessRoles' still failed — patch may be a no-op"
 fi
 
 # scip-clang v0.4.0 hardcodes a full-Xcode.app SDK path in setup_llvm.bzl, which

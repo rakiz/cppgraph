@@ -89,7 +89,7 @@ too — the GitHub API resolves either).
 
 | source | what it does | when |
 |---|---|---|
-| `download-patched` | fetch this project's prebuilt patched (`enclosing_range` + ForwardDefinition) binary from its own GitHub releases (~1 min, checksum-verified) | macOS arm64 + Linux aarch64 (today) |
+| `download-patched` | fetch this project's prebuilt patched (`enclosing_range` + ForwardDefinition + ReadAccess/WriteAccess) binary from its own GitHub releases (~1 min, checksum-verified) | macOS arm64 + Linux aarch64 (today) |
 | `download` | fetch the upstream prebuilt release binary (stock, no PR #504) | macOS arm64, Linux x86_64 |
 | `build` | compile it locally with `enclosing_range`/PR #504 (`docker/build-scip-clang-patched-linux/`, ~25–60 min, Docker, **Linux host only** — produces a Linux binary) | #504 on Linux x86_64 (no prebuilt there yet), or a host preferring a local compile |
 | `emulate` | install no host binary; index through an x86 container | Intel Mac, Windows, or skipping the native options |
@@ -150,11 +150,11 @@ Use the plain `scip-clang-x86_64-linux`. The `-dev-` asset is a debug build
 (assertions on, slower) — you only want it if you're diagnosing a scip-clang
 crash, not for normal indexing.
 
-The **patched** (`enclosing_range` + ForwardDefinition) binary is published on
+The **patched** (`enclosing_range` + ForwardDefinition + ReadAccess/WriteAccess) binary is published on
 *this project's* GitHub releases instead of upstream's — different tag, different
 asset names (see `scripts/publish-scip-clang-patched.sh`): tag
 `scip-clang-patched-v<scip-clang version>-p<patchset>` (e.g.
-`scip-clang-patched-v0.4.0-p2`), asset `scip-clang-patched-<platform>` plus a
+`scip-clang-patched-v0.4.0-p3`), asset `scip-clang-patched-<platform>` plus a
 `.sha256` sibling, for the platforms published so far:
 
 | Platform     | patched asset name                  |
@@ -164,7 +164,7 @@ asset names (see `scripts/publish-scip-clang-patched.sh`): tag
 
 ```bash
 curl -fL --retry 3 -o "$BIN_DIR/scip-clang" \
-  https://github.com/rakiz/cppgraph/releases/download/scip-clang-patched-v0.4.0-p2/scip-clang-patched-arm64-darwin
+  https://github.com/rakiz/cppgraph/releases/download/scip-clang-patched-v0.4.0-p3/scip-clang-patched-arm64-darwin
 chmod +x "$BIN_DIR/scip-clang"   # verify against the matching .sha256 asset
 ```
 

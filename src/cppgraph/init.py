@@ -345,7 +345,7 @@ def onboarding_plan(
                     "'where is this type used?' answers with the functions that use it, not "
                     "just the files. Larger store (~+23%)."
                     if supports_attribution
-                    else "Unavailable: needs a #504-built scip-clang; the local binary is "
+                    else "Unavailable: needs a patched scip-clang build; the local binary is "
                     "stock or absent."
                 ),
             },

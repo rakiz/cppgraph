@@ -55,6 +55,10 @@ class Reference:
     file: str
     line: int | None = None
     enclosing_symbol: str | None = None
+    # ReadAccess/WriteAccess bits from `Occurrence.symbol_roles` (masked to just
+    # those two) — 0 when the graph doesn't carry this data (stock binary, or a
+    # store built before this column existed). 0x4 = write, 0x8 = read.
+    roles: int = 0
 
 
 @dataclass
@@ -89,6 +93,7 @@ class Graph:
         file: str,
         line: int | None = None,
         enclosing_symbol: str | None = None,
+        roles: int = 0,
     ) -> None:
         """Record a use of `symbol` at `file:line`, deduped by (symbol, file,
         line) — a header included by N TUs surfaces the same occurrence N times.
@@ -96,7 +101,8 @@ class Graph:
         The referenced symbol becomes a node so it is interned and findable even
         if it is defined outside the indexed set (e.g. a `std::` type used here).
         `enclosing_symbol` (when known, from an enclosing_range-emitting binary)
-        is the definition that contains the use site.
+        is the definition that contains the use site. `roles` carries the
+        ReadAccess/WriteAccess bits (0 when the binary doesn't tag them).
         """
         self.add_node(symbol)
         key = (symbol, file, line)
@@ -104,7 +110,9 @@ class Graph:
             return
         self._ref_keys.add(key)
         self.references.append(
-            Reference(symbol=symbol, file=file, line=line, enclosing_symbol=enclosing_symbol)
+            Reference(
+                symbol=symbol, file=file, line=line, enclosing_symbol=enclosing_symbol, roles=roles
+            )
         )
 
     def references_of(self, symbol: str) -> list[Reference]:

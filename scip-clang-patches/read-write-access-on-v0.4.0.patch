@@ -1,0 +1,452 @@
+# ReadAccess/WriteAccess syntactic classifier — tags scip::SymbolRole
+# WriteAccess on reference sites whose syntactic AST parent is an
+# assignment, compound assignment, ++/--, or their overloaded-operator
+# forms (with ReadAccess set alongside WriteAccess when the site both
+# reads and writes); field references in constructor initializers are
+# unconditionally writes. Plain reads stay untagged (a non-definition
+# reference without WriteAccess is already implicitly a read).
+# Syntactic classification only — no dataflow; see the classifier's own
+# doc comment in indexer/Indexer.cc (`classifyAccessRoles`) for scope
+# and limits. Fulfills the "TODO: Add read-write access" note upstream
+# left in saveDeclRefExpr. NOT (yet) an upstream PR.
+#
+# Applicability: generated with minimal diff context (`-U1`) so it applies
+# cleanly regardless of position relative to the other two patches in this
+# directory (or completely alone) — verified empirically: all 6 orderings of
+# the three patches applied to a clean v0.4.0 checkout produce byte-identical
+# final files. See scip-clang-patches/README.md's "Independence" section.
+diff --git a/indexer/Indexer.cc b/indexer/Indexer.cc
+index 3155789..3064a7b 100644
+--- a/indexer/Indexer.cc
++++ b/indexer/Indexer.cc
+@@ -16,2 +16,3 @@
+ #include "clang/AST/CXXInheritance.h"
++#include "clang/AST/ParentMapContext.h"
+ #include "clang/AST/Comment.h"
+@@ -354,2 +355,112 @@ bool RefersToForwardDecl::check(const clang::Decl &decl) {
+ 
++/// Classifies how a reference site accesses the symbol it denotes, as
++/// SCIP SymbolRole bits (0 = unclassified), based on the syntactic
++/// parent of the expression alone.
++///
++/// Scope and limits (syntactic classification only — no dataflow):
++/// - Plain reads are left untagged: a non-definition reference without
++///   WriteAccess is already implicitly a read. ReadAccess is only set
++///   alongside WriteAccess, where the site both reads and writes the
++///   symbol (compound assignment, ++/--).
++/// - `f(x)` where x is passed by reference to an out-param is not
++///   detected as a write.
++/// - `a.b() = x` is not classified: the classifier does not climb
++///   through calls, since invoking b is not a write to b (and the
++///   object the returned reference aliases is unknowable here).
++/// - `&x` is neither a read nor a write of x: what happens at the
++///   receiving end is unknowable without dataflow.
++/// - `*p = v` correctly leaves p untagged: p itself is only read; the
++///   pointee is written.
++/// - References resolving to a decl-only forward declaration are
++///   routed by saveReference to the ForwardDeclMap pipeline before
++///   role bits could apply; write tagging is not plumbed through that
++///   separate proto (roles are set independently in
++///   ForwardDeclOccurrence::addTo).
++///
++/// When multiple AST parents exist (e.g. around templates), the first
++/// parent is used.
++static int32_t classifyAccessRoles(const clang::Expr &site,
++                                   clang::ASTContext &astContext) {
++  const clang::Expr *current = &site;
++  const clang::Stmt *parent = nullptr;
++  while (true) {
++    auto parents = astContext.getParentMapContext().getParents(*current);
++    if (parents.empty()) {
++      return 0;
++    }
++    parent = parents[0].get<clang::Stmt>();
++    if (!parent) {
++      return 0;
++    }
++    if (auto *cast = llvm::dyn_cast<clang::ImplicitCastExpr>(parent)) {
++      current = cast;
++      continue;
++    }
++    if (auto *paren = llvm::dyn_cast<clang::ParenExpr>(parent)) {
++      current = paren;
++      continue;
++    }
++    break;
++  }
++  const clang::Expr *candidate = nullptr;
++  bool isWrite = false;
++  bool isRead = false;
++  if (auto *binOp = llvm::dyn_cast<clang::BinaryOperator>(parent)) {
++    if (!binOp->isAssignmentOp()) {
++      return 0;
++    }
++    candidate = binOp->getLHS();
++    isWrite = true;
++    isRead = binOp->isCompoundAssignmentOp();
++  } else if (auto *unOp = llvm::dyn_cast<clang::UnaryOperator>(parent)) {
++    // Note: UO_AddrOf falls through to the identity check below and
++    // stays untagged (see limits above).
++    if (!unOp->isIncrementDecrementOp()) {
++      return 0;
++    }
++    candidate = unOp->getSubExpr();
++    isWrite = true;
++    isRead = true;
++  } else if (auto *call =
++                 llvm::dyn_cast<clang::CXXOperatorCallExpr>(parent)) {
++    // Overloaded operators: `s = t`, `s += t`, `it++` — argument 0 is
++    // the object being accessed.
++    if (call->getNumArgs() == 0) {
++      return 0;
++    }
++    candidate = call->getArg(0);
++    switch (call->getOperator()) {
++      case clang::OO_Equal:
++        isWrite = true;
++        break;
++      case clang::OO_PlusEqual:
++      case clang::OO_MinusEqual:
++      case clang::OO_StarEqual:
++      case clang::OO_SlashEqual:
++      case clang::OO_PercentEqual:
++      case clang::OO_AmpEqual:
++      case clang::OO_CaretEqual:
++      case clang::OO_PipeEqual:
++      case clang::OO_LessLessEqual:
++      case clang::OO_GreaterGreaterEqual:
++      case clang::OO_PlusPlus:
++      case clang::OO_MinusMinus:
++        isWrite = true;
++        isRead = true;
++        break;
++      default:
++        return 0;
++    }
++  } else {
++    return 0;
++  }
++  if (candidate->IgnoreParenImpCasts() != &site) {
++    return 0;
++  }
++  if (isRead) {
++    return scip::SymbolRole::WriteAccess | scip::SymbolRole::ReadAccess;
++  }
++  return scip::SymbolRole::WriteAccess;
++}
++
+ void ForwardDeclMap::insert(SymbolNameRef symbol, DocComment &&docComment,
+@@ -525,3 +636,7 @@ void TuIndexer::saveFieldReference(const clang::FieldDecl &fieldDecl,
+   if (auto optSymbol = this->symbolFormatter.getFieldSymbol(fieldDecl)) {
+-    this->saveReference(*optSymbol, loc);
++    // A constructor initializer unconditionally writes the field, and
++    // this is the only path field references in ctor initializers take
++    // (there is no MemberExpr to classify).
++    this->saveReference(*optSymbol, loc, /*maybeFwdDecl=*/nullptr,
++                        scip::SymbolRole::WriteAccess);
+   }
+@@ -1021,4 +1136,4 @@ void TuIndexer::saveDeclRefExpr(const clang::DeclRefExpr &declRefExpr) {
+   // ^ getExprLoc()
+-  this->saveReference(optSymbol.value(), declRefExpr.getLocation(), foundDecl);
+-  // ^ TODO: Add read-write access to the symbol role here
++  this->saveReference(optSymbol.value(), declRefExpr.getLocation(), foundDecl,
++                      classifyAccessRoles(declRefExpr, this->astContext));
+ }
+@@ -1041,3 +1156,4 @@ void TuIndexer::saveMemberExpr(const clang::MemberExpr &memberExpr) {
+   }
+-  this->saveReference(optSymbol.value(), memberExpr.getMemberLoc(), namedDecl);
++  this->saveReference(optSymbol.value(), memberExpr.getMemberLoc(), namedDecl,
++                      classifyAccessRoles(memberExpr, this->astContext));
+ }
+diff --git a/test/index/cuda/cuda_stub.snapshot.h b/test/index/cuda/cuda_stub.snapshot.h
+index 98d5844..075bc86 100644
+--- a/test/index/cuda/cuda_stub.snapshot.h
++++ b/test/index/cuda/cuda_stub.snapshot.h
+@@ -39,7 +39,7 @@
+ //                                                                ^ definition local 2
+-//                                                                         ^ reference [..] dim3#x.
++//                                                                         ^ reference (write) [..] dim3#x.
+ //                                                                           ^ reference local 0
+-//                                                                               ^ reference [..] dim3#y.
++//                                                                               ^ reference (write) [..] dim3#y.
+ //                                                                                 ^ reference local 1
+-//                                                                                     ^ reference [..] dim3#z.
++//                                                                                     ^ reference (write) [..] dim3#z.
+ //                                                                                       ^ reference local 2
+diff --git a/test/index/functions/enable_if_templates.snapshot.cc b/test/index/functions/enable_if_templates.snapshot.cc
+index 254e526..9613b35 100644
+--- a/test/index/functions/enable_if_templates.snapshot.cc
++++ b/test/index/functions/enable_if_templates.snapshot.cc
+@@ -96,3 +96,3 @@
+ //         ^^^ definition local 10
+-//                ^ reference [..] Ptr#p.
++//                ^ reference (write) [..] Ptr#p.
+ //                  ^^^ reference local 10
+@@ -121,3 +121,3 @@
+ //  ^^^^^^^^^^ definition [..] ThreadPool#ThreadPool(49f6e7a06ebc5aa8).
+-//                 ^^^^^^^ reference [..] ThreadPool#mThread.
++//                 ^^^^^^^ reference (write) [..] ThreadPool#mThread.
+ //                 ^^^^^^^ reference [..] Ptr#Ptr(ebd0a1552f8ce24f).
+diff --git a/test/index/functions/operators.snapshot.cc b/test/index/functions/operators.snapshot.cc
+index 9d9a8cf..e55579f 100644
+--- a/test/index/functions/operators.snapshot.cc
++++ b/test/index/functions/operators.snapshot.cc
+@@ -108,3 +108,3 @@
+ //  ^ reference local 10
+-//    ^ reference [..] IntPair#x.
++//    ^ reference (read+write) [..] IntPair#x.
+ //     ^^ reference [..] operator++(be31e3af2b2ba0e).
+diff --git a/test/index/vars/access.cc b/test/index/vars/access.cc
+new file mode 100644
+index 0000000..38a33b4
+--- /dev/null
++++ b/test/index/vars/access.cc
+@@ -0,0 +1,68 @@
++// extra-args: -std=c++17
++
++int counter = 0;
++
++void consume(int &out);
++
++int readGlobal() {
++  return counter; // plain read: untagged
++}
++
++void writeGlobal() {
++  counter = 5;
++}
++
++void compoundWrite() {
++  counter += 1;
++}
++
++void incrementGlobal() {
++  counter++;
++  ++counter;
++  counter--; // cover decrement too
++}
++
++void addressOf() {
++  void *p = &counter; // address-of: untagged
++}
++
++void derefWrite() {
++  *(&counter) = 1; // reads counter, writes the pointee: untagged
++}
++
++void outParam() {
++  consume(counter); // by-reference out-param: untagged (no dataflow)
++}
++
++void chainedAssign() {
++  int a;
++  int b;
++  a = b = 3;
++}
++
++struct Point {
++  int x;
++  int y;
++};
++
++int memberRead(Point &p) {
++  return p.x; // plain member read: untagged
++}
++
++void memberWrite(Point &p) {
++  p.x = 5;
++  (p.y) += 2; // parenthesized compound assignment
++}
++
++struct Accumulator {
++  int n;
++  Accumulator() : n(0) {}          // ctor initializer: write to n
++  explicit Accumulator(int init) : n(init) {}
++  void add(int v) { n += v; }      // read+write to n
++  Accumulator &operator=(const Accumulator &) = default;
++};
++
++void overloadAssign(Accumulator &a, const Accumulator &b) {
++  a = b;    // overloaded operator=: write
++  a.n += 1; // builtin compound assignment on field: read+write
++}
+diff --git a/test/index/vars/access.snapshot.cc b/test/index/vars/access.snapshot.cc
+new file mode 100644
+index 0000000..e7ac7b6
+--- /dev/null
++++ b/test/index/vars/access.snapshot.cc
+@@ -0,0 +1,135 @@
++  // extra-args: -std=c++17
++//^^^^^^^^^^^^^^^^^^^^^^^^^ definition [..] `<file>/access.cc`/
++  
++  int counter = 0;
++//    ^^^^^^^ definition [..] counter.
++  
++  void consume(int &out);
++//     ^^^^^^^ reference [..] consume(2afed6f74e8a6d90).
++//                  ^^^ definition local 0
++  
++  int readGlobal() {
++//    ^^^^^^^^^^ definition [..] readGlobal(b126dc7c1de90089).
++    return counter; // plain read: untagged
++//         ^^^^^^^ reference [..] counter.
++  }
++  
++  void writeGlobal() {
++//     ^^^^^^^^^^^ definition [..] writeGlobal(49f6e7a06ebc5aa8).
++    counter = 5;
++//  ^^^^^^^ reference (write) [..] counter.
++  }
++  
++  void compoundWrite() {
++//     ^^^^^^^^^^^^^ definition [..] compoundWrite(49f6e7a06ebc5aa8).
++    counter += 1;
++//  ^^^^^^^ reference (read+write) [..] counter.
++  }
++  
++  void incrementGlobal() {
++//     ^^^^^^^^^^^^^^^ definition [..] incrementGlobal(49f6e7a06ebc5aa8).
++    counter++;
++//  ^^^^^^^ reference (read+write) [..] counter.
++    ++counter;
++//    ^^^^^^^ reference (read+write) [..] counter.
++    counter--; // cover decrement too
++//  ^^^^^^^ reference (read+write) [..] counter.
++  }
++  
++  void addressOf() {
++//     ^^^^^^^^^ definition [..] addressOf(49f6e7a06ebc5aa8).
++    void *p = &counter; // address-of: untagged
++//        ^ definition local 1
++//             ^^^^^^^ reference [..] counter.
++  }
++  
++  void derefWrite() {
++//     ^^^^^^^^^^ definition [..] derefWrite(49f6e7a06ebc5aa8).
++    *(&counter) = 1; // reads counter, writes the pointee: untagged
++//     ^^^^^^^ reference [..] counter.
++  }
++  
++  void outParam() {
++//     ^^^^^^^^ definition [..] outParam(49f6e7a06ebc5aa8).
++    consume(counter); // by-reference out-param: untagged (no dataflow)
++//  ^^^^^^^ reference [..] consume(2afed6f74e8a6d90).
++//          ^^^^^^^ reference [..] counter.
++  }
++  
++  void chainedAssign() {
++//     ^^^^^^^^^^^^^ definition [..] chainedAssign(49f6e7a06ebc5aa8).
++    int a;
++//      ^ definition local 2
++    int b;
++//      ^ definition local 3
++    a = b = 3;
++//  ^ reference (write) local 2
++//      ^ reference (write) local 3
++  }
++  
++  struct Point {
++//       ^^^^^ definition [..] Point#
++    int x;
++//      ^ definition [..] Point#x.
++    int y;
++//      ^ definition [..] Point#y.
++  };
++  
++  int memberRead(Point &p) {
++//    ^^^^^^^^^^ definition [..] memberRead(fb6be3f0c7113c06).
++//               ^^^^^ reference [..] Point#
++//                      ^ definition local 4
++    return p.x; // plain member read: untagged
++//         ^ reference local 4
++//           ^ reference [..] Point#x.
++  }
++  
++  void memberWrite(Point &p) {
++//     ^^^^^^^^^^^ definition [..] memberWrite(d79977421830e037).
++//                 ^^^^^ reference [..] Point#
++//                        ^ definition local 5
++    p.x = 5;
++//  ^ reference local 5
++//    ^ reference (write) [..] Point#x.
++    (p.y) += 2; // parenthesized compound assignment
++//   ^ reference local 5
++//     ^ reference (read+write) [..] Point#y.
++  }
++  
++  struct Accumulator {
++//       ^^^^^^^^^^^ definition [..] Accumulator#
++    int n;
++//      ^ definition [..] Accumulator#n.
++    Accumulator() : n(0) {}          // ctor initializer: write to n
++//  ^^^^^^^^^^^ definition [..] Accumulator#Accumulator(49f6e7a06ebc5aa8).
++//                  ^ reference (write) [..] Accumulator#n.
++    explicit Accumulator(int init) : n(init) {}
++//           ^^^^^^^^^^^ definition [..] Accumulator#Accumulator(d4f767463ce0a6b3).
++//                           ^^^^ definition local 6
++//                                   ^ reference (write) [..] Accumulator#n.
++//                                     ^^^^ reference local 6
++    void add(int v) { n += v; }      // read+write to n
++//       ^^^ definition [..] Accumulator#add(d4f767463ce0a6b3).
++//               ^ definition local 7
++//                    ^ reference (read+write) [..] Accumulator#n.
++//                         ^ reference local 7
++    Accumulator &operator=(const Accumulator &) = default;
++//  ^^^^^^^^^^^ reference [..] Accumulator#
++//               ^^^^^^^^ definition [..] Accumulator#`operator=`(dd574085b89d2a56).
++//                               ^^^^^^^^^^^ reference [..] Accumulator#
++  };
++  
++  void overloadAssign(Accumulator &a, const Accumulator &b) {
++//     ^^^^^^^^^^^^^^ definition [..] overloadAssign(2d0923842e51839b).
++//                    ^^^^^^^^^^^ reference [..] Accumulator#
++//                                 ^ definition local 8
++//                                          ^^^^^^^^^^^ reference [..] Accumulator#
++//                                                       ^ definition local 9
++    a = b;    // overloaded operator=: write
++//  ^ reference (write) local 8
++//    ^ reference [..] Accumulator#`operator=`(dd574085b89d2a56).
++//      ^ reference local 9
++    a.n += 1; // builtin compound assignment on field: read+write
++//  ^ reference local 8
++//    ^ reference (read+write) [..] Accumulator#n.
++  }
+diff --git a/test/index/vars/members.snapshot.cc b/test/index/vars/members.snapshot.cc
+index 1f3aab9..a8de0da 100644
+--- a/test/index/vars/members.snapshot.cc
++++ b/test/index/vars/members.snapshot.cc
+@@ -13,6 +13,6 @@
+ //  ^^ definition [..] S0#S0(49f6e7a06ebc5aa8).
+-//        ^ reference [..] S0#x.
++//        ^ reference (write) [..] S0#x.
+ //          ^ reference [..] S0#a.
+       x += y;
+-//    ^ reference [..] S0#x.
++//    ^ reference (read+write) [..] S0#x.
+ //         ^ reference [..] S0#y.
+@@ -34,3 +34,3 @@
+       x = y;
+-//    ^ reference [..] S0#x.
++//    ^ reference (write) [..] S0#x.
+ //        ^ reference [..] S0#y.
+@@ -54,5 +54,5 @@
+ //  ^^ definition [..] S2#S2(49f6e7a06ebc5aa8).
+-//        ^ reference [..] S2#b.
++//        ^ reference (write) [..] S2#b.
+       a = 10; // Indirect field access
+-//    ^ reference [..] S2#$anonymous_type_0#a.
++//    ^ reference (write) [..] S2#$anonymous_type_0#a.
+     }
+diff --git a/test/index/vars/vars.snapshot.cc b/test/index/vars/vars.snapshot.cc
+index 01ad5ad..c3dd210 100644
+--- a/test/index/vars/vars.snapshot.cc
++++ b/test/index/vars/vars.snapshot.cc
+@@ -73,6 +73,6 @@
+       y += z;
+-//    ^ reference local 10
++//    ^ reference (read+write) local 10
+ //         ^ reference local 12
+       x += y;
+-//    ^ reference local 9
++//    ^ reference (read+write) local 9
+ //         ^ reference local 10

@@ -1674,6 +1674,43 @@ def test_attributed_references_round_trip(tmp_path: Path) -> None:
     assert store.meta().get("attributed_ref_count") == "1"
 
 
+WRITE_ACCESS = scip_pb2.SymbolRole.WriteAccess
+READ_ACCESS = scip_pb2.SymbolRole.ReadAccess
+
+
+def test_reference_roles_round_trip(tmp_path: Path) -> None:
+    graph = Graph()
+    graph.add_reference(TYPE, "a.cpp", 11, roles=WRITE_ACCESS)
+    graph.add_reference(TYPE, "a.cpp", 12, roles=READ_ACCESS | WRITE_ACCESS)
+    graph.add_reference(TYPE, "b.cpp", 7)  # plain read / no data
+    store = _store(tmp_path, graph)
+    refs = store.references_of(TYPE)
+    assert [(r.line, r.roles) for r in refs] == [
+        (11, WRITE_ACCESS),
+        (12, READ_ACCESS | WRITE_ACCESS),
+        (7, 0),
+    ]
+    assert store.meta().get("has_access_roles") == "true"
+
+
+def test_references_of_on_a_pre_roles_store_degrades_to_no_roles(tmp_path: Path) -> None:
+    """An older (schema v4) store has no `refs.roles` column; reading it with a
+    newer cppgraph must degrade to roles=0 (no data), not crash."""
+    graph = Graph()
+    graph.add_reference(TYPE, "a.cpp", 11)
+    db = tmp_path / "g.db"
+    write_sqlite(graph, db)
+    con = sqlite3.connect(db)
+    con.execute("ALTER TABLE refs DROP COLUMN roles")
+    con.execute("UPDATE meta SET value = '4' WHERE key = 'schema_version'")
+    con.commit()
+    con.close()
+
+    store = GraphStore(db)
+    refs = store.references_of(TYPE)
+    assert [(r.file, r.line, r.roles) for r in refs] == [("a.cpp", 11, 0)]
+
+
 def test_enrich_references_backfills_from_scip(tmp_path: Path) -> None:
     """A store built without attribution is upgraded in place from a #504 .scip:
     the enclosing ranges attribute the already-stored references, no rebuild."""
@@ -1704,6 +1741,54 @@ def test_enrich_references_backfills_from_scip(tmp_path: Path) -> None:
     store = GraphStore(db)
     assert [r.enclosing_symbol for r in store.references_of(typ)] == [user]
     assert store.meta().get("has_attributed_refs") == "true"
+
+
+def test_enrich_references_backfills_access_roles(tmp_path: Path) -> None:
+    """Re-running enrich-refs with a read-write-access-patch .scip backfills the
+    role bits alongside attribution — the no-rebuild path must carry them too."""
+    typ = "cxx . . $ pkg/Widget#"
+    doc = scip_pb2.Document(relative_path="render.cpp")
+    use = scip_pb2.Occurrence(symbol=typ, symbol_roles=scip_pb2.SymbolRole.WriteAccess)
+    use.range.extend([8, 0, 6])
+    doc.occurrences.append(use)
+    index = scip_pb2.Index(documents=[doc])
+
+    # a store built before role data existed (pre-patch binary or old cppgraph)
+    graph = Graph()
+    graph.add_reference(typ, "render.cpp", 8)
+    db = tmp_path / "g.db"
+    write_sqlite(graph, db)
+
+    from cppgraph.store import enrich_references
+
+    attributed, total = enrich_references(db, index)
+    assert (attributed, total) == (0, 1)  # no enclosing ranges in this .scip
+
+    store = GraphStore(db)
+    assert [r.roles for r in store.references_of(typ)] == [scip_pb2.SymbolRole.WriteAccess]
+    assert store.meta().get("has_access_roles") == "true"
+
+
+def test_enrich_references_with_a_roleless_scip_fabricates_nothing(tmp_path: Path) -> None:
+    """A stock .scip carries no role bits: the enrich writes none, and the flag
+    is stamped 'false' — degrading cleanly, never inventing writes."""
+    doc = scip_pb2.Document(relative_path="render.cpp")
+    use = doc.occurrences.add(symbol=TYPE)
+    use.range.extend([8, 0, 6])
+    index = scip_pb2.Index(documents=[doc])
+
+    graph = Graph()
+    graph.add_reference(TYPE, "render.cpp", 8)
+    db = tmp_path / "g.db"
+    write_sqlite(graph, db)
+
+    from cppgraph.store import enrich_references
+
+    enrich_references(db, index)
+
+    store = GraphStore(db)
+    assert [r.roles for r in store.references_of(TYPE)] == [0]
+    assert store.meta().get("has_access_roles") == "false"
 
 
 def test_enrich_references_migrates_a_v3_store_documentation_column(tmp_path: Path) -> None:
@@ -1771,6 +1856,45 @@ def test_update_replaces_references_for_changed_file(tmp_path: Path) -> None:
     refs = store.references_of(TYPE)
     # a.cpp:5 replaced by a.cpp:21; b.cpp:9 untouched
     assert sorted((r.file, r.line) for r in refs) == [("a.cpp", 21), ("b.cpp", 9)]
+
+
+def test_update_upgrades_a_pre_roles_store_adding_roles(tmp_path: Path) -> None:
+    """An older (schema v4) store has no `refs.roles` column; an incremental
+    update whose partial carries role data must add it on demand (the same
+    ALTER pattern the v2 end_line migration uses), write the re-inserted refs'
+    roles, and flip `has_access_roles` — without corrupting untouched rows."""
+    untouched = "cxx . . $ mongo/Other#"
+    graph = Graph()
+    graph.add_reference(untouched, "b.cpp", 9)
+    db = tmp_path / "g.db"
+    write_sqlite(graph, db)
+    con = sqlite3.connect(db)
+    con.execute("ALTER TABLE refs DROP COLUMN roles")
+    con.execute("UPDATE meta SET value = '4' WHERE key = 'schema_version'")
+    con.commit()
+    con.close()
+
+    partial = scip_pb2.Index()
+    doc = partial.documents.add(relative_path="a.cpp")
+    write = doc.occurrences.add(symbol=TYPE, symbol_roles=WRITE_ACCESS)
+    write.range.extend([11, 0, 5])
+    read = doc.occurrences.add(symbol=TYPE, symbol_roles=READ_ACCESS)
+    read.range.extend([12, 0, 5])
+    GraphStore(db).apply_update(build_graph(partial, include_references=True), ["a.cpp"])
+
+    store = GraphStore(db)
+    assert store.schema_version() == SCHEMA_VERSION
+    con = sqlite3.connect(db)
+    columns = {row[1] for row in con.execute("PRAGMA table_info(refs)")}
+    con.close()
+    assert "roles" in columns
+    assert [(r.line, r.roles) for r in store.references_of(TYPE)] == [
+        (11, WRITE_ACCESS),
+        (12, READ_ACCESS),
+    ]
+    # the untouched b.cpp ref survives, degraded to roles=0 (no data for it)
+    assert [(r.file, r.line, r.roles) for r in store.references_of(untouched)] == [("b.cpp", 9, 0)]
+    assert store.meta().get("has_access_roles") == "true"
 
 
 def test_impact_over_inherits_gives_transitive_descendants(tmp_path: Path) -> None:

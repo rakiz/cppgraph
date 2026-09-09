@@ -38,7 +38,7 @@ list_sources() {
   case "$os" in Linux) build=1 ;; esac
   echo "platform: $os $arch"
   echo "valid scip-clang sources (pass one as --scip-source):"
-  [ -n "$native_patched" ] && echo "  download-patched   prebuilt patched (enclosing_range + ForwardDefinition) binary — ~1 min"
+  [ -n "$native_patched" ] && echo "  download-patched   prebuilt patched (enclosing_range + ForwardDefinition + ReadAccess/WriteAccess) binary — ~1 min"
   [ -n "$native" ] && echo "  download   prebuilt binary (stock, unpatched) — ~1 min"
   [ "$build" = 1 ] && echo "  build      compile patched locally — ~30-60 min, needs Docker (Linux only)"
   echo "  emulate    no host binary; index via an x86 container — slower at index time"

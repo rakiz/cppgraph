@@ -15,6 +15,7 @@ import pytest
 
 from cppgraph import mcp_server
 from cppgraph.model import Graph, Node
+from cppgraph.proto import scip_pb2
 from cppgraph.store import GraphStore, write_sqlite
 from cppgraph.updates import BYTES_PER_ATTRIBUTED_REF
 
@@ -1302,6 +1303,63 @@ def test_references_unavailable_when_not_built(store: GraphStore) -> None:
 
 def test_references_unknown_symbol_is_error(refs_store: GraphStore) -> None:
     assert "error" in mcp_server.references(refs_store, "nope")
+
+
+def test_references_access_filter_and_annotation(tmp_path: Path) -> None:
+    graph = Graph()
+    graph.add_reference(TYPE, "a.cpp", 10, roles=scip_pb2.SymbolRole.WriteAccess)
+    graph.add_reference(
+        TYPE,
+        "a.cpp",
+        12,
+        roles=scip_pb2.SymbolRole.ReadAccess | scip_pb2.SymbolRole.WriteAccess,
+    )
+    graph.add_reference(TYPE, "b.cpp", 41)  # plain read — no annotation, kept by access="read"
+    path = tmp_path / "acc.db"
+    write_sqlite(graph, path)
+    store = GraphStore(path)
+
+    all_uses = mcp_server.references(store, TYPE)
+    tags = {(u["file"], u["line"]): u.get("access") for u in all_uses["uses"]}
+    assert tags[("a.cpp", 11)] == "write"
+    assert tags[("a.cpp", 13)] == "read+write"
+    assert tags[("b.cpp", 42)] is None  # a plain read stays silent
+
+    writes = mcp_server.references(store, TYPE, access="write")
+    assert {(u["file"], u["line"]) for u in writes["uses"]} == {("a.cpp", 11), ("a.cpp", 13)}
+
+    reads = mcp_server.references(store, TYPE, access="read")
+    assert [(u["file"], u["line"]) for u in reads["uses"]] == [("b.cpp", 42)]
+
+
+def test_references_enclosing_symbol_and_access_annotate_together(tmp_path: Path) -> None:
+    # A reference can carry both #504 attribution and access roles; the returned
+    # item must expose both keys together, neither clobbering the other.
+    graph = Graph()
+    graph.add_node("cxx . . $ mongo/render(r1).")
+    graph.add_reference(
+        TYPE,
+        "a.cpp",
+        10,
+        enclosing_symbol="cxx . . $ mongo/render(r1).",
+        roles=scip_pb2.SymbolRole.WriteAccess,
+    )
+    path = tmp_path / "both.db"
+    write_sqlite(graph, path)
+    store = GraphStore(path)
+
+    result = mcp_server.references(store, TYPE)
+    (use,) = result["uses"]
+    assert use["used_by"] == "mongo/render(r1)."
+    assert use["access"] == "write"
+
+
+def test_references_access_filter_without_role_data_reports(refs_store: GraphStore) -> None:
+    # refs_store has a reference index, but no role data (stock build) — an
+    # access filter must report rather than pretend every site is a read.
+    result = mcp_server.references(refs_store, TYPE, access="write")
+    assert result["available"] is False
+    assert "read/write access data" in result["reason"]
 
 
 def test_impact_over_inherits_gives_all_descendants(hierarchy: GraphStore) -> None:

@@ -28,7 +28,7 @@ Useful options:
 - `--list-sources` prints the `scip-clang` sources valid for this host and exits.
 - `--scip-source download-patched|download|build|emulate` selects a source without
   prompting; this is required for non-interactive runs. `download-patched` fetches this
-  project's own prebuilt patched binary — enclosing_range + ForwardDefinition
+  project's own prebuilt patched binary — enclosing_range + ForwardDefinition + ReadAccess/WriteAccess
   (macOS arm64 / Linux aarch64 today);
   `build` is the Linux Docker build; `emulate` indexes through an x86 container
   when no native binary exists.
@@ -140,7 +140,7 @@ checked-in page is always fresh.
 ## `build-scip-clang-patched-macos.sh`
 
 Builds a patched `scip-clang` binary (v0.4.0 + `enclosing_range` (#504) +
-ForwardDefinition) natively for
+ForwardDefinition + ReadAccess/WriteAccess) natively for
 the current Mac architecture. Docker cannot produce a native macOS binary, so
 this script builds LLVM/Clang on the host with Bazel, patches the pinned source,
 verifies the result, and writes the binary plus provenance sidecar.

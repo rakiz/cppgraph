@@ -7,8 +7,9 @@ self-contained (its own `Dockerfile` + `README.md`).
   a `.scip` index. The ARM-Linux / Windows indexing workaround; used by
   `scripts/index-in-container.sh`.
 - [`build-scip-clang-patched-linux/`](build-scip-clang-patched-linux) — compile scip-clang from source for
-  the host's native arch, carrying the `enclosing_range` patch (PR #504). Slower
-  to build, but no emulation and adds the exact-attribution feature.
+  the host's native arch, carrying our patch bundle (PR #504 `enclosing_range`,
+  ForwardDefinition, ReadAccess/WriteAccess). Slower to build, but no emulation
+  and adds the exact-attribution feature.
 - [`gen-bindings/`](gen-bindings) — regenerate the SCIP protobuf bindings
   (`scip_pb2.py`/`.pyi`) from `scip.proto` with a pinned `protoc`, so nobody
   installs `protoc` on the host. Only needed when `scip.proto` changes.

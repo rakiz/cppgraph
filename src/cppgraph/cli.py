@@ -16,7 +16,9 @@ from cppgraph.export import (
     to_symbol_usage_graph,
 )
 from cppgraph.filters import (
+    access_tag,
     drop_test_edges,
+    filter_by_access,
     filter_by_path,
     is_trivial_callee,
     matches_path_prefix,
@@ -624,6 +626,16 @@ def main(argv: list[str] | None = None) -> int:
     )
     p_refs.add_argument(
         "--limit", type=int, default=50, help="max use sites to print (default: 50)"
+    )
+    p_refs.add_argument(
+        "--access",
+        choices=["read", "write"],
+        default=None,
+        help="filter by the indexer's read/write analysis: 'write' keeps only sites "
+        "tagged WriteAccess, 'read' only sites known NOT to be a write (plain reads). "
+        "Needs a graph built with a scip-clang binary carrying the "
+        "ReadAccess/WriteAccess patch — on a graph without that data this reports "
+        "and shows nothing rather than guessing",
     )
     _add_path_filters(p_refs)
 
@@ -1434,6 +1446,15 @@ def main(argv: list[str] | None = None) -> int:
                     r.file, include=args.include_paths, exclude=args.exclude_paths
                 )
             ]
+        if args.access:
+            if store.meta().get("has_access_roles") != "true":
+                print(
+                    "[cppgraph] this graph carries no read/write access data — rebuild "
+                    "with a scip-clang binary carrying the ReadAccess/WriteAccess patch "
+                    "(--access would otherwise guess)"
+                )
+                return 1
+            refs = filter_by_access(refs, args.access)
         print(f"[cppgraph] {len(refs)} use site(s) of {args.symbol}")
         for ref in refs[: args.limit]:
             line = ref.line + 1 if ref.line is not None else "?"
@@ -1441,7 +1462,8 @@ def main(argv: list[str] | None = None) -> int:
             used_by = (
                 f"  (used by {short_label(ref.enclosing_symbol)})" if ref.enclosing_symbol else ""
             )
-            print(f"  {ref.file}:{line}{used_by}")
+            # With access-role data, tag writes; a plain read stays untagged.
+            print(f"  {ref.file}:{line}{used_by}{access_tag(ref.roles)}")
             if args.root is not None and ref.file is not None and ref.line is not None:
                 snippet = read_source_snippet(args.root, ref.file, ref.line, context=args.context)
                 if snippet is None:
@@ -1941,6 +1963,15 @@ def main(argv: list[str] | None = None) -> int:
                             break_on_hyphens=False,
                         )
                     )
+            if m.get("has_access_roles") == "true":
+                print("  access roles:  read/write tags present on reference sites")
+            else:
+                print("  access roles:  none (references carry no read/write tags)")
+                print(
+                    "                 -> to tag writes ('who mutates this global/field?'), "
+                    "index with a scip-clang binary"
+                )
+                print("                    carrying the ReadAccess/WriteAccess patch, then rebuild")
         print(
             f"  format:        schema v{m.get('schema_version', '0 (legacy)')}"
             f", cppgraph {m.get('cppgraph_version', '?')}"

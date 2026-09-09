@@ -68,6 +68,16 @@ COPY scip-clang-patches/forward-definition-on-v0.4.0.patch /tmp/forward_definiti
 RUN git apply --verbose /tmp/forward_definition.patch \
     && grep -q 'is_declaration_site' proto/fwd_decls.proto  # fail fast if patch is a no-op
 
+# Apply the ReadAccess/WriteAccess syntactic classifier (applied here after
+# the two patches above purely for build consistency — all three patches are
+# actually order-independent, see scip-clang-patches/README.md). Tags
+# symbol_roles with WriteAccess (ReadAccess alongside it on read-modify-write
+# sites) based on the syntactic AST parent of the reference site; plain reads
+# stay untagged.
+COPY scip-clang-patches/read-write-access-on-v0.4.0.patch /tmp/read_write_access.patch
+RUN git apply --verbose /tmp/read_write_access.patch \
+    && grep -q 'classifyAccessRoles' indexer/Indexer.cc  # fail fast if patch is a no-op
+
 # Optimized release build (same config upstream uses for its linux binaries).
 RUN echo "startup --host_jvm_args=-Xmx${BAZEL_JVM_HEAP}" > ci.bazelrc \
     && bazel build //indexer:scip-clang --config=release-linux \

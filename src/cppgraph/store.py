@@ -80,12 +80,15 @@ CREATE TABLE edges (
 -- definition symbol that contains the use site (opt-in `--attributed-refs`,
 -- needs an enclosing_range-emitting binary), or NULL when unattributed — then
 -- the reference is a pure location (file granularity). See DESIGN.md § Graph
--- model. Empty unless the graph was built with references.
+-- model. Empty unless the graph was built with references. `roles` carries the
+-- scip-clang ReadAccess(0x8)/WriteAccess(0x4) bits (patched binary only; 0 = a
+-- plain read or "this graph carries no access data").
 CREATE TABLE refs (
     symbol_id    INTEGER NOT NULL,
     file_id      INTEGER,
     line         INTEGER,
-    enclosing_id INTEGER
+    enclosing_id INTEGER,
+    roles        INTEGER NOT NULL DEFAULT 0
 );
 -- Provenance: what was indexed. `source_commit` is the anchor for an
 -- incremental `cppgraph update` (git-diff the stored commit against HEAD to
@@ -123,10 +126,16 @@ _FILE_LINE_RE = re.compile(r"^(.+):([1-9][0-9]*)$")
 # `schema_version` predates versioning (treated as the oldest, still readable).
 # `GraphStore` refuses to open a store whose version is *newer* than this — an
 # old binary must not silently misread a format it doesn't understand.
+# Policy: only bump past the last actually-RELEASED version (see versions.json
+# `releases` / CHANGELOG.md) — a schema change made on an unreleased branch
+# amends that same pending version number instead of incrementing further,
+# since no store in the wild can have seen a number nobody has shipped yet.
 # v3: `symbols.end_line` (definition body extents, #504 binaries only).
 # v4: `symbols.documentation` (genuine doc-comment text; placeholder and
-# auto-generated namespace/File text filtered at build time).
-SCHEMA_VERSION = 4
+# auto-generated namespace/File text filtered at build time). Released in v0.2.0.
+# v5: `refs.roles` (ReadAccess/WriteAccess bits, patched binaries only) — first
+# schema change since v0.2.0's release; still unreleased as of this comment.
+SCHEMA_VERSION = 5
 
 
 class IncompatibleStoreError(RuntimeError):
@@ -471,6 +480,7 @@ def write_sqlite(graph: Graph, path: str | Path, *, meta: dict[str, str] | None 
                 file_id(r.file),
                 r.line,
                 sym_ids.get(r.enclosing_symbol) if r.enclosing_symbol else None,
+                r.roles,
             )
             for r in graph.references
         ]
@@ -491,13 +501,18 @@ def write_sqlite(graph: Graph, path: str | Path, *, meta: dict[str, str] | None 
             if attributed_refs:
                 all_meta.setdefault("has_attributed_refs", "true")
                 all_meta.setdefault("attributed_ref_count", str(attributed_refs))
+            # Any non-zero role => the binary tagged accesses (ReadAccess/
+            # WriteAccess patch). The data-driven gate for `--access` filtering
+            # and `(write)` annotations; absent on a stock binary.
+            if any(r.roles for r in graph.references):
+                all_meta.setdefault("has_access_roles", "true")
 
         con.executemany(
             "INSERT INTO files VALUES (?, ?)", [(fid, p) for p, fid in file_ids.items()]
         )
         con.executemany("INSERT INTO symbols VALUES (?, ?, ?, ?, ?, ?, ?)", sym_rows)
         con.executemany("INSERT INTO edges VALUES (?, ?, ?, ?, ?)", edge_rows)
-        con.executemany("INSERT INTO refs VALUES (?, ?, ?, ?)", ref_rows)
+        con.executemany("INSERT INTO refs VALUES (?, ?, ?, ?, ?)", ref_rows)
         con.executemany("INSERT INTO meta VALUES (?, ?)", all_meta.items())
         con.executescript(_INDEXES)
         con.commit()
@@ -587,6 +602,10 @@ def enrich_references(path: str | Path, index: scip_pb2.Index) -> tuple[int, int
         cols = {row[1] for row in con.execute("PRAGMA table_info(refs)")}
         if "enclosing_id" not in cols:
             con.execute("ALTER TABLE refs ADD COLUMN enclosing_id INTEGER")
+        # Old (v4) stores lack `roles` too; add it so access-role backfill can
+        # write. NOT NULL DEFAULT 0 backfills existing rows with "no data".
+        if "roles" not in cols:
+            con.execute("ALTER TABLE refs ADD COLUMN roles INTEGER NOT NULL DEFAULT 0")
         # Old (v2) stores lack `symbols.end_line` too. This function stamps
         # the current schema_version below, so a store it touches must
         # actually be that shape — otherwise a later `line_span` query ("no
@@ -595,9 +614,11 @@ def enrich_references(path: str | Path, index: scip_pb2.Index) -> tuple[int, int
         sym_cols = {row[1] for row in con.execute("PRAGMA table_info(symbols)")}
         if "end_line" not in sym_cols:
             con.execute("ALTER TABLE symbols ADD COLUMN end_line INTEGER")
-        # Same for `symbols.documentation` (v3 stores): the stamped schema
-        # version says v4, so the store must be v4-shaped — `get_node`'s full
-        # SELECT and `apply_update`'s re-insert both read the column.
+        # Same for `symbols.documentation` (added at schema v4): the stamped
+        # `schema_version` below (SCHEMA_VERSION) always reflects the CURRENT
+        # constant, so any store this function touches must end up shaped to
+        # match it — `get_node`'s full SELECT and `apply_update`'s re-insert
+        # both read the column.
         if "documentation" not in sym_cols:
             con.execute("ALTER TABLE symbols ADD COLUMN documentation TEXT")
 
@@ -612,6 +633,21 @@ def enrich_references(path: str | Path, index: scip_pb2.Index) -> tuple[int, int
             if sid is None or eid is None:
                 continue
             updates.append((eid, sid, file_ids.get(r.file) if r.file else None, r.line))
+
+        # Backfill access roles too — decided: yes. A .scip from a patched
+        # binary carries ReadAccess/WriteAccess and `enrich-refs` is the
+        # no-rebuild path, so roles must ride along with attribution. A .scip
+        # without per-occurrence roles (older/stock indexer) yields no updates
+        # here: nothing written, nothing fabricated, and `has_access_roles`
+        # below stays off.
+        role_updates = []
+        for r in graph.references:
+            if not r.roles:
+                continue
+            sid = sym_ids.get(r.symbol)
+            if sid is None:
+                continue
+            role_updates.append((r.roles, sid, file_ids.get(r.file) if r.file else None, r.line))
 
         # Without a composite index the UPDATE below can only seek on symbol_id
         # (the sole index, ix_refs), then scans every row of that symbol to match
@@ -630,6 +666,12 @@ def enrich_references(path: str | Path, index: scip_pb2.Index) -> tuple[int, int
                 updates,
             )
             attributed = con.total_changes - before
+            before = con.total_changes
+            con.executemany(
+                "UPDATE refs SET roles = ? WHERE symbol_id = ? AND file_id IS ? AND line IS ?",
+                role_updates,
+            )
+            roles_set = con.total_changes - before
         finally:
             con.execute("DROP INDEX IF EXISTS ix_refs_enrich")
 
@@ -640,6 +682,7 @@ def enrich_references(path: str | Path, index: scip_pb2.Index) -> tuple[int, int
         for key, value in (
             ("has_attributed_refs", "true" if attributed else "false"),
             ("attributed_ref_count", str(attributed)),
+            ("has_access_roles", "true" if roles_set else "false"),
             ("schema_version", str(SCHEMA_VERSION)),
         ):
             con.execute(
@@ -1106,7 +1149,7 @@ class GraphStore:
         try:
             rows = self._con.execute(
                 """
-                SELECT f.path, r.line, e.symbol
+                SELECT f.path, r.line, e.symbol, r.roles
                 FROM refs r
                 LEFT JOIN files f ON f.id = r.file_id
                 LEFT JOIN symbols e ON e.id = r.enclosing_id
@@ -1116,15 +1159,18 @@ class GraphStore:
                 (sym_id,),
             ).fetchall()
         except sqlite3.OperationalError:
-            # Store predates the `enclosing_id` column (schema v1) or the refs
-            # table entirely; retry without the enclosing join, else give up.
+            # Store predates the `roles` column (schema v4): retry without it —
+            # the graph carries no access data, so roles degrade to 0 (never
+            # fabricated).
             try:
                 rows = [
-                    (r[0], r[1], None)
+                    (r[0], r[1], r[2], 0)
                     for r in self._con.execute(
                         """
-                        SELECT f.path, r.line
-                        FROM refs r LEFT JOIN files f ON f.id = r.file_id
+                        SELECT f.path, r.line, e.symbol
+                        FROM refs r
+                        LEFT JOIN files f ON f.id = r.file_id
+                        LEFT JOIN symbols e ON e.id = r.enclosing_id
                         WHERE r.symbol_id = ?
                         ORDER BY f.path, r.line
                         """,
@@ -1132,8 +1178,28 @@ class GraphStore:
                     ).fetchall()
                 ]
             except sqlite3.OperationalError:
-                return []
-        return [Reference(symbol=symbol, file=r[0], line=r[1], enclosing_symbol=r[2]) for r in rows]
+                # Store predates the `enclosing_id` column (schema v1) or the
+                # refs table entirely; retry without the enclosing join, else
+                # give up.
+                try:
+                    rows = [
+                        (r[0], r[1], None, 0)
+                        for r in self._con.execute(
+                            """
+                            SELECT f.path, r.line
+                            FROM refs r LEFT JOIN files f ON f.id = r.file_id
+                            WHERE r.symbol_id = ?
+                            ORDER BY f.path, r.line
+                            """,
+                            (sym_id,),
+                        ).fetchall()
+                    ]
+                except sqlite3.OperationalError:
+                    return []
+        return [
+            Reference(symbol=symbol, file=r[0], line=r[1], enclosing_symbol=r[2], roles=r[3])
+            for r in rows
+        ]
 
     # --- traversals (indexed neighbour lookups, never a full load) ---------
 
@@ -2195,11 +2261,11 @@ class GraphStore:
         con = self._con
         changed_files = list(changed_files)
         with con:  # atomic: commit on success, rollback on error
-            # (0) an older store may lack `end_line` (v2) or `documentation`
-            # (v3); add them on demand — the same ALTER pattern
-            # `enrich_references` uses for `refs.enclosing_id` — so the
-            # re-insert below can write body extents and doc text. The store
-            # is now v4-shaped, so stamp it.
+            # (0) an older store may lack `end_line` (v2), `documentation`
+            # (v3) or `refs.roles` (v4); add them on demand — the same ALTER
+            # pattern `enrich_references` uses for `refs.enclosing_id` — so
+            # the re-insert below can write body extents, doc text and access
+            # roles. The store is now v5-shaped, so stamp it.
             cols = {row[1] for row in con.execute("PRAGMA table_info(symbols)")}
             stale_shape = False
             if "end_line" not in cols:
@@ -2207,6 +2273,10 @@ class GraphStore:
                 stale_shape = True
             if "documentation" not in cols:
                 con.execute("ALTER TABLE symbols ADD COLUMN documentation TEXT")
+                stale_shape = True
+            ref_cols = {row[1] for row in con.execute("PRAGMA table_info(refs)")}
+            if "roles" not in ref_cols:
+                con.execute("ALTER TABLE refs ADD COLUMN roles INTEGER NOT NULL DEFAULT 0")
                 stale_shape = True
             if stale_shape:
                 con.execute(
@@ -2302,13 +2372,15 @@ class GraphStore:
                 ],
             )
             con.executemany(
-                "INSERT INTO refs(symbol_id, file_id, line, enclosing_id) VALUES (?, ?, ?, ?)",
+                "INSERT INTO refs(symbol_id, file_id, line, enclosing_id, roles) "
+                "VALUES (?, ?, ?, ?, ?)",
                 [
                     (
                         sym_id[r.symbol],
                         file_id.get(r.file) if r.file else None,
                         r.line,
                         sym_id.get(r.enclosing_symbol) if r.enclosing_symbol else None,
+                        r.roles,
                     )
                     for r in partial.references
                 ],
@@ -2335,7 +2407,9 @@ class GraphStore:
 
             # (5) refresh meta: provided provenance + recomputed counts. A
             # partial carrying body extents (#504 re-index) flips the
-            # enclosing-range gate on; nothing ever flips it off.
+            # enclosing-range gate on; a partial carrying access roles (patched
+            # binary) flips the access-roles gate on; nothing ever flips either
+            # off.
             node_count = con.execute("SELECT COUNT(*) FROM symbols").fetchone()[0]
             edge_count = con.execute("SELECT COUNT(*) FROM edges").fetchone()[0]
             ref_count = con.execute("SELECT COUNT(*) FROM refs").fetchone()[0]
@@ -2344,6 +2418,8 @@ class GraphStore:
             all_meta["edge_count"] = str(edge_count)
             if any(n.end_line is not None for n in partial.nodes.values()):
                 all_meta.setdefault("has_enclosing_ranges", "true")
+            if any(r.roles for r in partial.references):
+                all_meta.setdefault("has_access_roles", "true")
             if ref_count:
                 all_meta["ref_count"] = str(ref_count)
             con.executemany("INSERT OR REPLACE INTO meta VALUES (?, ?)", all_meta.items())

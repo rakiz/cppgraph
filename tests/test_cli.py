@@ -79,6 +79,85 @@ def test_callees_lists_callee(graph_path: Path, capsys: pytest.CaptureFixture[st
     assert "makeResumeToken(a1)." in out
 
 
+def test_references_access_flag_filters_and_annotates(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    typ = "cxx . . $ mongo/Widget#"
+    graph = Graph()
+    graph.add_reference(typ, "a.cpp", 10, roles=scip_pb2.SymbolRole.WriteAccess)
+    graph.add_reference(
+        typ,
+        "a.cpp",
+        12,
+        roles=scip_pb2.SymbolRole.ReadAccess | scip_pb2.SymbolRole.WriteAccess,
+    )
+    graph.add_reference(typ, "b.cpp", 41)  # plain read
+    path = tmp_path / "acc.db"
+    write_sqlite(graph, path)
+
+    # unfiltered: every site, writes tagged, plain reads silent
+    assert main(["references", "--graph", str(path), typ]) == 0
+    out = capsys.readouterr().out
+    assert "3 use site(s)" in out
+    assert "a.cpp:11 (write)" in out
+    assert "a.cpp:13 (read+write)" in out
+    assert "b.cpp:42\n" in out
+
+    # --access write: only WriteAccess-tagged sites
+    assert main(["references", "--graph", str(path), typ, "--access", "write"]) == 0
+    out = capsys.readouterr().out
+    assert "2 use site(s)" in out
+    assert "a.cpp:11 (write)" in out and "a.cpp:13 (read+write)" in out
+    assert "b.cpp:42" not in out
+
+    # --access read: only sites known NOT to be a write
+    assert main(["references", "--graph", str(path), typ, "--access", "read"]) == 0
+    out = capsys.readouterr().out
+    assert "1 use site(s)" in out
+    assert "b.cpp:42" in out and "a.cpp:" not in out
+
+
+def test_references_enclosing_symbol_and_access_annotate_together(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A binary with both patches (#504 + read-write-access) emits both facts on
+    # one reference: the used-by annotation and the write tag must land in their
+    # own slots of the same output line, neither clobbering the other.
+    typ = "cxx . . $ mongo/Widget#"
+    graph = Graph()
+    graph.add_node("cxx . . $ mongo/render(r1).")
+    graph.add_reference(
+        typ,
+        "a.cpp",
+        10,
+        enclosing_symbol="cxx . . $ mongo/render(r1).",
+        roles=scip_pb2.SymbolRole.WriteAccess,
+    )
+    path = tmp_path / "both.db"
+    write_sqlite(graph, path)
+
+    assert main(["references", "--graph", str(path), typ]) == 0
+    out = capsys.readouterr().out
+    assert "1 use site(s)" in out
+    assert "  a.cpp:11  (used by mongo/render(r1).) (write)\n" in out
+
+
+def test_references_access_flag_without_role_data_reports(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # references present but no role data (stock build): the filter must report
+    # and show nothing rather than pretend every site is a read.
+    typ = "cxx . . $ mongo/Widget#"
+    graph = Graph()
+    graph.add_reference(typ, "a.cpp", 10)
+    path = tmp_path / "stock.db"
+    write_sqlite(graph, path)
+
+    assert main(["references", "--graph", str(path), typ, "--access", "write"]) == 1
+    out = capsys.readouterr().out
+    assert "no read/write access data" in out
+
+
 def test_callers_unknown_symbol_errors(graph_path: Path) -> None:
     with pytest.raises(SystemExit):
         main(["callers", "--graph", str(graph_path), "nonexistent"])

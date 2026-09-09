@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 ### USAGE START
-# Publish a locally built patched (enclosing_range + ForwardDefinition) scip-clang
+# Publish a locally built patched (enclosing_range + ForwardDefinition +
+# ReadAccess/WriteAccess) scip-clang
 # binary as a GitHub Release asset on this repo's origin, so other machines can
 # later download it instead of running the ~30-60 min Docker build. MANUAL
 # maintainer tool: never run from CI, never called by cppgraph's own code. It only
@@ -156,11 +157,12 @@ else
 Locally built scip-clang binaries carrying cppgraph's patch bundle: the
 enclosing_range feature (sourcegraph/scip-clang) from PR #504, which cppgraph
 uses for exact reference-to-symbol attribution, plus cppgraph's own
-ForwardDefinition fix.
+ForwardDefinition and ReadAccess/WriteAccess fixes.
 
 - Base: upstream scip-clang v$VERSION tag (sourcegraph/scip-clang)
-- Patchset p$PATCHSET_VERSION: PR #504 (enclosing_range) plus the
-  ForwardDefinition fix — the .patch files live in scip-clang-patches/
+- Patchset p$PATCHSET_VERSION: PR #504 (enclosing_range), the
+  ForwardDefinition fix, and the ReadAccess/WriteAccess syntactic classifier
+  — the .patch files live in scip-clang-patches/
   in the cppgraph repo (patchset history: the \$comment_patchset key in
   versions.json)
 - Built with Bazel (--config=release-linux via docker/build-scip-clang-patched-linux on Linux,
@@ -172,7 +174,7 @@ cppgraph maintainer. Verify downloads against the matching .sha256 asset.
 EOF
 )"
   gh release create -R "$REPO" "$TAG" \
-      --title "scip-clang patched (enclosing_range + ForwardDefinition) v$VERSION p$PATCHSET_VERSION" \
+      --title "scip-clang patched (enclosing_range + ForwardDefinition + ReadAccess/WriteAccess) v$VERSION p$PATCHSET_VERSION" \
       --notes "$NOTES" >/dev/null
 fi
 

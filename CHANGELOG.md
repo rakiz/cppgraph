@@ -6,7 +6,52 @@ on-disk store also carries its own `schema_version` for forward-compatibility.
 
 ## [Unreleased]
 
-_Nothing yet._
+Store schema v4 → v5 (`refs.roles`); two new scip-clang patches and a rename
+of the binary "variant" concept.
+
+### Added
+
+- **`ForwardDefinition` bit fix** (`scip-clang-patches/forward-definition-on-v0.4.0.patch`):
+  fixes the declaration-site phantom-caller bug on STOCK-shaped graphs too (not
+  just #504 graphs, which were already protected) — a bodyless declaration
+  occurrence is now tagged at the source instead of landing as an
+  indistinguishable role-0 site. Verified end-to-end (stock official binary
+  fabricates the phantom caller on a fixture; our patched binary doesn't). No
+  cppgraph-side change needed — `build_graph` already filtered on
+  `DEFINITION | FORWARD_DEFINITION` in anticipation.
+- **`ReadAccess`/`WriteAccess` syntactic classifier** (`scip-clang-patches/read-write-access-on-v0.4.0.patch`):
+  a scip-clang patch tagging reference occurrences as reads/writes based on
+  their syntactic AST parent (assignment, compound assignment, `++`/`--`,
+  overloaded-operator forms; constructor-initializer field references are
+  unconditional writes). Syntactic only, no dataflow.
+  Consumed by cppgraph: `Reference.roles` (store schema v5, `refs.roles` +
+  `has_access_roles` meta flag), surfaced as `(write)`/`(read+write)`
+  annotations and a new `--access {read,write}` filter on `cppgraph references`
+  / MCP `find_references`. Degrades cleanly (no annotation, filter refused with
+  a clear reason) on a graph built without this patch.
+- **Dual versioning for the scip-clang patch bundle**: `versions.json`'s
+  `scip_clang.patchset_version` now tracks our own patch bundle independently
+  of the upstream `version` pin (history: 1 = #504 `enclosing_range` only; 2 =
+  + `ForwardDefinition`; 3 = + `ReadAccess`/`WriteAccess`). `cppgraph status`
+  advises when an installed patched binary's patchset predates the pin.
+- All three scip-clang patches (`enclosing_range`, `forward-definition`,
+  `read-write-access`) verified mutually **order-independent** — any of the 6
+  possible application orders produces byte-identical final files, and each
+  applies standalone. Matters for a future independent upstream PR per patch.
+
+### Changed
+
+- Binary "variant" renamed `"504"` → `"patched"` throughout (sidecar JSON,
+  release tag/asset names — `scip-clang-patched-v<version>-p<patchset>` — CLI
+  wizard labels, scripts). Old `"504"`/`"enclosing_range-504"` sidecars are
+  still recognized (`PATCHED_VARIANTS`) for backward compatibility.
+- `docker/build-scip-clang` → `docker/build-scip-clang-patched-linux`,
+  `scripts/build-scip-clang-macos.sh` → `build-scip-clang-patched-macos.sh`,
+  `scripts/publish-scip-clang-504.sh` → `publish-scip-clang-patched.sh` — all
+  three renamed for clarity (explicit about platform/variant, no longer
+  accurate to say just "504" now that the bundle carries three patches).
+  Patch files moved to a shared top-level `scip-clang-patches/` (used by both
+  the Docker build and the macOS native build script).
 
 ## [0.2.0] - 2026-09-08
 

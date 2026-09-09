@@ -35,7 +35,9 @@ from typing import TYPE_CHECKING, Any
 
 from cppgraph.cli import SOURCE_EXTS, build_export_json, extract_signature, read_source_snippet
 from cppgraph.export import is_test_file
+from cppgraph.filters import access_tag as _access_tag
 from cppgraph.filters import drop_test_edges as _drop_test_edges
+from cppgraph.filters import filter_by_access as _filter_by_access
 from cppgraph.filters import filter_by_path as _filter_by_path
 from cppgraph.filters import is_noise_symbol as _is_noise_symbol
 from cppgraph.filters import is_trivial_callee as _is_trivial_callee
@@ -544,6 +546,7 @@ def references(
     exclude_tests: bool = True,
     include_paths: list[str] | None = None,
     exclude_paths: list[str] | None = None,
+    access: str | None = None,
 ) -> dict[str, Any]:
     """Exact use sites of `symbol` (the `--references` location index).
 
@@ -554,7 +557,12 @@ def references(
     so the answer names the *functions*, not just the locations. Test-file uses
     are dropped by default (`exclude_tests`); `include_paths`/`exclude_paths`
     further filter uses by their file's path prefix (e.g. scope out vendored
-    deps). Coordinates only by default; with `include_source=True` *and* a
+    deps). `access` filters by the indexer's read/write analysis ('write' =
+    sites tagged WriteAccess, 'read' = sites known not to be a write) and tags
+    each returned site with `access: "write"`/`"read+write"` when the graph
+    carries that data (a scip-clang ReadAccess/WriteAccess-patch binary); on a
+    graph without it the filter reports `available: False` rather than guessing.
+    Coordinates only by default; with `include_source=True` *and* a
     `root`, sites are grouped by file and each file carries one merged snippet
     (overlapping `± context` windows are collapsed). `available` is False (not
     an error) when the graph was built with `--no-references`, so the caller
@@ -570,6 +578,14 @@ def references(
             "available": False,
             "reason": "graph built with --no-references (no location index)",
         }
+    if access is not None and store.meta().get("has_access_roles") != "true":
+        return {
+            "symbol": symbol,
+            "available": False,
+            "reason": f"graph carries no read/write access data — cannot filter by "
+            f"access={access!r}; rebuild with a scip-clang binary carrying the "
+            f"ReadAccess/WriteAccess patch",
+        }
     if exclude_tests:
         refs = [r for r in refs if not is_test_file(r.file)]
     if include_paths or exclude_paths:
@@ -578,6 +594,12 @@ def references(
             for r in refs
             if _matches_path_prefix(r.file, include=include_paths, exclude=exclude_paths)
         ]
+    if access is not None:
+        try:
+            refs = _filter_by_access(refs, access)
+        except ValueError as e:
+            # unlike the CLI (argparse choices), an MCP caller can pass anything
+            return {"error": str(e)}
     shown, truncated = _capped(refs, limit)
 
     with_src = include_source and root is not None
@@ -605,6 +627,9 @@ def references(
             item: dict[str, Any] = {"file": ref.file, "line": _line1(ref.line)}
             if ref.enclosing_symbol:
                 item["used_by"] = _short_label(ref.enclosing_symbol)
+            tag = _access_tag(ref.roles)
+            if tag:
+                item["access"] = tag.strip(" ()")
             items.append(item)
 
     return {
@@ -615,6 +640,7 @@ def references(
         "excluded_tests": exclude_tests,
         "include_paths": include_paths,
         "exclude_paths": exclude_paths,
+        "access": access,
         "uses": items,
     }
 
@@ -1566,6 +1592,7 @@ def status_report(
             "cppgraph_version": m.get("cppgraph_version"),
             "has_references": m.get("has_references") == "true",
             "has_attributed_refs": m.get("has_attributed_refs") == "true",
+            "has_access_roles": m.get("has_access_roles") == "true",
             "has_enclosing_ranges": m.get("has_enclosing_ranges") == "true",
             "node_count": m.get("node_count"),
             "edge_count": m.get("edge_count"),
@@ -1924,6 +1951,7 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         exclude_tests: bool = True,
         include_paths: list[str] | None = None,
         exclude_paths: list[str] | None = None,
+        access: str | None = None,
     ) -> dict[str, Any]:
         """Exact use sites of a symbol ("where is this type/symbol used?") — the
         dependency the call graph can't show (a struct has no callers). Returns
@@ -1933,9 +1961,13 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         `context` sets the lines shown around each site. Test-file uses are
         dropped by default — pass `exclude_tests=False` to include them.
         `include_paths`/`exclude_paths` further filter uses by their file's path
-        prefix (e.g. scope out vendored deps). `limit`
-        caps the list. If the graph was built with `--no-references`, `available`
-        is false (rebuild with references to enable this)."""
+        prefix (e.g. scope out vendored deps). `access` ('read' | 'write')
+        filters by the indexer's read/write analysis and tags each returned site
+        ("write"/"read+write") — only when the graph carries that data (built
+        with a scip-clang ReadAccess/WriteAccess-patch binary); on a graph
+        without it the tool reports `available: false` rather than guessing.
+        `limit` caps the list. If the graph was built with `--no-references`,
+        `available` is false (rebuild with references to enable this)."""
         return _call(
             references,
             symbol,
@@ -1946,6 +1978,7 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
             exclude_tests=exclude_tests,
             include_paths=include_paths,
             exclude_paths=exclude_paths,
+            access=access,
         )
 
     @mcp.tool()

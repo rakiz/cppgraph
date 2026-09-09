@@ -3,12 +3,11 @@
 # the rationale. NOT (yet) an upstream PR.
 #
 # Applicability: generated with minimal diff context (`-U1`) so it applies
-# BOTH standalone on a clean v0.4.0 checkout (verified — this is what makes it
-# ready to become a future independent upstream PR without regenerating it)
-# AND stacked on top of enclosing_range-on-v0.4.0.patch (our actual build
-# order: apply #504 FIRST, then this one — the reverse order does NOT apply
-# cleanly, since #504's own patch carries wider context around the same
-# `saveReference` function this patch also touches).
+# standalone on a clean v0.4.0 checkout, and — since enclosing_range-on-v0.4.0.patch
+# was also reduced to `-U1` — in any order relative to the other two patches in
+# this directory, or completely alone. Verified empirically: all 6 orderings of
+# the three patches produce byte-identical final files. See
+# scip-clang-patches/README.md's "Independence" section.
 diff --git a/indexer/Indexer.cc b/indexer/Indexer.cc
 index c63040b..3155789 100644
 --- a/indexer/Indexer.cc

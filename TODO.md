@@ -8,13 +8,21 @@ active list. Design detail is in `DESIGN.md`, shipped features in
 ## Other
 
 
-- **Follow-up to the declaration-site phantom-caller bug (fixed for #504 graphs):**
+- **Declaration-site phantom-caller bug — DONE for stock graphs too, not just #504.**
   `who_calls(extractShardKeyFromDoc)` used to return `getKeyPatternFields` as a caller
   because a bodyless member declaration (role 0, no `DEFINITION`/`FORWARD_DEFINITION`)
-  fell back to `bisect`-nearest-preceding. `build_graph` now drops such a call site
-  instead of guessing, but only when the document has `callable_intervals` (#504) — a
-  stock graph still has no way to tell a declaration from a real call at the same shape
-  (documented, accepted limitation, see `DESIGN.md`).
+  fell back to `bisect`-nearest-preceding. `build_graph` drops such a call site
+  instead of guessing when the document has `callable_intervals` (#504) — that part
+  was already fixed. The remaining gap (a stock graph, no `callable_intervals` at
+  all, had no signal to distinguish a declaration from a real call in the first
+  place) is now closed too:
+  `scip-clang-patches/forward-definition-on-v0.4.0.patch` tags a bodyless
+  declaration occurrence with `ForwardDefinition` at the source, so `build_graph`'s
+  existing `DEFINITION | FORWARD_DEFINITION` filter already excludes it — no
+  cppgraph-side change was needed, only the indexer had to start setting the bit.
+  Verified end-to-end: a stock official binary fabricates the phantom caller, our
+  patched binary doesn't, on the same fixture (see the scip-clang section below for
+  the patch itself; not yet upstreamed).
 - **Attributed references as first-class `uses` edges.** `impact_of`/`path` traverse
   `calls`/`inherits` only, so a *type* has no reachable callers — "what breaks if I
   change this struct?" isn't answerable transitively; the answer lives in
@@ -192,48 +200,47 @@ item below states a verified fact, not a suspicion, and carries the effort estim
   unblock cleaner node typing; a firmer `global_init_references` (identify globals
   without suffix parsing).
 - **`symbol_roles` `ReadAccess` / `WriteAccess` bits — confirmed never set (0 of
-  15,176,411 corpus occurrences carry either bit).** If set, they would tag a reference
-  read vs write — "who *mutates* this global/field?" vs who reads it, a capability class
-  we can't offer now. Moderate effort, high value — upstream receptivity is on record:
+  15,176,411 corpus occurrences carry either bit) by the OFFICIAL upstream binary
+  (measurement stands, `SCIP_AUDIT.md`).** DONE on our side:
+  `scip-clang-patches/read-write-access-on-v0.4.0.patch` adds a syntactic
+  classifier (`classifyAccessRoles` in `Indexer.cc`, next to `RefersToForwardDecl`)
+  that sets `WriteAccess` on an assignment/compound-assignment LHS or `++`/`--`
+  operand (and their overloaded-operator forms), `ReadAccess` alongside it on
+  read-modify-write sites, and an unconditional write for constructor-initializer
+  field references — wired into `saveDeclRefExpr`/`saveMemberExpr`/`saveFieldReference`.
+  Syntactic only, no dataflow — `f(x)` passing `x` by reference to an out-param
+  isn't detectable this way, and a ref-returning call as an lvalue (`a.b() = x`)
+  leaves `b`'s occurrence untagged (documented limits in the classifier's own
+  comment). cppgraph consumes it: `Reference.roles` (store schema v5, `refs.roles`
+  + `has_access_roles`), surfaced as `(write)`/`(read+write)` annotations and an
+  `--access {read,write}` filter on `cppgraph references` / `find_references`.
+  Not yet upstreamed — the receptivity signal below is why it's worth proposing:
   `saveDeclRefExpr` carries the literal comment *"TODO: Add read-write access to the
-  symbol role here"* (`Indexer.cc:1018`), and `saveMemberExpr` (`:1024`) is the sibling
-  site — both already hold the `Expr`, so classification is a parent-expression check
-  (assignment/compound-assignment LHS, `++`/`--` operand, via clang's
-  `ParentMap`/`ASTContext::getParents`). Plumbing is ready: `saveReference` (`:1164`)
-  takes `extraRoles`, `saveOccurrenceImpl` sets roles verbatim (`:1263`, the only
-  `set_symbol_roles` call for references). A `RefersToWrite`-style classifier next to
-  `RefersToForwardDecl` (`Indexer.h:254`, `check()` at `:339`, ~15 lines) plus
-  pass-through at the two visitor sites: **~60–120 lines + tests**. State the limits
-  honestly in the PR: syntactic write detection only (no dataflow — `f(x)` passing `x`
-  by reference to an out-param isn't detectable here; ref-returning calls like
-  `a.b() = x` need a decision). → would unblock mutation analysis; a sharper
-  `global_init_references` (a write at init vs a mere mention).
+  symbol role here"* (`Indexer.cc:1018` in the unpatched source), and `saveMemberExpr`
+  (`:1024`) is the sibling site this fulfills.
 - **`symbol_roles` `ForwardDefinition` bit on bodyless-declaration occurrences —
-  small effort, the single biggest correctness win for STOCK-binary graphs (where
-  #504's `enclosing_range` isn't available to solve it by containment).** The
-  discriminator already exists and runs: `RefersToForwardDecl::check` (`Indexer.cc:339`)
-  is `!canonicalDecl->isThisDeclarationADefinition()`, and bodyless declarations (an
-  in-class method declaration, a header prototype) route through `saveFunctionDecl` →
-  `saveForwardDeclaration` (`:565` → `:1151`) into the internal forward-decl pipeline
-  (`proto/fwd_decls.proto`, `ForwardDeclMap::emit` at `:363`), re-emerging into
-  documents via `ForwardDeclOccurrence::addTo` (`ScipExtras.cc:243-249`) — which sets
-  symbol and range and **never touches `symbol_roles`**, landing as plain role-0. That
-  role-0 shape is exactly the declaration-vs-call indistinguishability that forces
-  cppgraph's stock-binary over-capture (`DESIGN.md` § Building calls: "no separating
-  signal exists"; the same declaration-site phantom-caller bug at the top of this
-  file, fixed for #504 graphs only). One bit at the source fixes what no consumer can
-  recover — an existing SCIP role, no schema change. Design caveat to resolve *in* the
-  PR: `saveReference` (`:1179`) also routes *references* that resolve to a
-  declaration-only decl into the same map, so the naive one-line version (tag every
-  `ForwardDeclOccurrence`) would also tag genuine calls to declared-here/
-  defined-elsewhere functions — the clean version needs an origin marker
-  (declaration-site vs. reference-site) in `fwd_decls.proto`'s `ForwardDecl::Reference`,
-  setting the bit only for declaration sites: **~15–30 lines** across the internal
-  proto, the two insert sites, and `addTo`. Acceptance test before relying on it: the
-  `rwmutex.h:192` / `ProcessId::asLongLong` phantom-caller fixtures from `DESIGN.md`
-  must drop out while the real inline-body calls stay. → unblocks a stock-graph fix
-  for the declaration-site phantom-caller bug at the top of this file, without needing
-  #504 at all.
+  DONE on our side.** The single biggest correctness win for STOCK-binary graphs
+  (where #504's `enclosing_range` isn't available to solve it by containment) —
+  see the TODO bullet at the top of this file for the bug it fixes and the
+  end-to-end verification (stock official binary vs. our patched binary, same
+  fixture). `scip-clang-patches/forward-definition-on-v0.4.0.patch` implements it:
+  the discriminator already existed and ran (`RefersToForwardDecl::check`,
+  `Indexer.cc:339`, is `!canonicalDecl->isThisDeclarationADefinition()`), and
+  bodyless declarations already routed through `saveForwardDeclaration` into the
+  internal forward-decl pipeline (`proto/fwd_decls.proto`) — which never touched
+  `symbol_roles`, landing as plain role-0, exactly the declaration-vs-call
+  indistinguishability that forced cppgraph's stock-binary over-capture. The
+  design caveat noted before building this was real and had to be resolved:
+  `saveReference` also routes genuine *references* that resolve to a
+  declaration-only decl into the same internal map, so a naive "tag every
+  `ForwardDeclOccurrence`" would have also tagged real calls to
+  declared-here/defined-elsewhere functions. The shipped fix adds an origin
+  marker (`is_declaration_site`, declaration-site vs. reference-site) to
+  `fwd_decls.proto`'s `ForwardDecl::Reference`, set at the two `ForwardDeclMap::insert`
+  call sites and consumed in `ForwardDeclOccurrence::addTo`. cppgraph's own
+  `builder.py` already filtered on `DEFINITION | FORWARD_DEFINITION` in
+  anticipation, so no cppgraph-side change was needed — only the indexer had to
+  start setting the bit. Not yet upstreamed.
 - **`symbol_roles` `Test` bit — confirmed never set (0 of 15,176,411).** We derive "is a
   test" from the file path (`exclude_tests`); if scip-clang set the Test role it would
   beat the path heuristic, though an upstream emitter would itself need a path/gtest

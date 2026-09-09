@@ -18,6 +18,8 @@ from cppgraph.proto import scip_pb2
 
 DEFINITION = scip_pb2.SymbolRole.Definition
 FORWARD_DEFINITION = scip_pb2.SymbolRole.ForwardDefinition
+READ_ACCESS = scip_pb2.SymbolRole.ReadAccess
+WRITE_ACCESS = scip_pb2.SymbolRole.WriteAccess
 
 
 def _occurrence(symbol: str, line: int, *, roles: int = 0) -> scip_pb2.Occurrence:
@@ -550,6 +552,21 @@ def test_references_exclude_definitions_and_locals() -> None:
     assert graph.references_of(local) == []
 
 
+def test_references_exclude_forward_definitions() -> None:
+    """The ForwardDefinition bit drops a bodyless declaration from the reference
+    index too — the same exclusion the calls loop applies (a decl site is
+    neither a call nor a use, on either surface)."""
+    sym = "cxx . . $ mongo/Foo#"
+    doc = scip_pb2.Document(relative_path="f.cpp")
+    doc.occurrences.append(_occurrence(sym, 5, roles=DEFINITION))  # def, not a ref
+    doc.occurrences.append(_occurrence(sym, 15, roles=FORWARD_DEFINITION))  # decl, not a ref
+    doc.occurrences.append(_occurrence(sym, 9))  # a real ref
+    index = scip_pb2.Index(documents=[doc])
+
+    graph = build_graph(index, include_references=True)
+    assert {r.line for r in graph.references_of(sym)} == {9}
+
+
 def test_references_deduped_across_header_includes() -> None:
     sym = "cxx . . $ mongo/Foo#"
     # same occurrence surfacing from two TUs after scip-clang merges indexes
@@ -559,6 +576,31 @@ def test_references_deduped_across_header_includes() -> None:
     index = scip_pb2.Index(documents=docs)
     graph = build_graph(index, include_references=True)
     assert len(graph.references_of(sym)) == 1
+
+
+def test_reference_carries_write_access_role() -> None:
+    # a scip-clang read-write-access-patch binary tags `g = 5;` with WriteAccess;
+    # the builder must mask it through to the stored Reference.
+    typ = "cxx . . $ mongo/Counter#"
+    doc = scip_pb2.Document(relative_path="use.cpp")
+    doc.occurrences.append(_occurrence(typ, 7, roles=WRITE_ACCESS))
+    index = scip_pb2.Index(documents=[doc])
+
+    graph = build_graph(index, include_references=True)
+    (ref,) = graph.references_of(typ)
+    assert ref.roles == WRITE_ACCESS
+
+
+def test_plain_and_read_only_references_carry_no_write_bit() -> None:
+    typ = "cxx . . $ mongo/Counter#"
+    doc = scip_pb2.Document(relative_path="use.cpp")
+    doc.occurrences.append(_occurrence(typ, 7))  # role 0: plain read / no data
+    doc.occurrences.append(_occurrence(typ, 9, roles=READ_ACCESS))
+    index = scip_pb2.Index(documents=[doc])
+
+    graph = build_graph(index, include_references=True)
+    assert {r.roles for r in graph.references_of(typ)} == {0, READ_ACCESS}
+    assert not any(r.roles & WRITE_ACCESS for r in graph.references_of(typ))
 
 
 def test_type_definition_site_is_recorded() -> None:

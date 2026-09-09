@@ -73,6 +73,8 @@ def _gc_disabled[T](fn: Callable[..., T]) -> Callable[..., T]:
 
 DEFINITION = scip_pb2.SymbolRole.Definition
 FORWARD_DEFINITION = scip_pb2.SymbolRole.ForwardDefinition
+READ_ACCESS = scip_pb2.SymbolRole.ReadAccess
+WRITE_ACCESS = scip_pb2.SymbolRole.WriteAccess
 
 
 def is_callable_symbol(symbol: str) -> bool:
@@ -422,7 +424,7 @@ def build_graph(
             # (or class), not just the file. Needs a binary that emits
             # enclosing_range (#504); a stock binary has no intervals, so the
             # reference stays a pure location. `local ...` symbols are noise.
-            ref_sites: list[tuple[str, int]] = []
+            ref_sites: list[tuple[str, int, int]] = []
             for occ in doc.occurrences:
                 if occ.symbol_roles & (DEFINITION | FORWARD_DEFINITION):
                     continue
@@ -431,12 +433,19 @@ def build_graph(
                 line = _occurrence_start_line(occ)
                 if line is None:
                     continue
-                ref_sites.append((occ.symbol, line))
+                # Mask to the two bits we consume (ReadAccess/WriteAccess) so
+                # unrelated role bits (Generated, Test, ...) don't leak into the
+                # stored value. Both 0 on a stock binary — no fabricated roles.
+                ref_sites.append(
+                    (occ.symbol, line, occ.symbol_roles & (READ_ACCESS | WRITE_ACCESS))
+                )
             if attribute_references:
-                enclosing = _attribute_containment(usage_intervals, [line for _, line in ref_sites])
+                enclosing = _attribute_containment(
+                    usage_intervals, [line for _, line, _ in ref_sites]
+                )
             else:
                 enclosing = [None] * len(ref_sites)
-            for (sym, line), enclosing_symbol in zip(ref_sites, enclosing):
-                graph.add_reference(sym, doc.relative_path, line, enclosing_symbol)
+            for (sym, line, roles), enclosing_symbol in zip(ref_sites, enclosing):
+                graph.add_reference(sym, doc.relative_path, line, enclosing_symbol, roles=roles)
 
     return graph

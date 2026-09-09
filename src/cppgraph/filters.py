@@ -12,10 +12,11 @@ from __future__ import annotations
 import re
 from typing import TYPE_CHECKING
 
+from cppgraph.builder import READ_ACCESS, WRITE_ACCESS
 from cppgraph.export import is_test_file
 
 if TYPE_CHECKING:
-    from cppgraph.model import Edge
+    from cppgraph.model import Edge, Reference
     from cppgraph.store import GraphStore
 
 
@@ -170,3 +171,30 @@ def filter_by_path(
         if matches_path_prefix(file, include=include_paths, exclude=exclude_paths):
             kept.append(e)
     return kept
+
+
+# --- read/write access roles (scip-clang read-write-access patch) ------------
+
+
+def access_tag(roles: int) -> str:
+    """Human suffix for a use site: ` (write)` on a plain write, ` (read+write)`
+    on a compound one (both bits). A plain read — and a graph without role
+    data — gets '' : reads are the default, and silence never fabricates."""
+    if not roles & WRITE_ACCESS:
+        return ""
+    return " (read+write)" if roles & READ_ACCESS else " (write)"
+
+
+def filter_by_access(refs: list[Reference], access: str) -> list[Reference]:
+    """Keep the use sites matching an `--access`/`access` filter: 'write' keeps
+    sites tagged WriteAccess; 'read' keeps sites known NOT to be a write (plain
+    reads — a read+write site is a write, so it goes). Caller must gate on the
+    graph's `has_access_roles` first: without role data nothing is filtered
+    meaningfully, and pretending every site is a read would fabricate. Raises
+    ValueError on anything but 'read'/'write' — the MCP surface doesn't
+    constrain the value the way the CLI's argparse does."""
+    if access == "write":
+        return [r for r in refs if r.roles & WRITE_ACCESS]
+    if access == "read":
+        return [r for r in refs if not r.roles & WRITE_ACCESS]
+    raise ValueError(f"invalid access filter {access!r}: valid choices are 'read', 'write'")
