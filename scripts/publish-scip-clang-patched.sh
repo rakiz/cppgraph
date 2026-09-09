@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 ### USAGE START
-# Publish a locally built patched (enclosing_range + ForwardDefinition +
-# ReadAccess/WriteAccess) scip-clang
-# binary as a GitHub Release asset on this repo's origin, so other machines can
-# later download it instead of running the ~30-60 min Docker build. MANUAL
-# maintainer tool: never run from CI, never called by cppgraph's own code. It only
-# publishes — it does NOT change how `cppgraph setup` obtains scip-clang (setup's
-# `download-patched` source consumes exactly these assets).
+# Publish a locally built patched scip-clang binary (carrying this repo's
+# whole scip-clang-patches/ bundle — see that directory's README.md for the
+# current patch list) as a GitHub Release asset on this repo's origin, so
+# other machines can later download it instead of running the ~30-60 min
+# Docker build. MANUAL maintainer tool: never run from CI, never called by
+# cppgraph's own code. It only publishes — it does NOT change how `cppgraph
+# setup` obtains scip-clang (setup's `download-patched` source consumes
+# exactly these assets).
 #
 #   scripts/publish-scip-clang-patched.sh <binary> <platform> [version] [patchset]
 #
@@ -153,28 +154,38 @@ if gh release view -R "$REPO" "$TAG" >/dev/null 2>&1; then
   fi
 else
   echo "  creating it"
-  NOTES="$(cat <<EOF
-Locally built scip-clang binaries carrying cppgraph's patch bundle: the
-enclosing_range feature (sourcegraph/scip-clang) from PR #504, which cppgraph
-uses for exact reference-to-symbol attribution, plus cppgraph's own
-ForwardDefinition and ReadAccess/WriteAccess fixes.
-
-- Base: upstream scip-clang v$VERSION tag (sourcegraph/scip-clang)
-- Patchset p$PATCHSET_VERSION: PR #504 (enclosing_range), the
-  ForwardDefinition fix, and the ReadAccess/WriteAccess syntactic classifier
-  — the .patch files live in scip-clang-patches/
-  in the cppgraph repo (patchset history: the \$comment_patchset key in
-  versions.json)
-- Built with Bazel (--config=release-linux via docker/build-scip-clang-patched-linux on Linux,
-  or --config=release natively via scripts/build-scip-clang-patched-macos.sh on macOS —
-  see the release asset / build script for the platform actually used)
-
-NOT an official sourcegraph/scip-clang release — built and published by the
-cppgraph maintainer. Verify downloads against the matching .sha256 asset.
-EOF
-)"
+  # Patch list is generated from what's actually in scip-clang-patches/ at
+  # publish time — never hardcoded prose here, so this can't go stale the way
+  # a fixed patch list did before (a real bug: this text once still named
+  # only 3 of the then-6 shipped patches). One line per *-on-v$VERSION.patch
+  # file, alphabetical.
+  PATCH_LIST="$(cd "$(dirname "$0")/.." && for p in scip-clang-patches/*-on-v"$VERSION".patch; do
+    [ -e "$p" ] || continue
+    echo "- \`$(basename "$p")\`"
+  done)"
+  [ -n "$PATCH_LIST" ] || die "no scip-clang-patches/*-on-v$VERSION.patch files found — check the version"
+  # Built with printf, not a heredoc inside $(): bash 3.2 (macOS system bash)
+  # parses a heredoc body in a command substitution with a raw quote scanner, so
+  # an odd number of apostrophes in the body ("cppgraph's") breaks it (bash -n
+  # fails far below the actual line). printf keeps the text byte-identical.
+  NOTES="$(printf '%s\n' \
+    "Locally built scip-clang binary carrying cppgraph's full patch bundle" \
+    "(patchset p${PATCHSET_VERSION}) on top of upstream scip-clang v${VERSION} —" \
+    'see `scip-clang-patches/README.md` in the cppgraph repo for what each patch' \
+    'does and the current apply order. Patches in this bundle:' \
+    '' \
+    "$PATCH_LIST" \
+    '' \
+    "- Base: upstream scip-clang v${VERSION} tag (sourcegraph/scip-clang)" \
+    '- Built with Bazel (--config=release-linux via' \
+    '  docker/build-scip-clang-patched-linux on Linux, or --config=release' \
+    '  natively via scripts/build-scip-clang-patched-macos.sh on macOS — see the' \
+    '  release asset name for the platform actually used)' \
+    '' \
+    'NOT an official sourcegraph/scip-clang release — built and published by the' \
+    "cppgraph maintainer. Verify downloads against the matching .sha256 asset.")"
   gh release create -R "$REPO" "$TAG" \
-      --title "scip-clang patched (enclosing_range + ForwardDefinition + ReadAccess/WriteAccess) v$VERSION p$PATCHSET_VERSION" \
+      --title "scip-clang patched (patchset p$PATCHSET_VERSION) v$VERSION" \
       --notes "$NOTES" >/dev/null
 fi
 
