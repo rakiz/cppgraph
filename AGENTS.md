@@ -192,7 +192,16 @@ when it's stale (it reflects the build graph at generation time).
 
 ## Guardrails
 
-- **Do not commit without the maintainer saying so explicitly.**
+- **Do not commit without the maintainer saying so explicitly.** Mechanically
+  enforced too: `opencode.json` sets `git commit`/`git push` to `permission: ask`,
+  so opencode itself blocks the command until the human approves — don't treat
+  the agent-side rule as the only gate. Before running `git commit` on any
+  non-trivial change, invoke the `precommit-check` subagent (`.opencode/agent/`)
+  on the full diff since the last commit; its checklist covers untracked files,
+  stale cross-references, doc/CHANGELOG sync, test coverage of new behavior
+  (including interactions with adjacent features), and a real test/lint run.
+  A FAIL blocks proposing the commit to the maintainer; fix and re-run before
+  asking again.
 - Treat the target's **source** as read-only — never modify code or build files.
   The one thing the tool writes into the target is a **gitignored `.cppgraph/`**
   directory (its own outputs: `graph.db`, `.scip`, filtered compdb), dropped in
