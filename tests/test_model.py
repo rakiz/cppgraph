@@ -25,15 +25,38 @@ def test_graph_json_roundtrip_signature_documentation(tmp_path: Path) -> None:
     carries it; from_dict passes node kwargs straight through)."""
     graph = Graph()
     graph.add_node("cxx . . $ mongo/Foo#bar(a1).", display_name="bar")
-    graph.nodes["cxx . . $ mongo/Foo#bar(a1)."].signature_documentation = "void bar(int a)"
+    graph.nodes["cxx . . $ mongo/Foo#bar(a1)."].signature_documentation = "void bar(int)"
     graph.add_node("cxx . . $ mongo/Foo#nosig(n1).")  # absent field round-trips as None
 
     out = tmp_path / "graph.json"
     graph.save_json(out)
     loaded = Graph.load_json(out)
 
-    assert loaded.nodes["cxx . . $ mongo/Foo#bar(a1)."].signature_documentation == "void bar(int a)"
+    assert loaded.nodes["cxx . . $ mongo/Foo#bar(a1)."].signature_documentation == "void bar(int)"
     assert loaded.nodes["cxx . . $ mongo/Foo#nosig(n1)."].signature_documentation is None
+
+
+def test_graph_json_roundtrip_is_out_of_project(tmp_path: Path) -> None:
+    """`Node.is_out_of_project` must survive a save/load cycle, all three
+    values distinct — and an older JSON without the key loads as None (a
+    pre-feature graph file), never a crash."""
+    graph = Graph()
+    graph.add_node("cxx . . $ boost/Foo#bar(a1).", display_name="ext")
+    graph.nodes["cxx . . $ boost/Foo#bar(a1)."].is_out_of_project = True
+    graph.add_node("cxx . . $ mongo/Foo#bar(a1).", display_name="native")
+    graph.nodes["cxx . . $ mongo/Foo#bar(a1)."].is_out_of_project = False
+    graph.add_node("cxx . . $ mongo/phantom(p1).")  # absent field round-trips as None
+
+    out = tmp_path / "graph.json"
+    graph.save_json(out)
+    loaded = Graph.load_json(out)
+
+    assert loaded.nodes["cxx . . $ boost/Foo#bar(a1)."].is_out_of_project is True
+    assert loaded.nodes["cxx . . $ mongo/Foo#bar(a1)."].is_out_of_project is False
+    assert loaded.nodes["cxx . . $ mongo/phantom(p1)."].is_out_of_project is None
+
+    old = Graph.from_dict({"nodes": [{"symbol": "a", "display_name": ""}], "edges": []})
+    assert old.nodes["a"].is_out_of_project is None
 
 
 def test_graph_find_matches_symbol_or_display_name() -> None:

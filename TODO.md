@@ -1,28 +1,14 @@
 # TODO
 
-The active list — open work we intend to do. Parked "someday / just in case"
-ideas live in the **Attic** at the bottom: kept for reference, not part of the
-active list. Design detail is in `DESIGN.md`, shipped features in
-`CHANGELOG.md`, releases in `versions.json`.
+The active list — open work we intend to do. Shipped work belongs in
+`CHANGELOG.md`, not here — a bullet moves out of this file the moment it's
+done, it doesn't grow a "DONE" label in place. Parked "someday / just in
+case" ideas live in the **Attic** at the bottom: kept for reference, not
+part of the active list. Design detail is in `DESIGN.md`, shipped features
+in `CHANGELOG.md`, releases in `versions.json`.
 
 ## Other
 
-
-- **Declaration-site phantom-caller bug — DONE for stock graphs too, not just #504.**
-  `who_calls(extractShardKeyFromDoc)` used to return `getKeyPatternFields` as a caller
-  because a bodyless member declaration (role 0, no `DEFINITION`/`FORWARD_DEFINITION`)
-  fell back to `bisect`-nearest-preceding. `build_graph` drops such a call site
-  instead of guessing when the document has `callable_intervals` (#504) — that part
-  was already fixed. The remaining gap (a stock graph, no `callable_intervals` at
-  all, had no signal to distinguish a declaration from a real call in the first
-  place) is now closed too:
-  `scip-clang-patches/forward-definition-on-v0.4.0.patch` tags a bodyless
-  declaration occurrence with `ForwardDefinition` at the source, so `build_graph`'s
-  existing `DEFINITION | FORWARD_DEFINITION` filter already excludes it — no
-  cppgraph-side change was needed, only the indexer had to start setting the bit.
-  Verified end-to-end: a stock official binary fabricates the phantom caller, our
-  patched binary doesn't, on the same fixture (see the scip-clang section below for
-  the patch itself; not yet upstreamed).
 - **Attributed references as first-class `uses` edges.** `impact_of`/`path` traverse
   `calls`/`inherits` only, so a *type* has no reachable callers — "what breaks if I
   change this struct?" isn't answerable transitively; the answer lives in
@@ -158,11 +144,10 @@ active list. Design detail is in `DESIGN.md`, shipped features in
 cppgraph is downstream of scip-clang: some features are blocked not by our code but by
 what the indexer emits. Items here are gaps in scip-clang itself — candidates to advocate
 upstream (sourcegraph/scip-clang) or, if it comes to it, to patch in our own clone (we
-already carry the #504 `enclosing_range` patch that way). Each links the feature of ours
-it unblocks. The field-emptiness audit has now run (`SCIP_AUDIT.md`, measured against
-`scratch/mongo_src_tests.scip` + a #504 fixture, exhaustive counts, not sampling) — every
-item below states a verified fact, not a suspicion, and carries the effort estimate and
-`scip-clang` file:line the audit found for whoever files the PR.
+already carry the #504 `enclosing_range` patch, and six syntactic-classifier patches, that
+way). Check `SCIP_AUDIT.md` (measured against `scratch/mongo_src_tests.scip` + a #504
+fixture, exhaustive counts, not sampling) before assuming a field is or isn't populated —
+that document is the field-by-field ground truth; this list is only the still-open asks.
 
 - **`enclosing_range` — not emitted by official scip-clang at all (PR #504 in progress).**
   The single biggest gap: enclosing ranges are the definition-body extents that drive exact
@@ -186,98 +171,34 @@ item below states a verified fact, not a suspicion, and carries the effort estim
   [sourcegraph/scip-clang#542](https://github.com/sourcegraph/scip-clang/issues/542). Once the
   asset exists, wire the `Linux/aarch64` `download` case in `setup_cmd.py`
   `platform_sources()` (stock binary, no #504). → unblocks a no-toolchain install on Linux ARM.
-- **`SymbolInformation.kind` — confirmed unemitted (`UnspecifiedKind` on 810,919/810,919
-  corpus symbols, 100%).** DONE on our side:
-  `scip-clang-patches/kind-on-v0.4.0.patch` adds a syntactic classifier
-  (`classifySymbolKind` in `Indexer.cc`, same style as read-write-access's
-  `classifyAccessRoles`) mapping the `clang::Decl` at each SymbolInformation-creating
-  site to its SCIP kind — Class/Struct/Union/Enum (via `TagDecl::getTagKind`),
-  EnumMember, Field, Function/Method/StaticMethod/PureVirtualMethod/Constructor
-  (FunctionDecl shape), Variable/StaticDataMember (VarDecl), Namespace, TypeAlias,
-  plus Macro on macros and File on the synthetic file symbol — carried through the
-  TU-merge pipeline by a new `SymbolInformationBuilder::kind` field re-emitted in
-  `finish()`. Documented limits (the classifier's own doc comment): syntactic only,
-  no semantic analysis — local variables and parameters get no `SymbolInformation`
-  emitted at all today, so they're unaffected (their classifier arms exist for
-  completeness); using-shadow decls, template type parameters and concepts stay
-  `UnspecifiedKind`; destructors classify as Method (SCIP has no Destructor kind).
-  Moderate not high value, exactly as the audit concluded: cppgraph's descriptor-suffix
-  derivation is already exact for the callable/type/term split, so cppgraph consumes
-  it additively, not as a derivation drop — `symbols.scip_kind` (store schema v5, the
-  same one as `refs.roles`, + the data-driven `has_symbol_kind` meta gate, mirroring
-  `has_access_roles`), surfaced as a `scip_kind` field on `explain_symbol`/`find` and
-  a `has_symbol_kind` capability line in `status`, on the CLI and as MCP tools alike;
-  absent/`UnspecifiedKind` degrades to no field, never a crash. Not yet upstreamed.
-- **`symbol_roles` `ReadAccess` / `WriteAccess` bits — confirmed never set (0 of
-  15,176,411 corpus occurrences carry either bit) by the OFFICIAL upstream binary
-  (measurement stands, `SCIP_AUDIT.md`).** DONE on our side:
-  `scip-clang-patches/read-write-access-on-v0.4.0.patch` adds a syntactic
-  classifier (`classifyAccessRoles` in `Indexer.cc`, next to `RefersToForwardDecl`)
-  that sets `WriteAccess` on an assignment/compound-assignment LHS or `++`/`--`
-  operand (and their overloaded-operator forms), `ReadAccess` alongside it on
-  read-modify-write sites, and an unconditional write for constructor-initializer
-  field references — wired into `saveDeclRefExpr`/`saveMemberExpr`/`saveFieldReference`.
-  Syntactic only, no dataflow — `f(x)` passing `x` by reference to an out-param
-  isn't detectable this way, and a ref-returning call as an lvalue (`a.b() = x`)
-  leaves `b`'s occurrence untagged (documented limits in the classifier's own
-  comment). cppgraph consumes it: `Reference.roles` (store schema v5, `refs.roles`
-  + `has_access_roles`), surfaced as `(write)`/`(read+write)` annotations and an
-  `--access {read,write}` filter on `cppgraph references` / `find_references`.
-  Not yet upstreamed — the receptivity signal below is why it's worth proposing:
-  `saveDeclRefExpr` carries the literal comment *"TODO: Add read-write access to the
-  symbol role here"* (`Indexer.cc:1018` in the unpatched source), and `saveMemberExpr`
-  (`:1024`) is the sibling site this fulfills.
-- **`symbol_roles` `ForwardDefinition` bit on bodyless-declaration occurrences —
-  DONE on our side.** The single biggest correctness win for STOCK-binary graphs
-  (where #504's `enclosing_range` isn't available to solve it by containment) —
-  see the TODO bullet at the top of this file for the bug it fixes and the
-  end-to-end verification (stock official binary vs. our patched binary, same
-  fixture). `scip-clang-patches/forward-definition-on-v0.4.0.patch` implements it:
-  the discriminator already existed and ran (`RefersToForwardDecl::check`,
-  `Indexer.cc:339`, is `!canonicalDecl->isThisDeclarationADefinition()`), and
-  bodyless declarations already routed through `saveForwardDeclaration` into the
-  internal forward-decl pipeline (`proto/fwd_decls.proto`) — which never touched
-  `symbol_roles`, landing as plain role-0, exactly the declaration-vs-call
-  indistinguishability that forced cppgraph's stock-binary over-capture. The
-  design caveat noted before building this was real and had to be resolved:
-  `saveReference` also routes genuine *references* that resolve to a
-  declaration-only decl into the same internal map, so a naive "tag every
-  `ForwardDeclOccurrence`" would have also tagged real calls to
-  declared-here/defined-elsewhere functions. The shipped fix adds an origin
-  marker (`is_declaration_site`, declaration-site vs. reference-site) to
-  `fwd_decls.proto`'s `ForwardDecl::Reference`, set at the two `ForwardDeclMap::insert`
-  call sites and consumed in `ForwardDeclOccurrence::addTo`. cppgraph's own
-  `builder.py` already filtered on `DEFINITION | FORWARD_DEFINITION` in
-  anticipation, so no cppgraph-side change was needed — only the indexer had to
-  start setting the bit. Not yet upstreamed.
-- **`symbol_roles` `Test` bit — confirmed never set (0 of 15,176,411).** We derive "is a
-  test" from the file path (`exclude_tests`); if scip-clang set the Test role it would
-  beat the path heuristic, though an upstream emitter would itself need a path/gtest
-  heuristic, so no exactness gain — not worth filing (see `FOLLOWUP.md`). → would unblock
-  exact test filtering, in principle.
-- **`documentation` — confirmed WORKING, contradicts this bullet's own prior claim.**
-  Measured: 99.99% non-empty, but 84.45% is a literal `"No documentation available."`
-  placeholder — the genuine doc-comment rate is 10.09% (81,844 of 810,919 symbols). No
-  upstream ask here: `explain_symbol` can consume this today, cppgraph-side.
-- **`SymbolInformation.signature_documentation` — confirmed never set (0/810,919 corpus
-  symbols; `set_signature_documentation` appears nowhere in the indexer) by the OFFICIAL
-  upstream binary (measurement stands, `SCIP_AUDIT.md`).** DONE on our side:
-  `scip-clang-patches/signature-documentation-on-v0.4.0.patch` adds a
-  `declToSignatureText` syntactic printer (clang `PrintingPolicy` with `TerseOutput`,
-  function/method decls only — via `saveFunctionDecl`) emitting SCIP's
-  `SymbolInformation.signature_documentation` (a pretty-printed declaration, no body,
-  default arguments preserved), plumbed through the TU-merge pipeline
-  (`SymbolInformationBuilder`/`DocumentBuilder::merge`, first-non-empty-wins semantics)
-  exactly like the `kind` patch. Scope/limit: only defined or pure-virtual
-  function/method declarations get a signature — bodyless in-class declarations
-  (routed through `saveForwardDeclaration`, no `SymbolInformation` emitted) do not, in
-  v1. Verified end-to-end with a real compiled build against a fixture (`int add(int a,
-  int b = 2)` → `sig_doc.text == "int add(int a, int b = 2)"`). cppgraph consumes it:
-  `Node.signature_documentation` (store schema amends the pending v5, ungated — a plain
-  nullable column like `documentation`, not gated like `scip_kind`), surfaced as
-  `signature_documentation` on `explain`/`explain_symbol` (CLI: "signature (stored):",
-  distinct from the existing source-derived `--root` `signature:` line). Not yet
-  upstreamed.
+- **`symbol_roles` `Test` bit — confirmed never set (0 of 15,176,411 corpus occurrences,
+  `SCIP_AUDIT.md`).** Not worth filing: we already derive "is a test" from the file path
+  (`exclude_tests`), and an upstream emitter would itself need the same path/gtest
+  heuristic — no exactness gain over what we already have.
+- **Lambda closures get no symbol / no `enclosing_range` at all.** `IndexerAstVisitor`
+  doesn't override `TraverseLambdaExpr`, so Clang's default traversal walks into a lambda's
+  body but `saveFunctionDecl`/`saveRecordDecl` never run for the closure class or its
+  `operator()` — a lambda has no symbol of its own and no interval, so anything referenced
+  *inside* one attributes to whatever outer interval contains it (a global's initializer,
+  or the enclosing function). Verified empirically: `int g = compute([]() { return
+  other_global; });` on the #504 binary attributes `other_global`'s reference to `g`, not to
+  the lambda (the standing caveat on `global_init_references`). Broader than that one
+  caveat: inside a normal function body, a call/reference inside a lambda passed to e.g.
+  `std::sort` attributes to the *enclosing function* today, so `who_calls`/`impact_of`
+  chains blur a lambda's own logic into its host's, `no_incoming_calls` can't say "this
+  lambda has no callers" (it isn't a symbol), and `line_span`/`outline` can't size or list
+  it. The fix: override `TraverseLambdaExpr` to additionally call `TraverseDecl` on
+  `lambdaExpr->getLambdaClass()`, reusing the anonymous-type naming scheme
+  `SymbolFormatter.cc` already has for other compiler-synthesized types. Real risk: Clang's
+  default traversal *already* walks the lambda's body statements, so naively adding a
+  `TraverseDecl` call on top risks **double-visiting** them (duplicate occurrences/edges) —
+  needs either suppressing the default body walk once the Decl-level one takes over, or
+  scoping the added traversal to just the Decl/symbol-emission step. Also needs checking
+  against generic/nested/no-capture (function-pointer-decaying) lambdas. Estimate: a
+  focused day, not an afternoon — moderate effort and risk, unlike the other
+  syntactic-classifier patches in this bundle. If it lands: drop `global_init_references`'s
+  lambda caveat, and revisit whether `no_incoming_calls`/`line_span`/`outline` should list
+  lambdas as first-class definitions.
 - **Effective call arity per call site — not modeled.** A call occurrence carries the
   callee symbol and location but not how many arguments the call expression actually passes.
   clang's AST knows it; SCIP drops it. Without it the graph can't tell "called with 2 args"
@@ -285,7 +206,6 @@ item below states a verified fact, not a suspicion, and carries the effort estim
   question behind the `explain_symbol` default-args item). Would need a scip-clang patch to
   emit per-call arity (or a source re-parse of each call site, expensive). → would unblock
   "which calls rely on a default?" analysis.
-
 - **Member visibility (public/protected/private) — a *format* gap, not an emission
   one.** clang knows it (AST `AccessSpecifier`), but SCIP has no field for it and models
   privacy as *local symbols* (a name-scope notion that doesn't map C++'s compile-time
@@ -333,3 +253,41 @@ Kept for reference; most may never happen. Promote one back up if it becomes rea
   edges would close it, but the macros are codebase-specific and a synthetic edge
   departs from the exact, heuristic-free model (against the tool's exactness goal);
   it would need a distinct `kind` and an explicit decision before adding.
+- **Per-symbol correction notes** (merged from the retired `FOLLOWUP.md`). Problem: an
+  agent repeats a mistake it was already corrected on in a past session — the correction
+  isn't recorded anywhere the agent re-reads before acting. Idea: anchor a correction to
+  the exact SCIP symbol it's about (not a line number, not an embedding) — cppgraph
+  already resolves symbols exactly, so staleness is free: a symbol either still resolves
+  in the graph or it doesn't. Sketch: one new table in the existing SQLite store
+  (`notes(symbol_id, text, author, created_at, status)`), a small MCP tool to record one
+  (`record_note(symbol, text)`), surfaced inline in `explain_symbol`'s existing response —
+  no new database, no vector/semantic search, no review UI, no build/test runner for a
+  first cut. Open questions, unresolved: (1) part of cppgraph, or a separate tool that
+  depends on it for anchoring — cppgraph's ethos is facts-not-judgments, a "correction" is
+  a judgment, not a compiler fact, different trust model; (2) what triggers recording one —
+  manual only, or some automatic capture; (3) does "stale" (symbol no longer resolves) mean
+  delete the note or just flag it. If it proves useful: table + `record_note` + surfaced via
+  `explain_symbol`; a way to list/browse notes (`cppgraph notes`); only then, if genuinely
+  recurring friction, search/review-workflow/automatic-capture — each justified by an
+  observed need.
+- **Project-scope default for path-prefix filtering** (merged from the retired
+  `FOLLOWUP.md`). Per-query `exclude_paths`/`include_paths` are done and wired into every
+  relevant tool; what's missing is a project-scope *default* that excludes vendored/
+  external code everywhere, so "my code, not libs" is free — real usage shows the noise
+  actively discourages the tools (`find "Block"` → 188 hits, mostly `spirv_cross`;
+  `build/vcpkg_installed/` swamping results). Parked, not active: the open question is how
+  cppgraph knows what's external *factually*, not by name heuristic
+  (`.pio`/`third_party`/`vendor` guessing). Leaning: derive it from
+  `compile_commands.json`'s `arguments` (which `compdb.py` doesn't read today, only
+  `file`) — the `-I` include paths there delineate vendored (`.pio/libdeps`,
+  `vcpkg_installed`) from project sources factually. Real design decision needed before
+  writing code (how to parse/rank `-I` paths, what counts as "vendored" vs "third-party
+  but still mine," how a default interacts with an explicit override) — check against a
+  few real compdbs (mongo's, a `vcpkg`-based one, a PlatformIO one) before committing to a
+  rule. If it proves useful: read `-I`/`-isystem` out of `compile_commands.json` in
+  `compdb.py`; likely rule "the last `-I` path that's an ancestor of the file being
+  compiled, if any, marks it project-local; anything only reachable via `-isystem` or an
+  `-I` outside the project root is vendored"; store the derived classification per file
+  (or compute it lazily) and wire it as the default `exclude_paths` behavior, with an
+  explicit override taking precedence; also applies to `boundary_violations`/`api_surface`
+  (now shipped) — same "belongs to a path prefix" notion.

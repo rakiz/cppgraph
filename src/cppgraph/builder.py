@@ -45,7 +45,7 @@ import functools
 import gc
 from collections.abc import Callable, Iterable
 
-from cppgraph.model import Graph
+from cppgraph.model import Graph, Node
 from cppgraph.proto import scip_pb2
 
 
@@ -185,6 +185,61 @@ def signature_documentation_text(signature: scip_pb2.Signature) -> str | None:
 
 
 _SINGLE_CHAR_TERMINATORS = "/#.:!"  # namespace, type, term, meta, macro
+
+
+def _merge_symbol_information(node: Node, sym_info: scip_pb2.SymbolInformation) -> None:
+    """First-*real*-wins merge of a `SymbolInformation`'s metadata onto `node`.
+
+    Shared by the `Document.symbols` and `Index.external_symbols` passes (the
+    same proto message type, so the same merge rules): a symbol's
+    `SymbolInformation` can appear once per document (a header included by N
+    TUs) or in both the external table and some document (cross-TU merge), so
+    a later duplicate must not overwrite a datum already captured — but a None
+    visit keeps the door open for a later genuine one. `display_name` merges
+    inside `Graph.add_node` itself; `is_out_of_project` is classification, not
+    metadata — each pass owns its own write (see `_merge_external_symbol` and
+    `build_graph`'s documents pass).
+    """
+    if node.documentation is None:
+        # First *real* doc text wins: the same symbol's SymbolInformation
+        # appears once per document (a header included by N TUs), so a
+        # later duplicate must not overwrite a comment already captured —
+        # but a placeholder-only visit returns None here and keeps the
+        # door open for a later genuine one.
+        node.documentation = real_documentation(sym_info.documentation)
+    if node.scip_kind is None:
+        # Fine-grained SCIP kind (kind-patched binary only; a stock one
+        # leaves it 0/UnspecifiedKind -> None). Same "first wins" door
+        # as documentation: the field is identical across a symbol's
+        # per-document duplicates anyway.
+        node.scip_kind = symbol_kind_name(sym_info.kind)
+    if node.signature_documentation is None:
+        # Recorded signature text (signature-emitting binary only; a
+        # stock one leaves the field unset -> empty text -> None). Same
+        # "first wins" door as documentation: no placeholder exists for
+        # signatures, so a non-empty text is the only bar, and a later
+        # duplicate never overwrites one already captured.
+        node.signature_documentation = signature_documentation_text(
+            sym_info.signature_documentation
+        )
+
+
+def _merge_external_symbol(graph: Graph, sym_info: scip_pb2.SymbolInformation) -> None:
+    """One `Index.external_symbols` entry: intern the node, merge its metadata,
+    classify it as out-of-project.
+
+    No edges are created from these relationships — `Graph.add_edge` needs a
+    real project document path as provenance, and an external symbol by
+    definition has none. This pass is node identity/metadata only.
+
+    The classification is explicit, not an accident of pass order: a node
+    already carrying project-native evidence (`False`) is never flipped back
+    to `True`, so the precedence rule holds whichever order the passes run in.
+    """
+    node = graph.add_node(sym_info.symbol, display_name=sym_info.display_name)
+    _merge_symbol_information(node, sym_info)
+    if node.is_out_of_project is not False:
+        node.is_out_of_project = True
 
 
 def _is_direct_member(remainder: str) -> bool:
@@ -337,34 +392,40 @@ def build_graph(
     references keep `enclosing_symbol = None` and degrade to file granularity.
     Opt-in because it is exact but larger. No effect unless `include_references`
     is also on.
+
+    Always-on (no parameter): `Index.external_symbols` — symbols referenced
+    from this index but defined in an un-indexed external package — is
+    classified into `Node.is_out_of_project` (True; the same metadata merge as
+    `Document.symbols`, whose entries classify False, a pure phantom None).
+    Project-native evidence always wins. Node identity/metadata only: no edges
+    are created from external relationships (there is no project document to
+    provenance them with). The resulting `graph.has_external_symbols` marker
+    becomes the store's `has_external_symbols` meta flag on a full build.
     """
     graph = Graph()
+    graph.has_external_symbols = True
+
+    # `Index.external_symbols` first: symbols referenced from this index but
+    # defined in an un-indexed external package (boost/absl/stdlib/… — a
+    # field the stock scip-clang binary already emits). The same
+    # `SymbolInformation` message type as `Document.symbols`, so the metadata
+    # merge is identical — but nothing project-side backs them: no definition
+    # site (the node's file stays None) and no edges (see
+    # `_merge_external_symbol`). Node identity/metadata only.
+    for sym_info in index.external_symbols:
+        _merge_external_symbol(graph, sym_info)
 
     for doc in index.documents:
         for sym_info in doc.symbols:
             node = graph.add_node(sym_info.symbol, display_name=sym_info.display_name)
-            # First *real* doc text wins: the same symbol's SymbolInformation
-            # appears once per document (a header included by N TUs), so a
-            # later duplicate must not overwrite a comment already captured —
-            # but a placeholder-only visit returns None here and keeps the
-            # door open for a later genuine one.
-            if node.documentation is None:
-                node.documentation = real_documentation(sym_info.documentation)
-            if node.scip_kind is None:
-                # Fine-grained SCIP kind (kind-patched binary only; a stock one
-                # leaves it 0/UnspecifiedKind -> None). Same "first wins" door
-                # as documentation: the field is identical across a symbol's
-                # per-document duplicates anyway.
-                node.scip_kind = symbol_kind_name(sym_info.kind)
-            if node.signature_documentation is None:
-                # Recorded signature text (signature-emitting binary only; a
-                # stock one leaves the field unset -> empty text -> None). Same
-                # "first wins" door as documentation: no placeholder exists for
-                # signatures, so a non-empty text is the only bar, and a later
-                # duplicate never overwrites one already captured.
-                node.signature_documentation = signature_documentation_text(
-                    sym_info.signature_documentation
-                )
+            _merge_symbol_information(node, sym_info)
+            # Project-native evidence: a SymbolInformation in one of this
+            # index's documents means the symbol is defined in the project.
+            # Written unconditionally so it wins over an external
+            # classification regardless of pass order — a symbol that also
+            # appeared in `Index.external_symbols` (cross-TU merge) must end
+            # up False, never the other way round.
+            node.is_out_of_project = False
             for rel in sym_info.relationships:
                 if rel.is_implementation:
                     # scip-clang uses is_implementation for both class
@@ -378,6 +439,15 @@ def build_graph(
                     else:
                         edge_kind = "implements"
                     graph.add_edge(edge_kind, sym_info.symbol, rel.symbol, doc.relative_path)
+                if rel.is_type_definition:
+                    # A separate `if`, not elif: the proto's is_implementation
+                    # and is_type_definition are independent boolean flags on
+                    # the same Relationship message, so one relationship can
+                    # legitimately carry both. `typed-by`: field/variable ->
+                    # its declared type (scip-clang-patches/typed-by-on-v0.4.0.patch;
+                    # never emitted on graphs built with a stock or older
+                    # patched binary, so this degrades to no edges there).
+                    graph.add_edge("typed-by", sym_info.symbol, rel.symbol, doc.relative_path)
 
         # One pass over definition occurrences: record every symbol's definition
         # site (so types/fields, not just callables, are locatable), collect the

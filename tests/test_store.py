@@ -265,6 +265,76 @@ def test_reachable_from_unknown_symbol_returns_empty(tmp_path: Path) -> None:
     assert store.reachable_from("nope") == set()
 
 
+# --- typed-by (Relationship.is_type_definition) ------------------------------
+
+
+def test_impact_over_typed_by_returns_fields_typed_as_the_type(tmp_path: Path) -> None:
+    """Reverse impact on a TYPE with kind="typed-by" returns the fields and
+    variables typed as it — the clean traversable form of "who has a field of
+    this type?" (src = field/var, dst = type)."""
+    field = "cxx . . $ mongo/Outer#f."
+    global_var = "cxx . . $ mongo/g."
+    typ = "cxx . . $ mongo/Value#"
+    graph = Graph()
+    graph.add_edge("typed-by", field, typ, file="outer.h", line=4)
+    graph.add_edge("typed-by", global_var, typ, file="globals.cpp", line=9)
+    graph.add_edge("calls", "unrelated", "other", file="f.cpp", line=3)
+    store = _store(tmp_path, graph)
+    assert store.impact(typ, kind="typed-by") == {field, global_var}
+
+
+def test_reachable_from_over_typed_by_returns_the_declared_type(tmp_path: Path) -> None:
+    """Forward reachability from a FIELD with kind="typed-by" returns its
+    declared type — the exact mirror of impact's direction."""
+    field = "cxx . . $ mongo/Outer#f."
+    typ = "cxx . . $ mongo/Value#"
+    graph = Graph()
+    graph.add_edge("typed-by", field, typ, file="outer.h", line=4)
+    store = _store(tmp_path, graph)
+    assert store.reachable_from(field, kind="typed-by") == {typ}
+
+
+def test_typed_by_does_not_leak_into_other_kinds(tmp_path: Path) -> None:
+    """A typed-by edge is invisible to calls/inherits traversals and vice
+    versa — one edge kind per call, no cross-kind leakage."""
+    field = "cxx . . $ mongo/Outer#f."
+    typ = "cxx . . $ mongo/Value#"
+    graph = Graph()
+    graph.add_edge("typed-by", field, typ, file="outer.h", line=4)
+    graph.add_edge("calls", "fn", "other_fn", file="f.cpp", line=1)
+    store = _store(tmp_path, graph)
+    # typed-by edges don't show up under the other kinds
+    assert store.impact(typ, kind="typed-by") == {field}
+    assert store.impact(typ, kind="calls") == set()
+    assert store.impact(typ, kind="inherits") == set()
+    assert store.reachable_from(field, kind="typed-by") == {typ}
+    assert store.reachable_from(field, kind="calls") == set()
+    # and calls edges don't show up under typed-by
+    assert store.reachable_from("fn", kind="typed-by") == set()
+    assert store.impact("other_fn", kind="typed-by") == set()
+
+
+def test_boundary_violations_typed_by_opt_in_and_default_excluded(tmp_path: Path) -> None:
+    """A field/variable typed as a type across the declared layer boundary is a
+    genuine violation — but only when `typed-by` is requested explicitly: the
+    default edge kinds stay `("calls", "inherits")`."""
+    field = "common_widget"
+    typ = "cxx . . $ platform/Value#"
+    graph = Graph()
+    graph.add_edge("typed-by", field, typ, file="common/widget.h", line=7)
+    graph.nodes[field].file = "common/widget.h"
+    graph.nodes[typ].file = "platform/value.h"
+    store = _store(tmp_path, graph)
+    rules = [("common/", "platform/")]
+    violations, total = store.boundary_violations(rules, edge_kinds=("typed-by",))
+    assert total == 1
+    assert violations[0]["kind"] == "typed-by"
+    assert violations[0]["src"] == field
+    assert violations[0]["dst"] == typ
+    # excluded from the default kinds
+    assert store.boundary_violations(rules) == ([], 0)
+
+
 # --- hotspots ----------------------------------------------------------------
 
 
@@ -2208,6 +2278,224 @@ def test_enrich_references_adds_signature_column_but_never_backfills(tmp_path: P
     con.close()
     assert "signature_documentation" in columns  # added...
     assert store.get_node(typ).signature_documentation is None  # ...but not backfilled
+
+
+# --- symbols.is_out_of_project / has_external_symbols -------------------------
+#
+# The `Index.external_symbols` classification (a field the STOCK scip-clang
+# binary already emits): True = defined in an un-indexed external package,
+# False = project-native (a `Document.symbols` SymbolInformation — project
+# evidence always wins), NULL = no SymbolInformation from either source (a
+# pure phantom node). Gated by the `has_external_symbols` meta flag, which
+# ONLY a full build sets — an incremental update touches individual symbols
+# but can never classify the whole pre-existing store.
+
+
+@pytest.mark.parametrize("classified", [True, False, None], ids=["external", "native", "phantom"])
+def test_is_out_of_project_round_trip(tmp_path: Path, classified: bool | None) -> None:
+    graph = Graph()
+    graph.nodes[METHOD] = Node(
+        symbol=METHOD,
+        display_name="makeResumeToken",
+        file="a.cpp",
+        line=4,
+        is_out_of_project=classified,
+    )
+    store = _store(tmp_path, graph)
+
+    node = store.get_node(METHOD)
+    assert node is not None
+    assert node.is_out_of_project is classified
+
+
+def test_find_returns_is_out_of_project(tmp_path: Path) -> None:
+    graph = Graph()
+    graph.nodes[METHOD] = Node(
+        symbol=METHOD,
+        display_name="makeResumeToken",
+        file="a.cpp",
+        line=4,
+        is_out_of_project=True,
+    )
+    store = _store(tmp_path, graph)
+
+    (node,) = store.find("makeResumeToken")
+    assert node.is_out_of_project is True
+
+
+def test_get_node_and_find_on_a_pre_is_out_of_project_store_degrade(tmp_path: Path) -> None:
+    """A store built before the `is_out_of_project` amendment (schema v5 as
+    first drafted) must read back with is_out_of_project=None — never crash —
+    and the fallback cascade must NOT lose `documentation`/`scip_kind`/
+    `signature_documentation`, the data the previous shape already carries."""
+    graph = Graph()
+    graph.nodes[METHOD] = Node(
+        symbol=METHOD,
+        display_name="makeResumeToken",
+        file="a.cpp",
+        line=4,
+        documentation="/** Doc. */",
+        scip_kind="StaticMethod",
+        signature_documentation="void makeResumeToken(const Document& doc)",
+    )
+    db = tmp_path / "g.db"
+    write_sqlite(graph, db)
+    con = sqlite3.connect(db)
+    con.execute("ALTER TABLE symbols DROP COLUMN is_out_of_project")
+    con.commit()
+    con.close()
+
+    store = GraphStore(db)
+    node = store.get_node(METHOD)
+    assert node is not None
+    assert node.is_out_of_project is None
+    assert node.documentation == "/** Doc. */"
+    assert node.scip_kind == "StaticMethod"
+    assert node.signature_documentation == "void makeResumeToken(const Document& doc)"
+    assert [n.is_out_of_project for n in store.find("makeResumeToken")] == [None]
+
+
+def test_full_build_sets_has_external_symbols_even_when_empty(tmp_path: Path) -> None:
+    """The flag means "built with this feature", not "found at least one
+    external symbol": a full build over an index whose `external_symbols` list
+    is empty still writes `has_external_symbols` — the capability gates the
+    FIELD's presence in query output, not any particular value."""
+    doc = scip_pb2.Document(relative_path="plain.cpp")
+    doc.symbols.add(symbol="cxx . . $ mongo/plain(p1).")
+    db = tmp_path / "g.db"
+    write_sqlite(build_graph(scip_pb2.Index(documents=[doc])), db)
+
+    assert GraphStore(db).meta().get("has_external_symbols") == "true"
+
+
+def test_store_without_the_feature_has_no_external_symbols_flag(tmp_path: Path) -> None:
+    """A plain in-memory graph (not produced by `build_graph`) carries no
+    marker: the flag stays absent and nothing raises — the pre-feature
+    behaviour, byte for byte."""
+    graph = Graph()
+    graph.add_node(METHOD, display_name="makeResumeToken")
+    store = _store(tmp_path, graph)
+
+    assert store.get_node(METHOD).is_out_of_project is None
+    assert store.meta().get("has_external_symbols") is None
+
+
+def test_update_adds_the_column_but_never_claims_the_capability(tmp_path: Path) -> None:
+    """An incremental update may classify the symbols it touches (the partial's
+    doc.symbols entries are project-native evidence) and must add the column if
+    missing — but it covers only the changed TUs and can never classify the
+    whole pre-existing store, so `has_external_symbols` must stay unset."""
+    db = tmp_path / "graph.db"
+    original = Graph()
+    original.add_node(METHOD, display_name="makeResumeToken")
+    write_sqlite(original, db)
+    con = sqlite3.connect(db)
+    con.execute("ALTER TABLE symbols DROP COLUMN is_out_of_project")
+    con.commit()
+    con.close()
+
+    partial = scip_pb2.Index()
+    doc = partial.documents.add(relative_path="foo.cpp")
+    doc.symbols.add(symbol=METHOD, display_name="makeResumeToken")
+    d = doc.occurrences.add(symbol=METHOD, symbol_roles=scip_pb2.SymbolRole.Definition)
+    d.range.extend([4, 0, 6])
+    update_store(db, partial)
+
+    store = GraphStore(db)
+    assert store.schema_version() == SCHEMA_VERSION  # migration stamped
+    assert store.get_node(METHOD).is_out_of_project is False  # value written
+    assert store.meta().get("has_external_symbols") is None  # capability never claimed
+
+
+def test_enrich_references_adds_is_out_of_project_column_but_never_populates(
+    tmp_path: Path,
+) -> None:
+    """enrich-refs adds the column for schema-shape completeness (the stamped
+    `schema_version` must match what `get_node`'s full SELECT reads) but never
+    populates it and never touches the meta flag — a whole-store classification
+    is only ever a full build's claim, and the .scip enrich consumes may be
+    partial."""
+    doc = scip_pb2.Document(relative_path="widget.cpp")
+    doc.symbols.add(symbol="cxx . . $ pkg/Widget#", display_name="Widget")
+    index = scip_pb2.Index(external_symbols=[_external_proto_info("cxx . . $ boost/B#")])
+
+    graph = Graph()
+    graph.add_reference("cxx . . $ pkg/Widget#", "widget.cpp", 6)
+    db = tmp_path / "g.db"
+    write_sqlite(graph, db)
+
+    from cppgraph.store import enrich_references
+
+    enrich_references(db, index)
+
+    store = GraphStore(db)
+    assert store.schema_version() == SCHEMA_VERSION
+    con = sqlite3.connect(db)
+    columns = {row[1] for row in con.execute("PRAGMA table_info(symbols)")}
+    values = con.execute("SELECT DISTINCT is_out_of_project FROM symbols").fetchall()
+    con.close()
+    assert "is_out_of_project" in columns  # added...
+    assert values == [(None,)]  # ...but never populated
+    assert store.meta().get("has_external_symbols") is None  # flag untouched
+
+
+def test_update_flips_external_symbol_to_project_native(tmp_path: Path) -> None:
+    """The incremental collision case: a symbol classified out-of-project by a
+    prior full build (only an `external_symbols` entry existed) is later
+    defined in the project — a partial carrying a real `doc.symbols` definition
+    must flip it to False and give it its definition site. The capability flag
+    itself stays (nothing ever flips capabilities off)."""
+    ext = "cxx . . $ boost/Foo#bar(a1)."
+    index = scip_pb2.Index(external_symbols=[_external_proto_info(ext)])
+    db = tmp_path / "graph.db"
+    write_sqlite(build_graph(index), db)
+    assert GraphStore(db).get_node(ext).is_out_of_project is True
+
+    partial = scip_pb2.Index()
+    doc = partial.documents.add(relative_path="now_native.cpp")
+    doc.symbols.add(symbol=ext, display_name="boost::Foo::bar")
+    d = doc.occurrences.add(symbol=ext, symbol_roles=scip_pb2.SymbolRole.Definition)
+    d.range.extend([41, 0, 6])
+    update_store(db, partial)
+
+    store = GraphStore(db)
+    node = store.get_node(ext)
+    assert node is not None
+    assert node.is_out_of_project is False  # project-native evidence wins
+    assert (node.file, node.line) == ("now_native.cpp", 41)
+    assert store.meta().get("has_external_symbols") == "true"  # never flipped off
+
+
+def test_update_never_flips_project_native_to_external(tmp_path: Path) -> None:
+    """The reverse collision: a project-defined symbol whose changed-file
+    re-index only *references* it (the partial's `external_symbols` carries an
+    entry) must stay project-native — an external True never overwrites a
+    stored False, and the definition site survives the file-less partial."""
+    sym = "cxx . . $ mine/Widget#wobble(a1)."
+    full = scip_pb2.Index()
+    doc = full.documents.add(relative_path="widget.cpp")
+    doc.symbols.add(symbol=sym, display_name="wobble")
+    d = doc.occurrences.add(symbol=sym, symbol_roles=scip_pb2.SymbolRole.Definition)
+    d.range.extend([9, 0, 6])
+    db = tmp_path / "graph.db"
+    write_sqlite(build_graph(full), db)
+
+    partial = scip_pb2.Index()
+    partial.documents.add(relative_path="other.cpp")  # re-indexed, only references sym
+    partial.external_symbols.add(symbol=sym, display_name="wobble")
+    update_store(db, partial)
+
+    store = GraphStore(db)
+    node = store.get_node(sym)
+    assert node is not None
+    assert node.is_out_of_project is False  # False always wins
+    assert (node.file, node.line) == ("widget.cpp", 9)  # site untouched
+
+
+def _external_proto_info(symbol: str) -> scip_pb2.SymbolInformation:
+    """An external `SymbolInformation` for store-level tests (same shape as the
+    builder tests')."""
+    return scip_pb2.SymbolInformation(symbol=symbol, display_name="ext")
 
 
 def test_references_empty_when_not_built(tmp_path: Path) -> None:

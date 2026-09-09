@@ -286,8 +286,15 @@ def find_symbols(
     When the graph was built from a kind-patched binary (`has_symbol_kind`),
     the symbol's fine-grained SCIP kind is returned as `scip_kind` (e.g.
     "StaticMethod") on the entry and on each `signatures[i]` arm — also absent
-    when the graph carries none.
+    when the graph carries none. When the graph carries external-package
+    symbol metadata (`has_external_symbols`), `is_out_of_project` is returned
+    on the entry and on each arm — true (defined in an un-indexed external
+    package), false (project-native), or null (no `SymbolInformation` from
+    either source); for a grouped entry the top-level value is the arms'
+    shared value, or null when the arms disagree. Absent when the graph
+    predates the feature.
     """
+    has_external_symbols = store.meta().get("has_external_symbols") == "true"
     matches = store.find(query)
     relaxation: str | None = None
     relaxed_query: str | None = None
@@ -332,6 +339,16 @@ def find_symbols(
             # Fine-grained SCIP kind (kind-patched binary, `has_symbol_kind`);
             # absent when the graph carries none — never null.
             entry["scip_kind"] = members[0].scip_kind
+        if has_external_symbols:
+            # External-package classification (`has_external_symbols`):
+            # true/false/null on every result — null meaning "no
+            # SymbolInformation from either source", never omitted. A grouped
+            # entry carries the arms' shared value, null when they disagree
+            # (never one arm's value picked silently).
+            classifications = {m.is_out_of_project for m in members}
+            entry["is_out_of_project"] = (
+                next(iter(classifications)) if len(classifications) == 1 else None
+            )
         if len(members) > 1:
             # An overload set: keep every signature's exact symbol + site, plus a
             # source-derived parameter signature so the arms are distinguishable.
@@ -341,6 +358,8 @@ def find_symbols(
                 d = _node_dict(m, full_symbols=True)
                 if m.scip_kind is not None:
                     d["scip_kind"] = m.scip_kind
+                if has_external_symbols:
+                    d["is_out_of_project"] = m.is_out_of_project
                 sig = extract_signature(root, m.file, m.line)
                 if sig:
                     d["signature"] = sig
@@ -704,7 +723,10 @@ def impact(
     """Reverse blast-radius: everything that transitively reaches `symbol`.
 
     `kind="calls"` (default) = transitive callers ("what breaks if I change this
-    function?"); `kind="inherits"` = all transitive subclasses of a base type.
+    function?"); `kind="inherits"` = all transitive subclasses of a base type;
+    `kind="typed-by"` = the fields/variables typed as that type (reverse impact
+    on a type returns the fields/variables typed as it — needs the `typed-by`
+    patch's edges).
     `depth` bounds the backward hops (None = unbounded). Results are symbols
     (with their definition site); capped like the other fan-out tools. Symbols
     defined in test files are dropped by default (`exclude_tests`);
@@ -790,7 +812,10 @@ def reachable_from_report(
     ("what can this external handler trigger?" — attack-surface mapping; also
     migration scope: what world am I pulling in if I keep this dependency's
     callers?); `kind="inherits"` is the transitive base hierarchy above a
-    derived type. A **lower bound** on runtime reachability: static
+    derived type; `kind="typed-by"` from a field/variable returns its declared
+    type (forward reachability from a field/variable returns the type — needs
+    the `typed-by` patch's edges). A **lower bound** on runtime reachability:
+    static
     compiler-traced edges only — virtual dispatch, function pointers and
     runtime registration are not captured, so the true reachable set may be
     larger; worded as "at least these are reachable", never as a set the
@@ -1184,8 +1209,8 @@ def boundary_violation_report(
     limit: int = DEFAULT_LIMIT,
     full_symbols: bool = False,
 ) -> dict[str, Any]:
-    """Declared-layering conformance check: the `calls`/`inherits` edges that
-    cross rules the CALLER supplies — e.g. `rules=[["common/", "platform/"]]`
+    """Declared-layering conformance check: the edges of the requested kinds
+    that cross rules the CALLER supplies — e.g. `rules=[["common/", "platform/"]]`
     means "no symbol defined under `common/` may call one defined under
     `platform/`". The rules are yours (the project's SPEC); the graph stores no
     intended architecture, it only confronts exact edges with the given
@@ -1194,11 +1219,13 @@ def boundary_violation_report(
     conformance (see the standing `note`).
 
     `edge_kinds` defaults to `["calls", "inherits"]` (`"implements"` = override
-    relationships, also accepted). `limit` caps the list (default 40); `total`
-    always reports the full count. An edge matching several rules appears once
-    per rule, each record naming the rule it broke. A malformed rule comes
-    back as an `{"error", "hint"}` dict showing the expected shape, not an
-    exception.
+    relationships, `"typed-by"` = a field/variable typed as a type across the
+    boundary — a type-usage layering check, needs the typed-by patch's edges;
+    both also accepted, opt-in via an explicit `edge_kinds`). `limit` caps the
+    list (default 40); `total` always reports the full count. An edge matching
+    several rules appears once per rule, each record naming the rule it broke.
+    A malformed rule comes back as an `{"error", "hint"}` dict showing the
+    expected shape, not an exception.
     """
     kinds = tuple(edge_kinds) if edge_kinds else ("calls", "inherits")
     try:
@@ -1491,7 +1518,12 @@ def explain(
     `root`; the key is absent when there is no real doc text. When the graph
     was built from a kind-patched binary (`has_symbol_kind`), the symbol's
     fine-grained SCIP kind is returned as `scip_kind` (e.g. "StaticMethod") —
-    also absent when the graph carries none.
+    also absent when the graph carries none. When the graph carries
+    external-package symbol metadata (`has_external_symbols`),
+    `is_out_of_project` is returned as true (defined in an un-indexed external
+    package, from `Index.external_symbols`), false (project-native) or null
+    (no `SymbolInformation` from either source — a phantom node); the key is
+    omitted entirely on a graph built before this feature.
 
     A `0` caller count is only trustworthy with exact (#504) attribution: when
     the store lacks `has_enclosing_ranges`, the callers block carries
@@ -1572,6 +1604,15 @@ def explain(
         # `documentation`.
         result["signature_documentation"] = node.signature_documentation
 
+    if store.meta().get("has_external_symbols") == "true":
+        # External-package classification (`Index.external_symbols`): true =
+        # defined in an un-indexed external package, false = project-native,
+        # null = no `SymbolInformation` from either source (a phantom node).
+        # Gated on the capability flag: omitted entirely on a graph built
+        # before this feature — absent meaning "not classified", never
+        # conflated with the null "classified, no evidence".
+        result["is_out_of_project"] = node.is_out_of_project
+
     if root is not None:
         # Always set the key, even when extraction failed (None) — mirrors
         # `source`'s "None means requested but unavailable, absent means not
@@ -1630,6 +1671,7 @@ def status_report(
             "has_access_roles": m.get("has_access_roles") == "true",
             "has_enclosing_ranges": m.get("has_enclosing_ranges") == "true",
             "has_symbol_kind": m.get("has_symbol_kind") == "true",
+            "has_external_symbols": m.get("has_external_symbols") == "true",
             "node_count": m.get("node_count"),
             "edge_count": m.get("edge_count"),
             "ref_count": m.get("ref_count"),
@@ -1873,7 +1915,13 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         the arms are distinguishable. When the graph was built from a
         kind-patched scip-clang (`has_symbol_kind`), the symbol's fine-grained
         SCIP kind is returned as `scip_kind` (e.g. "StaticMethod") on the entry
-        and each `signatures[i]` arm — absent on graphs without that data. If
+        and each `signatures[i]` arm — absent on graphs without that data.
+        When the graph carries external-package symbol metadata
+        (`has_external_symbols`), `is_out_of_project` (true = defined in an
+        un-indexed external package, false = project-native, null = no
+        SymbolInformation from either source; a grouped entry is null when its
+        arms disagree) rides on the entry and each arm — absent on graphs
+        without that data. If
         nothing matches exactly, `find` relaxes
         once (case/separator-insensitive — `changestream` ~ `change_stream` —
         then, for a `Class#method` guess, the bare leaf name) and flags the
@@ -2045,7 +2093,9 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         """Reverse blast-radius: everything that transitively reaches `symbol`.
         kind="calls" (default) = transitive callers ("what could break if I
         change this function?"); kind="inherits" = every transitive subclass of
-        a base type. `depth` bounds the hops. Compact `name` + `file:line` by
+        a base type; kind="typed-by" = the fields/variables typed as that type
+        (reverse impact on a type returns the fields/variables typed as it —
+        needs the typed-by patch's edges). `depth` bounds the hops. Compact `name` + `file:line` by
         default (`full_symbols=True` for raw SCIP); symbols in test files dropped
         unless `exclude_tests=False`. `include_paths`/`exclude_paths` further
         filter by definition-file path prefix (e.g. scope out vendored deps).
@@ -2080,7 +2130,9 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         ("what can this external handler trigger?" — attack-surface mapping;
         also migration scope: what am I pulling in if I keep this dependency's
         world?); kind="inherits" = the transitive base hierarchy above a
-        derived type. A LOWER BOUND on runtime reachability: static
+        derived type; kind="typed-by" = forward reachability from a
+        field/variable returns its declared type (needs the typed-by patch's
+        edges). A LOWER BOUND on runtime reachability: static
         compiler-traced edges only — virtual dispatch, function pointers and
         runtime registration are not captured, so the true reachable set may
         be larger; read it as "at least these are reachable", never as a set
@@ -2435,7 +2487,12 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         out) — no checkout needed for that one. When the graph was built from a
         kind-patched scip-clang (`has_symbol_kind`), the symbol's fine-grained
         SCIP kind is returned as `scip_kind` (e.g. "StaticMethod"); the key is
-        absent on graphs without that data. A `callers.total`
+        absent on graphs without that data. When the graph carries
+        external-package symbol metadata (`has_external_symbols`),
+        `is_out_of_project` is returned as true (defined in an un-indexed
+        external package, e.g. boost/stdlib), false (project-native) or null
+        (no SymbolInformation from either source); absent on graphs without
+        that data. A `callers.total`
         of `0` carries `zero_callers_reliable: false` + a `note` when the graph
         lacks #504 enclosing-range data — stock-binary attribution can
         fabricate a phantom caller from a bodyless declaration site or drop an

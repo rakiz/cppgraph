@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Build scip-clang (v0.4.0 + our patches from scip-clang-patches/: enclosing_range
 # / PR #504, the ForwardDefinition bit fix, the ReadAccess/WriteAccess
-# classifier, the SymbolInformation.kind classifier, and the
-# SymbolInformation.signature_documentation emitter) NATIVELY on macOS, for
+# classifier, the SymbolInformation.kind classifier, the
+# SymbolInformation.signature_documentation emitter, and the
+# Relationship.is_type_definition emitter) NATIVELY on macOS, for
 # THIS Mac's CPU architecture. Mirrors docker/build-scip-clang-patched-linux/build.sh's role
 # but skips Docker entirely — a Linux container on a Mac can only ever produce
 # a Linux binary, so getting a native macOS binary means building on the host.
@@ -126,7 +127,7 @@ else
 fi
 
 # Apply the ForwardDefinition bit fix (applied here after enclosing_range
-# purely for build consistency — all four patches are actually order-independent,
+# purely for build consistency — all six patches are actually order-independent,
 # see scip-clang-patches/README.md).
 FWD_PATCH="$(pwd)/scip-clang-patches/forward-definition-on-v0.4.0.patch"
 [ -f "$FWD_PATCH" ] || die "patch not found at $FWD_PATCH"
@@ -140,7 +141,7 @@ else
 fi
 
 # Apply the ReadAccess/WriteAccess syntactic classifier (applied here after
-# the three patches above purely for build consistency — all four patches are
+# the three patches above purely for build consistency — all six patches are
 # actually order-independent, see scip-clang-patches/README.md). Tags
 # symbol_roles with WriteAccess (ReadAccess alongside it on read-modify-write
 # sites) based on the syntactic AST parent of the reference site.
@@ -156,7 +157,7 @@ else
 fi
 
 # Apply the SymbolInformation.kind syntactic classifier (applied here after
-# the three patches above purely for build consistency — all four patches are
+# the three patches above purely for build consistency — all six patches are
 # actually order-independent, see scip-clang-patches/README.md). Fills SCIP's
 # SymbolInformation.kind (upstream leaves it at UnspecifiedKind on 100% of
 # symbols) by mapping the clang::Decl at each SymbolInformation-creating site
@@ -174,7 +175,7 @@ else
 fi
 
 # Apply the SymbolInformation.signature_documentation emitter (applied here
-# after the four patches above purely for build consistency — all five
+# after the five patches above purely for build consistency — all six
 # patches are actually order-independent, see scip-clang-patches/README.md).
 # Fills SCIP's SymbolInformation.signature_documentation (upstream leaves it
 # unset on 100% of symbols) with the printed declaration (no body, default
@@ -190,6 +191,24 @@ else
   git -C "$BUILD_ROOT" apply --verbose "$SIGDOC_PATCH"
   grep -q 'declToSignatureText' "$BUILD_ROOT/indexer/Indexer.cc" \
     || die "patch applied but grep for 'declToSignatureText' still failed — patch may be a no-op"
+fi
+
+# Apply the Relationship.is_type_definition emitter (applied here after the
+# five patches above purely for build consistency — all six patches are
+# actually order-independent, see scip-clang-patches/README.md). Fills SCIP's
+# Relationship.is_type_definition ("go to type definition", upstream never
+# sets it): a syntactic type resolver attaches a {symbol: <type>,
+# is_type_definition: true} relationship to a field's / variable's own
+# SymbolInformation, reusing trySaveTypeReference's type-resolution policy.
+TYPEDBY_PATCH="$(pwd)/scip-clang-patches/typed-by-on-v0.4.0.patch"
+[ -f "$TYPEDBY_PATCH" ] || die "patch not found at $TYPEDBY_PATCH"
+if grep -q 'saveTypeDefinitionRelationship' "$BUILD_ROOT/indexer/Indexer.cc" 2>/dev/null; then
+  echo "  already patched (saveTypeDefinitionRelationship present) — skipping git apply"
+else
+  echo "==> Applying Relationship.is_type_definition (typed-by) patch"
+  git -C "$BUILD_ROOT" apply --verbose "$TYPEDBY_PATCH"
+  grep -q 'saveTypeDefinitionRelationship' "$BUILD_ROOT/indexer/Indexer.cc" \
+    || die "patch applied but grep for 'saveTypeDefinitionRelationship' still failed — patch may be a no-op"
 fi
 
 # scip-clang v0.4.0 hardcodes a full-Xcode.app SDK path in setup_llvm.bzl, which

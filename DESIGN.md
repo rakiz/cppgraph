@@ -46,23 +46,17 @@ SCIP is a lossy serialization of clang's AST: a deliberately minimal,
 cross-language format (Go, TS, Rust, Ruby, C++…). That loss is real but lands
 almost entirely on data *peripheral* to cppgraph's mission (reliable
 call/dependency facts for an LLM). Everything the mission needs is present and
-exact — `calls`/`inherits`/`implements`/`uses` edges, definition locations,
-references, and (with #504) exact enclosing-range attribution. The gaps we found
-auditing the schema are all off to the side: **visibility** (public/protected/
-private — no SCIP field at all; the format models privacy as *local symbols*, a
-name-scope notion that doesn't map C++'s compile-time access rule), **`kind`**
-(emitted `UnspecifiedKind`, but derivable from the descriptor suffix, which we
-already do), and signature (unpopulated, nice-to-have). `read-write-access` was
-in this gap list too: still unpopulated by the official upstream binary, but set
-by our `read-write-access-on-v0.4.0` scip-clang patch and consumed since —
-`Reference.roles` tags each use site `(write)`/`(read+write)` and powers the
-`--access {read,write}` filter on `references`/`find_references` (absent on a
-stock binary: silence, never a guess).
-`documentation` was in this gap list until the audit measured it: 99.99%
-non-empty, ~10% genuine doc-comment text once scip-clang's placeholder and
-auto-generated namespace/File text are filtered — consumed by `explain`
-since (the filter is `builder.real_documentation`, see SCIP_AUDIT.md). None
-touch the core graph.
+exact — `calls`/`inherits`/`implements`/`typed-by`/`uses` edges, definition
+locations, references, and (with #504) exact enclosing-range attribution. The
+one gap the audit found that SCIP genuinely cannot express is **visibility**
+(public/protected/private — no SCIP field at all; the format models privacy as
+*local symbols*, a name-scope notion that doesn't map C++'s compile-time access
+rule); see `TODO.md`. Every other field the audit flagged as unpopulated by the
+official binary (`kind`, `signature_documentation`, `is_type_definition`,
+`ReadAccess`/`WriteAccess`, `ForwardDefinition`) is now filled by one of our own
+syntactic-classifier patches and consumed — see `CHANGELOG.md` for each, and
+`SCIP_AUDIT.md` for the field-by-field measurement they were built against.
+None of that touches the core graph.
 
 The key point for build-vs-buy: **because we already patch scip-clang (#504),
 the SCIP *format*'s limits are not hard limits.** scip-clang is itself a clang
@@ -100,6 +94,11 @@ Edges (implemented unless marked planned):
 - `implements` override-method → overridden-method (the method→method
                `is_implementation` relationships; the class→class ones are
                `inherits`)
+- `typed-by`   field/variable → its declared type (from SCIP
+               `is_type_definition` relationships — a patched-binary-only
+               fact today, `#504`-free; queried by `impact --kind typed-by` /
+               `reachable-from --kind typed-by`, opt-in on
+               `boundary-violations` like `implements`)
 - `defines` / `contains`  file/namespace/class → member, structural (planned)
 
 References are **not** edges. They are stored as an exact **location index**
@@ -242,28 +241,30 @@ fallback (`src/cppgraph/builder.py`):
    above is the stock-binary fallback only. A #504 binary is built from source
    via `docker/build-scip-clang-patched-linux/`.
 
-   On a #504 graph specifically, `build_graph` also detects the declaration case
-   above by a different signal: `callable_intervals` is populated (the binary
-   *does* emit body extents), yet a given role-`0` site still isn't contained by
-   any of them — exactly what a bodyless in-class declaration looks like once
-   real bodies are known. There it drops the edge instead of falling back to
+   On a #504 graph, `build_graph` detects the declaration case above by a
+   different signal: `callable_intervals` is populated (the binary *does* emit
+   body extents), yet a given role-`0` site still isn't contained by any of
+   them — exactly what a bodyless in-class declaration looks like once real
+   bodies are known. There it drops the edge instead of falling back to
    nearest-preceding, since that fallback is only a sound approximation when a
-   document has no interval data at all. The "keep the over-capture" call above
-   stands only for stock graphs, which have no such signal to detect the case.
+   document has no interval data at all.
 
-   **Update: a patched (non-#504) graph now also has the signal.**
-   `scip-clang-patches/forward-definition-on-v0.4.0.patch` tags the bodyless
-   declaration occurrence itself with `ForwardDefinition` — an existing SCIP
-   role, never previously set — so a graph built from a patched binary (even
-   without #504's `enclosing_range`) excludes it via the same
-   `DEFINITION | FORWARD_DEFINITION` filter `build_graph` already applied for
-   #504 graphs, before either the call-site or reference-site heuristic runs.
-   Verified end-to-end: on an identical fixture, a stock official binary
-   fabricates the phantom caller described above; our patched binary doesn't.
-   "No such signal" above describes the OFFICIAL upstream binary specifically
-   (still accurate, still the corpus this file's measurements were taken
-   against) — not a patched one. Not yet upstreamed; see `TODO.md`'s scip-clang
-   section.
+   A patched (non-#504) graph has an equivalent signal, from a different
+   patch: `scip-clang-patches/forward-definition-on-v0.4.0.patch` tags the
+   bodyless declaration occurrence itself with `ForwardDefinition` — an
+   existing SCIP role the official binary never sets — so a graph built from
+   a patched binary (even without #504's `enclosing_range`) excludes it via
+   the same `DEFINITION | FORWARD_DEFINITION` filter `build_graph` already
+   applies for #504 graphs, before either the call-site or reference-site
+   heuristic runs. Verified end-to-end: on an identical fixture, a stock
+   official binary fabricates the phantom caller described above; our patched
+   binary doesn't. Not yet upstreamed; see `TODO.md`'s scip-clang section.
+
+   The "keep the over-capture" call above therefore stands only for a graph
+   built from the OFFICIAL upstream binary, which has no signal to detect the
+   case — the corpus this file's measurements were taken against. Both a
+   #504 graph and a patched (forward-definition) graph have a signal and drop
+   the edge instead.
 
     This asymmetry is why `no_incoming_calls` (definitions with zero incoming
     `calls` edges) refuses to answer on a stock graph: a phantom caller from a
@@ -444,7 +445,7 @@ designing the builder so this isn't a later rewrite:
   fixed at launch (`--graph <db>`, optional `--root <checkout>`) so tools never
   take — and the LLM never has to guess or repeat — a filesystem path. Tools:
     `find`, `who_calls`, `what_it_calls`, `base_classes`, `subclasses`,
-    `find_references`, `path`, `impact_of` (`kind` = calls|inherits),
+    `find_references`, `path`, `impact_of` (`kind` = calls|inherits|typed-by),
     `reachable_from` (the forward mirror — everything an entry point
     transitively reaches, worded as a lower bound per the corollary below),
     `hotspots`

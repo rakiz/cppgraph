@@ -1,7 +1,7 @@
 # build-scip-clang-patched-linux — compile scip-clang natively, with our patches on top of v0.4.0
 
 Builds a `scip-clang` binary **from source, for the host's own CPU architecture**,
-carrying four patches stacked on the `v0.4.0` tag:
+carrying six patches stacked on the `v0.4.0` tag:
 
 1. `enclosing_range` ([PR #504](https://github.com/sourcegraph/scip-clang/pull/504))
 2. the `ForwardDefinition` bit on bodyless-declaration occurrences (our own fix,
@@ -17,9 +17,17 @@ carrying four patches stacked on the `v0.4.0` tag:
    `SymbolInformation.kind`, which upstream leaves at `UnspecifiedKind` on 100%
    of symbols, by mapping the `clang::Decl` at each `SymbolInformation`-creating
    site to its kind.
+5. the `SymbolInformation.signature_documentation` syntactic printer (our own
+   fix, not yet upstreamed — see `signature-documentation-on-v0.4.0.patch`).
+   Emits a pretty-printed declaration (no body, default arguments preserved)
+   for defined/pure-virtual function/method declarations.
+6. the `Relationship.is_type_definition` syntactic classifier (our own fix,
+   not yet upstreamed — see `typed-by-on-v0.4.0.patch`). Tags a field/variable's
+   own `SymbolInformation` with a relationship to its declared type, powering
+   cppgraph's `typed-by` edge kind.
 
-All four patches are bundled into one binary deliberately — there's no un-patched
-variant shipped, so every consumer of the patched binary gets all four fixes.
+All six patches are bundled into one binary deliberately — there's no un-patched
+variant shipped, so every consumer of the patched binary gets all six fixes.
 
 ## Why this exists
 
@@ -67,6 +75,8 @@ Graviton `m6g.2xlarge` (Neoverse-N1, 8 vCPU, 30 GiB, ARM64). Where it goes:
 | apply ForwardDefinition patch           | <1 s        |
 | apply ReadAccess/WriteAccess patch      | <1 s        |
 | apply SymbolInformation.kind patch      | <1 s        |
+| apply signature_documentation patch    | <1 s        |
+| apply typed-by patch                   | <1 s        |
 | **Bazel compile (LLVM+Clang) + LTO link** | **~31 min** |
 
 So **~99 % is the Bazel compile** — scip-clang embeds Clang as a library, so it

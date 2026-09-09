@@ -62,15 +62,19 @@ SOURCE_EXTS = (
 )
 
 
-def _print_node(node: Node, *, full_symbols: bool = True) -> None:
+def _print_node(node: Node, *, full_symbols: bool = True, external: bool = False) -> None:
     loc = f"{node.file}:{node.line + 1}" if node.file is not None and node.line is not None else "?"
     # Fine-grained SCIP kind (kind-patched binary only); nodes from queries
     # that don't select the column simply carry None and print unchanged.
     kind = f"  [{node.scip_kind}]" if node.scip_kind else ""
+    # Out-of-project marker, only for a concrete external symbol, only when
+    # the caller gated on the capability (`has_external_symbols`) — native
+    # (False) and unknown (None) results stay unmarked.
+    marker = "  [out-of-project]" if external else ""
     if full_symbols:
-        print(f"  {node.symbol}  ({node.display_name or '?'} @ {loc}){kind}")
+        print(f"  {node.symbol}  ({node.display_name or '?'} @ {loc}){kind}{marker}")
     else:
-        print(f"  {node.display_name or short_label(node.symbol)}  ({loc}){kind}")
+        print(f"  {node.display_name or short_label(node.symbol)}  ({loc}){kind}{marker}")
 
 
 def read_source_snippet(
@@ -678,10 +682,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     p_impact.add_argument(
         "--kind",
-        choices=("calls", "inherits"),
+        choices=("calls", "inherits", "typed-by"),
         default="calls",
         help="edge kind to walk: 'calls' = call blast-radius (default); "
-        "'inherits' = all transitive subclasses of a base type",
+        "'inherits' = all transitive subclasses of a base type; "
+        "'typed-by' = reverse impact on a type returns the fields/variables "
+        "typed as that type",
     )
     _add_query_filters(p_impact)
 
@@ -704,11 +710,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     p_reachable.add_argument(
         "--kind",
-        choices=("calls", "inherits"),
+        choices=("calls", "inherits", "typed-by"),
         default="calls",
         help="edge kind to walk: 'calls' = forward call reachability from an entry "
         "point (default); 'inherits' = the transitive base hierarchy above a "
-        "derived type",
+        "derived type; 'typed-by' = forward reachability from a field/variable "
+        "returns its declared type",
     )
     _add_query_filters(p_reachable)
 
@@ -899,9 +906,12 @@ def main(argv: list[str] | None = None) -> int:
     p_boundary.add_argument(
         "--kind",
         action="append",
-        choices=("calls", "inherits", "implements"),
+        choices=("calls", "inherits", "implements", "typed-by"),
         default=None,
-        help="edge kind to check (repeatable; default: calls and inherits)",
+        help="edge kind to check (repeatable; default: calls and inherits; "
+        "'implements' and 'typed-by' are opt-in — 'typed-by' checks "
+        "type-usage crossing the boundary: a field/variable typed as a type "
+        "on the other side)",
     )
     p_boundary.add_argument("--limit", type=int, default=40, help="max rows to show (default: 40)")
     p_boundary.add_argument(
@@ -1361,8 +1371,9 @@ def main(argv: list[str] | None = None) -> int:
         if not matches:
             print(f"[cppgraph] no symbol matching {args.query!r}")
             return 1
+        show_external = store.meta().get("has_external_symbols") == "true"
         for node in matches:
-            _print_node(node)
+            _print_node(node, external=show_external and node.is_out_of_project is True)
         return 0
 
     if args.command == "callers":
@@ -1527,7 +1538,11 @@ def main(argv: list[str] | None = None) -> int:
                     exclude=args.exclude_paths,
                 )
             ]
-        verb = "transitively call" if args.kind == "calls" else "transitively inherit from"
+        verb = {
+            "calls": "transitively call",
+            "inherits": "transitively inherit from",
+            "typed-by": "are typed as",
+        }[args.kind]
         tests_note = " (excluding tests)" if args.exclude_tests else ""
         print(f"[cppgraph] {len(nodes)} symbol(s) {verb} {args.symbol}{tests_note}")
         shown = nodes[: args.limit] if args.limit is not None else nodes
@@ -1988,6 +2003,14 @@ def main(argv: list[str] | None = None) -> int:
             print(
                 "                    binary carrying the SymbolInformation.kind patch, then rebuild"
             )
+        if m.get("has_external_symbols") == "true":
+            print("  external symbols: external-package symbol metadata present")
+        else:
+            print("  external symbols: none (no external-package symbol metadata)")
+            print(
+                "                 -> rebuilt graphs carry it (boost/absl/stdlib symbols "
+                "classified in explain/find); no special binary needed"
+            )
         print(
             f"  format:        schema v{m.get('schema_version', '0 (legacy)')}"
             f", cppgraph {m.get('cppgraph_version', '?')}"
@@ -2084,6 +2107,16 @@ def main(argv: list[str] | None = None) -> int:
             # (`has_symbol_kind`); additive to the descriptor-suffix
             # classification, absent on stock graphs — never an empty value.
             print(f"  kind:       {node.scip_kind}")
+        if store.meta().get("has_external_symbols") == "true":
+            # External-package classification (`Index.external_symbols`):
+            # printed only when the graph carries the capability — omitted
+            # entirely on older graphs (absent, not "unknown").
+            if node.is_out_of_project is True:
+                print("  out of project: yes")
+            elif node.is_out_of_project is False:
+                print("  out of project: no")
+            else:
+                print("  out of project: unknown")
         if node.documentation:
             # Genuine doc comment from the graph (extracted at index time) —
             # no --root needed, unlike the signature below.

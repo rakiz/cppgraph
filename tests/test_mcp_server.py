@@ -1376,6 +1376,74 @@ def test_reachable_from_over_inherits_gives_transitive_ancestors(
     assert result["kind"] == "inherits"
 
 
+@pytest.fixture
+def typed_by_store(tmp_path: Path) -> GraphStore:
+    graph = Graph()
+    graph.add_edge(
+        "typed-by", "cxx . . $ mongo/Outer#f.", "cxx . . $ mongo/Value#", file="outer.h", line=4
+    )
+    graph.add_edge(
+        "calls", "cxx . . $ mongo/fn(a1).", "cxx . . $ mongo/other_fn(b1).", file="f.cpp", line=1
+    )
+    path = tmp_path / "typed_by.db"
+    write_sqlite(graph, path)
+    return GraphStore(path)
+
+
+def test_impact_over_typed_by_gives_fields_typed_as_the_type(
+    typed_by_store: GraphStore,
+) -> None:
+    result = mcp_server.impact(
+        typed_by_store, "cxx . . $ mongo/Value#", kind="typed-by", full_symbols=True
+    )
+    assert result["kind"] == "typed-by"
+    assert {r["symbol"] for r in result["reached_by"]} == {"cxx . . $ mongo/Outer#f."}
+
+
+def test_reachable_from_over_typed_by_gives_the_declared_type(
+    typed_by_store: GraphStore,
+) -> None:
+    result = mcp_server.reachable_from_report(
+        typed_by_store, "cxx . . $ mongo/Outer#f.", kind="typed-by", full_symbols=True
+    )
+    assert result["kind"] == "typed-by"
+    assert {r["symbol"] for r in result["reaches"]} == {"cxx . . $ mongo/Value#"}
+
+
+def test_typed_by_isolated_from_calls_traversals(typed_by_store: GraphStore) -> None:
+    """A typed-by edge never leaks into a calls traversal (and vice versa) —
+    one edge kind per call."""
+    assert mcp_server.impact(typed_by_store, "cxx . . $ mongo/Value#")["total"] == 0
+    assert (
+        mcp_server.reachable_from_report(
+            typed_by_store, "cxx . . $ mongo/fn(a1).", kind="typed-by"
+        )["total"]
+        == 0
+    )
+
+
+def test_boundary_violation_report_typed_by_kind(
+    tmp_path: Path,
+) -> None:
+    """edge_kinds=["typed-by"] checks type-usage crossing the boundary; the
+    default kinds (calls, inherits) exclude it."""
+    graph = Graph()
+    graph.add_edge("typed-by", "common_widget", "platform_value", file="common/widget.h", line=7)
+    graph.nodes["common_widget"].file = "common/widget.h"
+    graph.nodes["platform_value"].file = "platform/value.h"
+    path = tmp_path / "tbb.db"
+    write_sqlite(graph, path)
+    store = GraphStore(path)
+    rules = [["common/", "platform/"]]
+    assert mcp_server.boundary_violation_report(store, rules)["total"] == 0
+    result = mcp_server.boundary_violation_report(store, rules, edge_kinds=["typed-by"])
+    assert result["total"] == 1
+    v = result["violations"][0]
+    assert v["kind"] == "typed-by"
+    assert v["src"] == "common_widget"
+    assert v["dst"] == "platform_value"
+
+
 def test_explain_coordinates_only_by_default(store: GraphStore) -> None:
     result = mcp_server.explain(store, FOO)
     assert result["symbol"] == FOO
@@ -1564,6 +1632,109 @@ def test_find_includes_scip_kind_when_graph_has_it(tmp_path: Path) -> None:
 def test_find_omits_scip_kind_when_absent(store: GraphStore) -> None:
     result = mcp_server.find_symbols(store, "makeResumeToken")
     assert "scip_kind" not in result["results"][0]
+
+
+# --- is_out_of_project / has_external_symbols ---------------------------------
+
+
+@pytest.mark.parametrize("classified", [True, False, None], ids=["external", "native", "phantom"])
+def test_explain_includes_is_out_of_project_when_capability_present(
+    tmp_path: Path, classified: bool | None
+) -> None:
+    """A graph with external-package symbol metadata (`has_external_symbols`)
+    classifies every resolved symbol: true (external package), false
+    (project-native) or null (phantom — no SymbolInformation from either
+    source). Null is a real VALUE here, never omitted: "classified, no
+    evidence" is an answer."""
+    path = tmp_path / "graph.db"
+    graph = Graph()
+    graph.nodes[FOO] = Node(
+        symbol=FOO,
+        display_name="makeResumeToken",
+        file="foo.cpp",
+        line=234,
+        is_out_of_project=classified,
+    )
+    write_sqlite(graph, path, meta={"has_external_symbols": "true"})
+    result = mcp_server.explain(GraphStore(path), FOO)
+    assert result["is_out_of_project"] is classified
+
+
+def test_explain_omits_is_out_of_project_when_capability_absent(store: GraphStore) -> None:
+    """A graph built before the feature carries neither the flag nor the
+    column: the key is omitted entirely — "not classified", never conflated
+    with the null "classified, no evidence"."""
+    result = mcp_server.explain(store, FOO)
+    assert "is_out_of_project" not in result
+
+
+def test_find_uniform_overloads_share_the_is_out_of_project_value(tmp_path: Path) -> None:
+    p1 = "cxx . . $ mongo/ResumeToken#parse(aaaaaa)."
+    p2 = "cxx . . $ mongo/ResumeToken#parse(bbbbbb)."
+    graph = Graph()
+    graph.nodes[p1] = Node(
+        symbol=p1, display_name="parse", file="rt.h", line=1, is_out_of_project=True
+    )
+    graph.nodes[p2] = Node(
+        symbol=p2, display_name="parse", file="rt.cpp", line=2, is_out_of_project=True
+    )
+    path = tmp_path / "ov.db"
+    write_sqlite(graph, path, meta={"has_external_symbols": "true"})
+
+    result = mcp_server.find_symbols(GraphStore(path), "parse")
+
+    entry = result["results"][0]
+    assert entry["is_out_of_project"] is True  # all arms agree -> the shared value
+    assert {s["symbol"]: s["is_out_of_project"] for s in entry["signatures"]} == {
+        p1: True,
+        p2: True,
+    }
+
+
+def test_find_mixed_overloads_get_null_is_out_of_project(tmp_path: Path) -> None:
+    """Overload arms classified differently (one external, one project-native
+    — e.g. a native symbol that also appears in `external_symbols`): the
+    top-level value is null (never one arm's value picked silently); each arm
+    keeps its own."""
+    p1 = "cxx . . $ mongo/ResumeToken#parse(aaaaaa)."
+    p2 = "cxx . . $ mongo/ResumeToken#parse(bbbbbb)."
+    graph = Graph()
+    graph.nodes[p1] = Node(
+        symbol=p1, display_name="parse", file="rt.h", line=1, is_out_of_project=True
+    )
+    graph.nodes[p2] = Node(
+        symbol=p2, display_name="parse", file="rt.cpp", line=2, is_out_of_project=False
+    )
+    path = tmp_path / "ov.db"
+    write_sqlite(graph, path, meta={"has_external_symbols": "true"})
+
+    result = mcp_server.find_symbols(GraphStore(path), "parse")
+
+    entry = result["results"][0]
+    assert entry["is_out_of_project"] is None  # disagreement -> null
+    assert {s["symbol"]: s["is_out_of_project"] for s in entry["signatures"]} == {
+        p1: True,
+        p2: False,
+    }
+
+
+@pytest.mark.parametrize(
+    "meta",
+    [{"has_external_symbols": "true"}, {}],
+    ids=["with-feature", "pre-feature"],
+)
+def test_status_reports_external_symbols_flag(tmp_path: Path, meta: dict[str, str]) -> None:
+    """`graph_meta.has_external_symbols` mirrors the meta flag as a bool, the
+    same way `has_symbol_kind` is surfaced: true only when the graph carries
+    the classification, false when it doesn't — never missing."""
+    graph = Graph()
+    graph.add_node(FOO, display_name="x")
+    path = tmp_path / "g.db"
+    write_sqlite(graph, path, meta=meta)
+    with GraphStore(path) as st:
+        result = mcp_server.status_report(st)
+    expected = meta.get("has_external_symbols") == "true"
+    assert result["graph_meta"]["has_external_symbols"] is expected
 
 
 def test_explain_limit_is_overridable(store: GraphStore) -> None:

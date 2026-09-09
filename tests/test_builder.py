@@ -9,12 +9,14 @@ from __future__ import annotations
 
 from cppgraph.builder import (
     _is_direct_member,
+    _merge_external_symbol,
     build_graph,
     is_callable_symbol,
     is_term_symbol,
     real_documentation,
     signature_documentation_text,
 )
+from cppgraph.model import Graph
 from cppgraph.proto import scip_pb2
 
 DEFINITION = scip_pb2.SymbolRole.Definition
@@ -644,6 +646,77 @@ def test_class_inheritance_becomes_inherits_edge() -> None:
     assert not [e for e in graph.edges if e.kind == "implements"]
 
 
+# --- Relationship.is_type_definition (typed-by edges) ------------------------
+
+
+def test_typed_by_relationship_becomes_an_edge() -> None:
+    # scip-clang-patches/typed-by-on-v0.4.0.patch: a field's own
+    # SymbolInformation carries {symbol: <type>, is_type_definition: true}.
+    # src = the field, dst = the declared type.
+    field = "cxx . . $ mongo/ResumeTokenData#bucketSize."
+    typ = "cxx . . $ mongo/Duration#"
+
+    doc = scip_pb2.Document(relative_path="resume_token_data.h")
+    sym_info = scip_pb2.SymbolInformation(symbol=field)
+    sym_info.relationships.add(symbol=typ, is_type_definition=True)
+    doc.symbols.append(sym_info)
+    index = scip_pb2.Index(documents=[doc])
+
+    graph = build_graph(index)
+
+    typed_by = [e for e in graph.edges if e.kind == "typed-by"]
+    assert len(typed_by) == 1
+    assert typed_by[0].src == field
+    assert typed_by[0].dst == typ
+
+
+def test_typed_by_covers_field_variable_and_static_member_shapes() -> None:
+    """The patch's three emitting sites — a field (saveFieldDecl), a static
+    data member and a file-scope variable (saveVarDecl's SymbolInformation
+    branch) — all land as `typed-by` with the same direction (src = the
+    field/variable, dst = its declared type)."""
+    field = "cxx . . $ mongo/Outer#f."
+    static_member = "cxx . . $ mongo/Outer#s."
+    global_var = "cxx . . $ mongo/g."
+    typ = "cxx . . $ mongo/Value#"
+
+    doc = scip_pb2.Document(relative_path="outer.h")
+    for sym in (field, static_member, global_var):
+        sym_info = scip_pb2.SymbolInformation(symbol=sym)
+        sym_info.relationships.add(symbol=typ, is_type_definition=True)
+        doc.symbols.append(sym_info)
+    index = scip_pb2.Index(documents=[doc])
+
+    graph = build_graph(index)
+
+    typed_by = [e for e in graph.edges if e.kind == "typed-by"]
+    assert {e.src for e in typed_by} == {field, static_member, global_var}
+    assert all(e.dst == typ for e in typed_by)
+
+
+def test_typed_by_and_implementation_flags_are_independent() -> None:
+    """The proto's is_implementation and is_type_definition are independent
+    boolean flags on the same Relationship message (not enum variants), so the
+    builder must use a separate `if`, not elif — one relationship carrying
+    both flags yields BOTH edges."""
+    derived = "cxx . . $ mongo/Dog#"
+    base = "cxx . . $ mongo/Animal#"
+
+    doc = scip_pb2.Document(relative_path="dog.h")
+    sym_info = scip_pb2.SymbolInformation(symbol=derived)
+    sym_info.relationships.add(symbol=base, is_implementation=True, is_type_definition=True)
+    doc.symbols.append(sym_info)
+    index = scip_pb2.Index(documents=[doc])
+
+    graph = build_graph(index)
+
+    kinds = {(e.kind, e.src, e.dst) for e in graph.edges}
+    assert ("inherits", derived, base) in kinds  # type -> type splits to inherits
+    assert ("typed-by", derived, base) in kinds
+    # and neither flag was dropped in favor of the other
+    assert len([e for e in graph.edges if e.kind in ("inherits", "implements", "typed-by")]) == 2
+
+
 # --- SymbolInformation.documentation ----------------------------------------
 
 
@@ -848,3 +921,123 @@ def test_build_graph_first_signature_documentation_wins_across_documents() -> No
     graph = build_graph(scip_pb2.Index(documents=[first, second, third]))
 
     assert graph.nodes[fn].signature_documentation == "void dup(int a)"
+
+
+# --- Index.external_symbols (Node.is_out_of_project) --------------------------
+#
+# Symbols referenced from the index but defined in an un-indexed external
+# package (boost/absl/stdlib/…) — a repeated `SymbolInformation` list the STOCK
+# scip-clang binary already emits. Consumed as node identity/metadata only:
+# classified `is_out_of_project=True` with the same metadata merge as
+# `Document.symbols` entries (which classify False), never any edges.
+
+
+def _external_info(symbol: str) -> scip_pb2.SymbolInformation:
+    """An external `SymbolInformation` with every metadata field populated."""
+    si = scip_pb2.SymbolInformation(symbol=symbol, display_name="boost::Foo::bar")
+    si.kind = scip_pb2.SymbolInformation.Method
+    si.documentation.append("/** Boost doc. */")
+    si.signature_documentation.text = "void bar(int)"
+    return si
+
+
+def test_build_graph_external_symbol_creates_classified_node() -> None:
+    """An `external_symbols` entry with no document occurrence still becomes a
+    node — classified out-of-project, its metadata populated from the external
+    `SymbolInformation` (the same merge a `Document.symbols` entry gets). No
+    definition site exists: the node's file stays None. Today such a symbol is
+    either a file-less phantom (referenced somewhere) or missing entirely."""
+    ext = "cxx . . $ boost/Foo#bar(a1)."
+    graph = build_graph(scip_pb2.Index(external_symbols=[_external_info(ext)]))
+
+    node = graph.nodes[ext]
+    assert node.is_out_of_project is True
+    assert node.display_name == "boost::Foo::bar"
+    assert node.documentation == "/** Boost doc. */"
+    assert node.scip_kind == "Method"
+    assert node.signature_documentation == "void bar(int)"
+    assert node.file is None
+    assert node.line is None
+
+
+def test_build_graph_external_symbols_create_no_edges() -> None:
+    """The audit measured 867 relationships on the corpus's external symbols;
+    none may become edges — `Graph.add_edge` needs a real project document
+    path as provenance, and an external symbol has none. Node
+    identity/metadata only."""
+    ext = "cxx . . $ boost/Foo#bar(a1)."
+    si = _external_info(ext)
+    si.relationships.add(symbol="cxx . . $ boost/Foo#", is_implementation=True)
+    graph = build_graph(scip_pb2.Index(external_symbols=[si]))
+
+    assert graph.edges == []
+    assert set(graph.nodes) == {ext}
+
+
+def test_build_graph_doc_symbols_entry_is_project_native() -> None:
+    """A `Document.symbols` entry with no external counterpart classifies the
+    node project-native (`False`) — exactly as before this feature built it,
+    plus the now-explicit classification."""
+    fn = "cxx . . $ mongo/mine(m1)."
+    doc = scip_pb2.Document(relative_path="mine.cpp")
+    doc.symbols.add(symbol=fn, display_name="mine")
+    graph = build_graph(scip_pb2.Index(documents=[doc]))
+
+    assert graph.nodes[fn].is_out_of_project is False
+
+
+def test_build_graph_pure_phantom_node_stays_unclassified() -> None:
+    """A symbol only ever interned as an edge/reference endpoint (no
+    `SymbolInformation` from either source) keeps `is_out_of_project=None` —
+    "no evidence", distinct from both classifications."""
+    caller = "cxx . . $ mongo/caller(c1)."
+    phantom_callee = "cxx . . $ mongo/phantom(p1)."
+    doc = scip_pb2.Document(relative_path="a.cpp")
+    doc.symbols.add(symbol=caller)  # the caller has SymbolInformation...
+    doc.occurrences.append(_occurrence(caller, 1, roles=DEFINITION))
+    doc.occurrences.append(_occurrence(phantom_callee, 3))  # ...the callee doesn't
+    graph = build_graph(scip_pb2.Index(documents=[doc]))
+
+    assert graph.nodes[caller].is_out_of_project is False
+    assert graph.nodes[phantom_callee].is_out_of_project is None
+
+
+def test_build_graph_project_native_wins_over_external() -> None:
+    """A symbol in BOTH `external_symbols` and some `Document.symbols` (a
+    cross-TU merge) ends up project-native — and picks up its real file/line
+    from the project definition, never the file-less external shape."""
+    sym = "cxx . . $ both(b1)."
+    doc = scip_pb2.Document(relative_path="proj.cpp")
+    doc.symbols.add(symbol=sym, display_name="both")
+    doc.occurrences.append(_occurrence(sym, 7, roles=DEFINITION))
+    graph = build_graph(scip_pb2.Index(external_symbols=[_external_info(sym)], documents=[doc]))
+
+    node = graph.nodes[sym]
+    assert node.is_out_of_project is False
+    assert node.file == "proj.cpp"
+    assert node.line == 7
+
+
+def test_external_classification_never_overwrites_project_native() -> None:
+    """The precedence rule is explicit, not an accident of pass order: the
+    external pass refuses to flip a node already carrying project-native
+    evidence, so `False` wins whichever order the passes run in."""
+    graph = Graph()
+    sym = "cxx . . $ both(b1)."
+    node = graph.add_node(sym)
+    node.is_out_of_project = False  # as a doc.symbols entry sets it
+
+    _merge_external_symbol(graph, _external_info(sym))
+
+    assert graph.nodes[sym].is_out_of_project is False
+
+
+def test_build_graph_marks_external_symbols_capable_even_when_empty() -> None:
+    """The graph-level marker means "built with this feature", not "found at
+    least one external symbol": an index whose `external_symbols` is empty
+    still produces a graph the store writes the capability flag from."""
+    doc = scip_pb2.Document(relative_path="plain.cpp")
+    doc.symbols.add(symbol="cxx . . $ mongo/plain(p1).")
+    graph = build_graph(scip_pb2.Index(documents=[doc]))
+
+    assert graph.has_external_symbols is True
