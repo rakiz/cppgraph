@@ -919,6 +919,66 @@ def test_explain_no_kind_line_when_absent(
     assert "kind:" not in out
 
 
+def _graph_with_stored_signature(tmp_path: Path) -> Path:
+    graph = Graph()
+    node = graph.add_node("cxx . . $ mongo/Foo#bar(a1).", display_name="bar")
+    node.file = "src/x.cpp"
+    node.line = 2
+    node.signature_documentation = "void bar(int a, int b)"
+    path = tmp_path / "graph.db"
+    write_sqlite(graph, path)
+    return path
+
+
+def test_explain_prints_stored_signature_without_root(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The signature comes from the graph itself (signature-emitting binary):
+    # printed with no --root, like documentation. Labelled apart from the
+    # source-derived `signature:` line so the two are never conflated.
+    path = _graph_with_stored_signature(tmp_path)
+    exit_code = main(["explain", "--graph", str(path), "cxx . . $ mongo/Foo#bar(a1)."])
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "signature (stored): void bar(int a, int b)" in out
+
+
+def test_explain_no_stored_signature_line_when_absent(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    graph = Graph()
+    node = graph.add_node("cxx . . $ mongo/Foo#nosig(n1).", display_name="nosig")
+    node.file = "src/x.cpp"
+    node.line = 2
+    path = tmp_path / "graph.db"
+    write_sqlite(graph, path)
+    exit_code = main(["explain", "--graph", str(path), "cxx . . $ mongo/Foo#nosig(n1)."])
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "signature (stored)" not in out
+
+
+def test_explain_stored_and_source_signatures_coexist(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # With --root, both the graph-stored and the source-derived signature can
+    # appear — distinctly labelled, never one clobbering the other.
+    path = _graph_with_stored_signature(tmp_path)
+    root = tmp_path / "checkout"
+    src = root / "src"
+    src.mkdir(parents=True)
+    (src / "x.cpp").write_text(
+        "line0\nline1\nvoid bar(int a, bool useNullIfMissing = false) {\n}\n"
+    )
+    exit_code = main(
+        ["explain", "--graph", str(path), "cxx . . $ mongo/Foo#bar(a1).", "--root", str(root)]
+    )
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "signature (stored): void bar(int a, int b)" in out
+    assert "signature:  (int a, bool useNullIfMissing = false)" in out
+
+
 def test_find_shows_scip_kind_when_present(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

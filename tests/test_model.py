@@ -20,6 +20,22 @@ def test_graph_json_roundtrip(tmp_path: Path) -> None:
     assert loaded.edges[0].dst == "b"
 
 
+def test_graph_json_roundtrip_signature_documentation(tmp_path: Path) -> None:
+    """`Node.signature_documentation` must survive a save/load cycle (to_dict
+    carries it; from_dict passes node kwargs straight through)."""
+    graph = Graph()
+    graph.add_node("cxx . . $ mongo/Foo#bar(a1).", display_name="bar")
+    graph.nodes["cxx . . $ mongo/Foo#bar(a1)."].signature_documentation = "void bar(int a)"
+    graph.add_node("cxx . . $ mongo/Foo#nosig(n1).")  # absent field round-trips as None
+
+    out = tmp_path / "graph.json"
+    graph.save_json(out)
+    loaded = Graph.load_json(out)
+
+    assert loaded.nodes["cxx . . $ mongo/Foo#bar(a1)."].signature_documentation == "void bar(int a)"
+    assert loaded.nodes["cxx . . $ mongo/Foo#nosig(n1)."].signature_documentation is None
+
+
 def test_graph_find_matches_symbol_or_display_name() -> None:
     graph = Graph()
     graph.add_node("cxx . . $ mongo/Foo#makeResumeToken(a1).", display_name="makeResumeToken")

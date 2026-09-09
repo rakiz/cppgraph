@@ -259,10 +259,25 @@ item below states a verified fact, not a suspicion, and carries the effort estim
   Measured: 99.99% non-empty, but 84.45% is a literal `"No documentation available."`
   placeholder — the genuine doc-comment rate is 10.09% (81,844 of 810,919 symbols). No
   upstream ask here: `explain_symbol` can consume this today, cppgraph-side.
-  `signature_documentation` remains genuinely empty (0/810,919) — moderate effort,
-  moderate value: nothing exists today (`set_signature_documentation` appears nowhere
-  in the indexer), would render declared
-  signatures without a source read.
+- **`SymbolInformation.signature_documentation` — confirmed never set (0/810,919 corpus
+  symbols; `set_signature_documentation` appears nowhere in the indexer) by the OFFICIAL
+  upstream binary (measurement stands, `SCIP_AUDIT.md`).** DONE on our side:
+  `scip-clang-patches/signature-documentation-on-v0.4.0.patch` adds a
+  `declToSignatureText` syntactic printer (clang `PrintingPolicy` with `TerseOutput`,
+  function/method decls only — via `saveFunctionDecl`) emitting SCIP's
+  `SymbolInformation.signature_documentation` (a pretty-printed declaration, no body,
+  default arguments preserved), plumbed through the TU-merge pipeline
+  (`SymbolInformationBuilder`/`DocumentBuilder::merge`, first-non-empty-wins semantics)
+  exactly like the `kind` patch. Scope/limit: only defined or pure-virtual
+  function/method declarations get a signature — bodyless in-class declarations
+  (routed through `saveForwardDeclaration`, no `SymbolInformation` emitted) do not, in
+  v1. Verified end-to-end with a real compiled build against a fixture (`int add(int a,
+  int b = 2)` → `sig_doc.text == "int add(int a, int b = 2)"`). cppgraph consumes it:
+  `Node.signature_documentation` (store schema amends the pending v5, ungated — a plain
+  nullable column like `documentation`, not gated like `scip_kind`), surfaced as
+  `signature_documentation` on `explain`/`explain_symbol` (CLI: "signature (stored):",
+  distinct from the existing source-derived `--root` `signature:` line). Not yet
+  upstreamed.
 - **Effective call arity per call site — not modeled.** A call occurrence carries the
   callee symbol and location but not how many arguments the call expression actually passes.
   clang's AST knows it; SCIP drops it. Without it the graph can't tell "called with 2 args"

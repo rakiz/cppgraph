@@ -169,6 +169,21 @@ def real_documentation(entries: Iterable[str]) -> str | None:
     return text
 
 
+def signature_documentation_text(signature: scip_pb2.Signature) -> str | None:
+    """The signature text behind a `SymbolInformation.signature_documentation`
+    message, or None when there isn't any.
+
+    Mirrors `real_documentation` for the `Signature` message (the same shape
+    as a `Document`), minus the placeholder/auto-text filter: scip-clang
+    writes no placeholder into signatures — an unset field reads back as the
+    empty default instance (`text` == ""), so "non-empty text" is the whole
+    test. Only `.text` is kept (`.language` is constant for a C++ index);
+    surrounding whitespace is stripped, as documentation's is.
+    """
+    text = signature.text.strip()
+    return text or None
+
+
 _SINGLE_CHAR_TERMINATORS = "/#.:!"  # namespace, type, term, meta, macro
 
 
@@ -341,6 +356,15 @@ def build_graph(
                 # as documentation: the field is identical across a symbol's
                 # per-document duplicates anyway.
                 node.scip_kind = symbol_kind_name(sym_info.kind)
+            if node.signature_documentation is None:
+                # Recorded signature text (signature-emitting binary only; a
+                # stock one leaves the field unset -> empty text -> None). Same
+                # "first wins" door as documentation: no placeholder exists for
+                # signatures, so a non-empty text is the only bar, and a later
+                # duplicate never overwrites one already captured.
+                node.signature_documentation = signature_documentation_text(
+                    sym_info.signature_documentation
+                )
             for rel in sym_info.relationships:
                 if rel.is_implementation:
                     # scip-clang uses is_implementation for both class

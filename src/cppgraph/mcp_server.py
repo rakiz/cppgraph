@@ -1477,9 +1477,14 @@ def explain(
     the caller/callee lists, each side reporting its `trivial_hidden` count.
     With `root` given, `signature` is a best-effort parameter list read from the
     definition site — including any default argument value, verbatim (e.g.
-    `(bool useNullIfMissing = false)`) — since the graph itself never carries a
-    parsed signature and a defaulted param is otherwise invisible without
-    opening the header. When the indexed symbol has a genuine doc comment, it
+    `(bool useNullIfMissing = false)`) — a defaulted param being otherwise
+    invisible without opening the header. Independently of `root`, a graph
+    built from a signature-emitting scip-clang returns the signature recorded
+    at index time as `signature_documentation` (from
+    `SymbolInformation.signature_documentation`, stored in the graph; absent
+    when it carries none) — a distinct key from the source-derived
+    `signature`, which can capture defaulted parameters the recorded text may
+    lack. When the indexed symbol has a genuine doc comment, it
     is returned as `documentation` — extracted from
     `SymbolInformation.documentation` at build time (scip-clang's placeholder
     and auto-generated namespace/File text filtered out), so it needs no
@@ -1556,6 +1561,16 @@ def explain(
         # presence convention as `documentation`. Additive to the descriptor-
         # suffix classification, which stays the source of truth for typing.
         result["scip_kind"] = node.scip_kind
+
+    if node.signature_documentation is not None:
+        # Signature text recorded at index time
+        # (`SymbolInformation.signature_documentation`), stored in the graph —
+        # available without `--root`, unlike the source-derived `signature`. A
+        # distinct key, never a conflation of the two: the source read can
+        # capture defaulted parameters the recorded text may lack. Absent when
+        # the graph carries none — never null, the same presence convention as
+        # `documentation`.
+        result["signature_documentation"] = node.signature_documentation
 
     if root is not None:
         # Always set the key, even when extraction failed (None) — mirrors
@@ -2408,8 +2423,13 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         `source_location`, …) — each list reports its `trivial_hidden` count.
         With a checkout configured (`--root`), also returns `signature`: the
         parameter list read from source, including any default argument value
-        verbatim (e.g. `(bool useNullIfMissing = false)`) — invisible from the
-        graph alone, which never carries a parsed signature. When the symbol
+        verbatim (e.g. `(bool useNullIfMissing = false)`) — a defaulted param is
+        otherwise invisible without opening the header. Independently of
+        `--root`, a graph built from a signature-emitting scip-clang returns the
+        signature recorded at index time as `signature_documentation` (stored in
+        the graph, so no checkout is needed for it) — a distinct key from the
+        source-derived `signature`, which can capture defaulted parameters the
+        recorded text may lack. When the symbol
         has a genuine doc comment, it is returned as `documentation` (extracted
         at index time; scip-clang's placeholder/auto-generated text filtered
         out) — no checkout needed for that one. When the graph was built from a

@@ -8,6 +8,15 @@
 # this directory, or completely alone. Verified empirically: all 6 orderings of
 # the three patches produce byte-identical final files. See
 # scip-clang-patches/README.md's "Independence" section.
+#
+# Exception: the ForwardDeclOccurrence::addTo hunk in indexer/ScipExtras.cc
+# carries -U2 context (widened when the fifth patch landed). At -U1 its only
+# context lines were `  }` + `}` — generic enough that once cumulative
+# insertions from other patches shift the file enough, git apply could match a
+# closer-but-wrong brace pair (observed: landing inside
+# DocumentBuilder::populateForwardDeclResolver, a guaranteed compile error).
+# The richer context anchors on the unique occ.add_range(this->range[i])
+# line instead.
 diff --git a/indexer/Indexer.cc b/indexer/Indexer.cc
 index c63040b..3155789 100644
 --- a/indexer/Indexer.cc
@@ -70,13 +79,15 @@ diff --git a/indexer/ScipExtras.cc b/indexer/ScipExtras.cc
 index db5f8be..0192db7 100644
 --- a/indexer/ScipExtras.cc
 +++ b/indexer/ScipExtras.cc
-@@ -248,2 +248,6 @@ void ForwardDeclOccurrence::addTo(scip::Occurrence &occ) {
+@@ -247,4 +247,8 @@ void ForwardDeclOccurrence::addTo(scip::Occurrence &occ) {
+     occ.add_range(this->range[i]);
    }
 +  if (this->isDeclarationSite) {
 +    occ.set_symbol_roles(occ.symbol_roles()
 +                         | scip::SymbolRole::ForwardDefinition);
 +  }
  }
+ 
 diff --git a/indexer/ScipExtras.h b/indexer/ScipExtras.h
 index 7250a22..6fc3b7d 100644
 --- a/indexer/ScipExtras.h

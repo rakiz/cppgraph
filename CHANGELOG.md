@@ -6,7 +6,7 @@ on-disk store also carries its own `schema_version` for forward-compatibility.
 
 ## [Unreleased]
 
-Store schema v4 → v5 (`refs.roles`); three new scip-clang patches and a rename
+Store schema v4 → v5 (`refs.roles`); four new scip-clang patches and a rename
 of the binary "variant" concept.
 
 ### Added
@@ -47,16 +47,43 @@ of the binary "variant" concept.
   `explain_symbol`/`find` and a `has_symbol_kind` capability line in `status`,
   on the CLI and as MCP tools alike. Degrades cleanly (field absent, never a
   crash) on a graph built without this patch or an older store.
+- **`SymbolInformation.signature_documentation` syntactic printer**
+  (`scip-clang-patches/signature-documentation-on-v0.4.0.patch`): a scip-clang
+  patch filling SCIP's `SymbolInformation.signature_documentation`, which
+  upstream never sets (`set_signature_documentation` appears nowhere in the
+  indexer — measured 0/810,919 on the corpus): `declToSignatureText` in
+  `Indexer.cc` pretty-prints the declaration of function/method decls only
+  (clang `PrintingPolicy` with `TerseOutput` — no body, default arguments
+  preserved) at `saveFunctionDecl` sites, carried through the TU-merge
+  pipeline (`SymbolInformationBuilder`/`DocumentBuilder::merge`,
+  first-non-empty-wins semantics) exactly like the `kind` patch. Scope/limit:
+  only defined or pure-virtual function/method declarations get a signature —
+  bodyless in-class declarations (routed through `saveForwardDeclaration`, no
+  `SymbolInformation` emitted) do not, in v1. Fifth patch in the bundle
+  (`patchset_version` 4 → 5 in `versions.json`), order-independent with the
+  other four. Verified end-to-end with a real compiled build against a
+  fixture (`int add(int a, int b = 2)` → `sig_doc.text == "int add(int a, int
+  b = 2)"`). Consumed by cppgraph: `Node.signature_documentation` (store
+  schema amends the pending v5 — ungated, a plain nullable column like
+  `documentation`, not a `has_*`-gated one like `scip_kind`), surfaced as a
+  `signature_documentation` field on `explain_symbol` and a
+  `signature (stored):` line on CLI `explain`, distinct from the
+  source-derived `--root` `signature:` line, on the CLI and as MCP tools
+  alike. Degrades cleanly (field absent, never a crash) on a graph built
+  without this patch or an older store. No proto changes needed — the field
+  already exists in the vendored `scip.proto`.
 - **Dual versioning for the scip-clang patch bundle**: `versions.json`'s
   `scip_clang.patchset_version` now tracks our own patch bundle independently
   of the upstream `version` pin (history: 1 = #504 `enclosing_range` only; 2 =
   + `ForwardDefinition`; 3 = + `ReadAccess`/`WriteAccess`; 4 = +
-  `SymbolInformation.kind`). `cppgraph status`
+  `SymbolInformation.kind`; 5 = + `SymbolInformation.signature_documentation`).
+  `cppgraph status`
   advises when an installed patched binary's patchset predates the pin.
-- All four scip-clang patches (`enclosing_range`, `forward-definition`,
-  `read-write-access`, `kind`) verified mutually **order-independent** — any of
-  the 24 possible application orders produces byte-identical final files, and
-  each applies standalone. Matters for a future independent upstream PR per patch.
+- All five scip-clang patches (`enclosing_range`, `forward-definition`,
+  `read-write-access`, `kind`, `signature-documentation`) verified mutually
+  **order-independent** — any of the 120 possible application orders produces
+  byte-identical final files, and each applies standalone. Matters for a future
+  independent upstream PR per patch.
 
 ### Changed
 

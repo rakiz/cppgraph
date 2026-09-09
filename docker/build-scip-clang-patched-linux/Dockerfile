@@ -89,6 +89,17 @@ COPY scip-clang-patches/kind-on-v0.4.0.patch /tmp/kind.patch
 RUN git apply --verbose /tmp/kind.patch \
     && grep -q 'classifySymbolKind' indexer/Indexer.cc  # fail fast if patch is a no-op
 
+# Apply the SymbolInformation.signature_documentation emitter (applied here
+# after the four patches above purely for build consistency — all five patches
+# are actually order-independent, see scip-clang-patches/README.md). Fills
+# SCIP's SymbolInformation.signature_documentation (upstream leaves it unset
+# on 100% of symbols) with the printed declaration (no body, default args
+# kept) for every defined/pure-virtual function & method; the text survives
+# the TU-merge pipeline via SymbolInformationBuilder::signatureDocumentation.
+COPY scip-clang-patches/signature-documentation-on-v0.4.0.patch /tmp/signature_documentation.patch
+RUN git apply --verbose /tmp/signature_documentation.patch \
+    && grep -q 'declToSignatureText' indexer/Indexer.cc  # fail fast if patch is a no-op
+
 # Optimized release build (same config upstream uses for its linux binaries).
 RUN echo "startup --host_jvm_args=-Xmx${BAZEL_JVM_HEAP}" > ci.bazelrc \
     && bazel build //indexer:scip-clang --config=release-linux \

@@ -104,8 +104,10 @@ def extract_signature(root: str | None, file: str | None, line0: int | None) -> 
     definition site.
 
     `scip-clang` disambiguates overloads by an opaque hash, not by argument
-    types, so grouped overloads (`find`) are otherwise indistinguishable, and
-    the graph itself never carries a parsed signature (`explain`/`explain_symbol`).
+    types, so grouped overloads (`find`) are otherwise indistinguishable. A
+    patched scip-clang can carry a stored `signature_documentation` on the
+    graph itself (`explain`/`explain_symbol`'s "signature (stored):"), but it
+    is a pretty-printed declaration, not this verbatim-source extraction.
     Since cppgraph has the checkout (`root`), it reads the def line and captures
     the text from the first `(` to its matching `)` verbatim — so a defaulted
     parameter (`bool useNullIfMissing = false`) is visible without opening the
@@ -2089,6 +2091,16 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  documentation: {doc_lines[0]}")
             for doc_line in doc_lines[1:]:
                 print(f"    {doc_line}")
+        if node.signature_documentation:
+            # Signature recorded in the graph at index time (signature-emitting
+            # binary): printed with no --root, like documentation. Labelled
+            # apart from the source-derived `signature:` below so the two are
+            # never conflated (the source read also captures defaulted
+            # parameters the recorded text may lack).
+            sig_lines = node.signature_documentation.splitlines()
+            print(f"  signature (stored): {sig_lines[0]}")
+            for sig_line in sig_lines[1:]:
+                print(f"    {sig_line}")
         if args.root is not None:
             sig = extract_signature(args.root, node.file, node.line)
             if sig is not None:

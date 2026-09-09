@@ -13,6 +13,7 @@ from cppgraph.builder import (
     is_callable_symbol,
     is_term_symbol,
     real_documentation,
+    signature_documentation_text,
 )
 from cppgraph.proto import scip_pb2
 
@@ -785,3 +786,65 @@ def test_build_graph_first_real_scip_kind_wins_across_documents() -> None:
     graph = build_graph(scip_pb2.Index(documents=[first, second, third]))
 
     assert graph.nodes[sym].scip_kind == "StaticMethod"
+
+
+# --- SymbolInformation.signature_documentation -------------------------------
+
+
+def test_signature_documentation_text_keeps_non_empty_text() -> None:
+    """A signature-emitting binary records the symbol's signature text; it is
+    kept (whitespace-stripped, like documentation's)."""
+    assert (
+        signature_documentation_text(scip_pb2.Signature(text="void add(int a, int b)"))
+        == "void add(int a, int b)"
+    )
+    assert signature_documentation_text(scip_pb2.Signature(text="  class Widget  ")) == (
+        "class Widget"
+    )
+
+
+def test_signature_documentation_text_empty_is_none() -> None:
+    """No placeholder exists for signatures (unlike `documentation`): an unset
+    field reads back as the empty default instance, and empty/whitespace text
+    is simply "no data" — None, never an error."""
+    assert signature_documentation_text(scip_pb2.Signature()) is None
+    assert signature_documentation_text(scip_pb2.Signature(text="")) is None
+    assert signature_documentation_text(scip_pb2.Signature(text="   ")) is None
+
+
+def test_build_graph_keeps_signature_documentation_on_node() -> None:
+    fn = "cxx . . $ mongo/sigged(s1)."
+    doc = scip_pb2.Document(relative_path="sig.cpp")
+    doc.occurrences.append(_occurrence(fn, 1, roles=DEFINITION))
+    doc.symbols.add(symbol=fn).signature_documentation.text = "void sigged(int a)"
+    graph = build_graph(scip_pb2.Index(documents=[doc]))
+
+    assert graph.nodes[fn].signature_documentation == "void sigged(int a)"
+
+
+def test_build_graph_signature_documentation_none_when_absent() -> None:
+    """A stock binary never sets the field: nodes keep
+    `signature_documentation=None` and the graph builds exactly as before this
+    feature."""
+    doc = scip_pb2.Document(relative_path="plain.cpp")
+    doc.symbols.add(symbol="cxx . . $ mongo/plain(p1).")
+    graph = build_graph(scip_pb2.Index(documents=[doc]))
+
+    assert graph.nodes["cxx . . $ mongo/plain(p1)."].signature_documentation is None
+
+
+def test_build_graph_first_signature_documentation_wins_across_documents() -> None:
+    """Same first-wins rule as documentation: a symbol's `SymbolInformation`
+    appears once per document (a header included by N TUs). An empty-text
+    visit must not block a later signature (None keeps the door open), and a
+    signature already captured must not be overwritten by a later duplicate."""
+    fn = "cxx . . $ mongo/dup(d1)."
+    first = scip_pb2.Document(relative_path="a.cpp")
+    first.symbols.add(symbol=fn)  # stock binary: field absent -> empty text
+    second = scip_pb2.Document(relative_path="b.cpp")
+    second.symbols.add(symbol=fn).signature_documentation.text = "void dup(int a)"
+    third = scip_pb2.Document(relative_path="c.cpp")
+    third.symbols.add(symbol=fn).signature_documentation.text = "void dup(int a, int b)"
+    graph = build_graph(scip_pb2.Index(documents=[first, second, third]))
+
+    assert graph.nodes[fn].signature_documentation == "void dup(int a)"

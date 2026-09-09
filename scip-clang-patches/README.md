@@ -34,13 +34,30 @@ binary) — hence living here at the repo root instead of inside either one.
   `SymbolInformation` emitted today (local variables, parameters) are
   unaffected. Not yet upstreamed. Generated with reduced diff context
   (`-U1`).
+- `signature-documentation-on-v0.4.0.patch` — fills SCIP's
+  `SymbolInformation.signature_documentation` (field 7, a `Document` message
+  with `language` + `text`), which upstream leaves unset on 100% of symbols.
+  For every function/method declaration that reaches `saveFunctionDecl`'s
+  `SymbolInformation` branch (i.e. defined or pure-virtual — the only
+  `FunctionDecl`s which get one today), `declToSignatureText` in
+  `indexer/Indexer.cc` prints the declaration back out via the AST
+  declaration printer (`clang::PrintingPolicy` with `TerseOutput` — body and
+  ctor initializer lists suppressed, parameter default arguments, specifiers
+  and `= 0`/`= delete`/`= default` markers kept), and the text survives the
+  TU-merge pipeline via a new `SymbolInformationBuilder::signatureDocumentation`
+  field (first non-empty wins, a later duplicate can fill an earlier empty
+  one — same semantics as `documentation` merging). Bodyless in-class
+  declarations never get a `SymbolInformation` (they route through
+  `saveForwardDeclaration`), so they get no signature — accepted v1
+  limitation. Not yet upstreamed. Generated with reduced diff context
+  (`-U1`).
 
 ## Independence
 
-Each patch applies **standalone** on a clean `v0.4.0` checkout, and all four
-apply cleanly together in **any of the 24 possible orderings** — verified
+Each patch applies **standalone** on a clean `v0.4.0` checkout, and all five
+apply cleanly together in **any of the 120 possible orderings** — verified
 empirically (every ordering tried against a fresh `v0.4.0` checkout; the
-resulting files are byte-identical regardless of order). None of the four
+resulting files are byte-identical regardless of order). None of the five
 requires any of the others.
 
 This wasn't true by default: at the standard 3-line diff context, two of
@@ -55,7 +72,16 @@ several of its one-line insertions sit two lines away from a
 `saveFieldDecl`/`saveTypedefNameDecl`/`saveVarDecl`), which is close enough
 that even `-U1` hunks would merge — there, its insertions are anchored on
 the `scip::SymbolInformation symbolInfo{};` / `getDocComment(...)` lines
-that no other patch touches, keeping the hunks separable. This matters for
+that no other patch touches, keeping the hunks separable. And
+`signature-documentation` (added last) exposed a subtler failure mode in
+the other direction: `forward-definition`'s `ForwardDeclOccurrence::addTo`
+hunk had only `  }` + `}` as its `-U1` context — generic enough that once
+enough lines shifted above it, `git apply` matched a closer-but-wrong brace
+pair (landing the ForwardDefinition block inside
+`DocumentBuilder::populateForwardDeclResolver`, a guaranteed compile
+error). That one hunk was widened to `-U2` context (anchoring on the unique
+`occ.add_range(this->range[i]);` line — see that patch's header); with it,
+the full 120-ordering sweep is byte-identical. This matters for
 upstreaming: a maintainer reviewing these independently (in whatever order
 they pick, possibly rejecting one) won't hit an artificial "depends on
 patch X" requirement that was never semantically real.
@@ -63,15 +89,16 @@ patch X" requirement that was never semantically real.
 ## Apply order
 
 Our own build applies them in a fixed order — `enclosing_range` →
-`forward-definition` → `read-write-access` → `kind` — purely for consistency
-(it's the one sequence that's actually end-to-end tested), not because any of
-them requires it:
+`forward-definition` → `read-write-access` → `kind` →
+`signature-documentation` — purely for consistency (it's the one sequence
+that's actually end-to-end tested), not because any of them requires it:
 
 ```sh
-git apply enclosing_range-on-v0.4.0.patch      # order-independent
-git apply forward-definition-on-v0.4.0.patch   # order-independent
-git apply read-write-access-on-v0.4.0.patch    # order-independent
-git apply kind-on-v0.4.0.patch                 # order-independent
+git apply enclosing_range-on-v0.4.0.patch                 # order-independent
+git apply forward-definition-on-v0.4.0.patch              # order-independent
+git apply read-write-access-on-v0.4.0.patch               # order-independent
+git apply kind-on-v0.4.0.patch                            # order-independent
+git apply signature-documentation-on-v0.4.0.patch         # order-independent
 ```
 
 Each is also ready to become an independent upstream PR without regenerating
@@ -86,7 +113,7 @@ added/changed) are two independent numbers — see `versions.json`'s
 
 ## Consumers
 
-- `docker/build-scip-clang-patched-linux/Dockerfile` — copies all four patches
+- `docker/build-scip-clang-patched-linux/Dockerfile` — copies all five patches
   into the Docker build context and applies them in order.
 - `scripts/build-scip-clang-patched-macos.sh` — applies them directly to a
   local clone, in the same order.

@@ -1489,6 +1489,63 @@ def test_explain_omits_scip_kind_when_absent(store: GraphStore) -> None:
     assert "scip_kind" not in result
 
 
+def test_explain_includes_signature_documentation_from_the_graph(tmp_path: Path) -> None:
+    """A recorded signature is carried by the store (extracted at index time
+    from `SymbolInformation.signature_documentation`), so it needs no `root`
+    and no source read — unlike `signature`. Present only when the graph
+    carries text: absent, never null (the same presence convention as
+    `documentation`)."""
+    path = tmp_path / "graph.db"
+    graph = Graph()
+    graph.nodes[FOO] = Node(
+        symbol=FOO,
+        display_name="makeResumeToken",
+        file="foo.cpp",
+        line=234,
+        signature_documentation="void makeResumeToken(const Document& doc)",
+    )
+    write_sqlite(graph, path)
+    result = mcp_server.explain(GraphStore(path), FOO)
+    assert result["signature_documentation"] == "void makeResumeToken(const Document& doc)"
+
+
+def test_explain_omits_signature_documentation_when_none(store: GraphStore) -> None:
+    result = mcp_server.explain(store, FOO)
+    assert "signature_documentation" not in result
+
+
+def test_explain_signature_and_signature_documentation_coexist(
+    store: GraphStore, tmp_path: Path
+) -> None:
+    """The two keys are genuinely distinct and can coexist: `signature` stays
+    the source-derived extraction (root only), `signature_documentation` the
+    graph-stored one — neither shadows nor overwrites the other."""
+    root = tmp_path / "checkout"
+    root.mkdir()
+    (root / "foo.cpp").write_text(
+        "\n".join(f"line {i}" for i in range(234))
+        + "\nvoid makeResumeToken(const Document& doc, bool useNullIfMissing = false) {}\n"
+    )
+    path = tmp_path / "graph.db"
+    graph = Graph()
+    graph.nodes[FOO] = Node(
+        symbol=FOO,
+        display_name="makeResumeToken",
+        file="foo.cpp",
+        line=234,
+        signature_documentation="Signature makeResumeToken(Document)",
+    )
+    write_sqlite(graph, path)
+
+    result = mcp_server.explain(GraphStore(path), FOO, root=str(root))
+    assert result["signature_documentation"] == "Signature makeResumeToken(Document)"
+    assert result["signature"] == "(const Document& doc, bool useNullIfMissing = false)"
+
+    without_root = mcp_server.explain(GraphStore(path), FOO)
+    assert without_root["signature_documentation"] == "Signature makeResumeToken(Document)"
+    assert "signature" not in without_root  # source-derived needs a root
+
+
 def test_find_includes_scip_kind_when_graph_has_it(tmp_path: Path) -> None:
     path = tmp_path / "graph.db"
     graph = Graph()

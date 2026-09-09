@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Build scip-clang (v0.4.0 + our patches from scip-clang-patches/: enclosing_range
 # / PR #504, the ForwardDefinition bit fix, the ReadAccess/WriteAccess
-# classifier, and the SymbolInformation.kind classifier) NATIVELY on macOS, for
+# classifier, the SymbolInformation.kind classifier, and the
+# SymbolInformation.signature_documentation emitter) NATIVELY on macOS, for
 # THIS Mac's CPU architecture. Mirrors docker/build-scip-clang-patched-linux/build.sh's role
 # but skips Docker entirely — a Linux container on a Mac can only ever produce
 # a Linux binary, so getting a native macOS binary means building on the host.
@@ -170,6 +171,25 @@ else
   git -C "$BUILD_ROOT" apply --verbose "$KIND_PATCH"
   grep -q 'classifySymbolKind' "$BUILD_ROOT/indexer/Indexer.cc" \
     || die "patch applied but grep for 'classifySymbolKind' still failed — patch may be a no-op"
+fi
+
+# Apply the SymbolInformation.signature_documentation emitter (applied here
+# after the four patches above purely for build consistency — all five
+# patches are actually order-independent, see scip-clang-patches/README.md).
+# Fills SCIP's SymbolInformation.signature_documentation (upstream leaves it
+# unset on 100% of symbols) with the printed declaration (no body, default
+# args kept) for every defined/pure-virtual function & method; the text
+# survives the TU-merge pipeline via
+# SymbolInformationBuilder::signatureDocumentation.
+SIGDOC_PATCH="$(pwd)/scip-clang-patches/signature-documentation-on-v0.4.0.patch"
+[ -f "$SIGDOC_PATCH" ] || die "patch not found at $SIGDOC_PATCH"
+if grep -q 'declToSignatureText' "$BUILD_ROOT/indexer/Indexer.cc" 2>/dev/null; then
+  echo "  already patched (declToSignatureText present) — skipping git apply"
+else
+  echo "==> Applying SymbolInformation.signature_documentation patch"
+  git -C "$BUILD_ROOT" apply --verbose "$SIGDOC_PATCH"
+  grep -q 'declToSignatureText' "$BUILD_ROOT/indexer/Indexer.cc" \
+    || die "patch applied but grep for 'declToSignatureText' still failed — patch may be a no-op"
 fi
 
 # scip-clang v0.4.0 hardcodes a full-Xcode.app SDK path in setup_llvm.bzl, which

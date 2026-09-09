@@ -65,6 +65,12 @@ CREATE TABLE files (
 -- unclassified) — never an error. Additive to the descriptor-suffix
 -- classification; powers `explain`/`find`'s `scip_kind` field, flagged
 -- `has_symbol_kind` in meta.
+-- `signature_documentation` = the symbol's signature as recorded by a
+-- signature-emitting binary (`SymbolInformation.signature_documentation.text`,
+-- a `Signature` message); NULL when there is none (stock binary, or empty
+-- text — no placeholder exists for signatures). Powers `explain`'s stored
+-- signature, no source read needed; ungated (no meta flag), like
+-- `documentation`.
 CREATE TABLE symbols (
     id            INTEGER PRIMARY KEY,
     symbol        TEXT NOT NULL,
@@ -73,7 +79,8 @@ CREATE TABLE symbols (
     line          INTEGER,
     end_line      INTEGER,
     documentation TEXT,
-    scip_kind     TEXT
+    scip_kind     TEXT,
+    signature_documentation TEXT
 );
 CREATE TABLE edges (
     kind    TEXT NOT NULL,
@@ -140,11 +147,13 @@ _FILE_LINE_RE = re.compile(r"^(.+):([1-9][0-9]*)$")
 # v3: `symbols.end_line` (definition body extents, #504 binaries only).
 # v4: `symbols.documentation` (genuine doc-comment text; placeholder and
 # auto-generated namespace/File text filtered at build time). Released in v0.2.0.
-# v5: `refs.roles` (ReadAccess/WriteAccess bits, patched binaries only) and
+# v5: `refs.roles` (ReadAccess/WriteAccess bits, patched binaries only),
 # `symbols.scip_kind` (fine-grained `SymbolInformation.kind` enum names,
-# kind-patched binaries only) — the first schema changes since v0.2.0's
-# release; both still unreleased as of this comment, so they amend the same
-# pending version number (see the policy above) rather than incrementing it.
+# kind-patched binaries only) and `symbols.signature_documentation` (signature
+# text from a signature-emitting binary, ungated like `documentation`) — the
+# first schema changes since v0.2.0's release; all still unreleased as of this
+# comment, so they amend the same pending version number (see the policy
+# above) rather than incrementing it.
 SCHEMA_VERSION = 5
 
 
@@ -476,6 +485,7 @@ def write_sqlite(graph: Graph, path: str | Path, *, meta: dict[str, str] | None 
                     node.end_line,
                     node.documentation,
                     node.scip_kind,
+                    node.signature_documentation,
                 )
             )
 
@@ -526,7 +536,7 @@ def write_sqlite(graph: Graph, path: str | Path, *, meta: dict[str, str] | None 
         con.executemany(
             "INSERT INTO files VALUES (?, ?)", [(fid, p) for p, fid in file_ids.items()]
         )
-        con.executemany("INSERT INTO symbols VALUES (?, ?, ?, ?, ?, ?, ?, ?)", sym_rows)
+        con.executemany("INSERT INTO symbols VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", sym_rows)
         con.executemany("INSERT INTO edges VALUES (?, ?, ?, ?, ?)", edge_rows)
         con.executemany("INSERT INTO refs VALUES (?, ?, ?, ?, ?)", ref_rows)
         con.executemany("INSERT INTO meta VALUES (?, ?)", all_meta.items())
@@ -641,6 +651,13 @@ def enrich_references(path: str | Path, index: scip_pb2.Index) -> tuple[int, int
         # `SymbolInformation.kind` names from a kind-patched binary.
         if "scip_kind" not in sym_cols:
             con.execute("ALTER TABLE symbols ADD COLUMN scip_kind TEXT")
+        # Same for `symbols.signature_documentation` (pending schema v5): add
+        # the column only — enrich-refs never backfills signature text (that's
+        # `cppgraph build`'s job; unlike roles/kinds, no ride-along) — but the
+        # stamped `schema_version` below must end up shaped to match what
+        # `get_node`'s full SELECT and `apply_update`'s re-insert read.
+        if "signature_documentation" not in sym_cols:
+            con.execute("ALTER TABLE symbols ADD COLUMN signature_documentation TEXT")
 
         sym_ids = dict(con.execute("SELECT symbol, id FROM symbols"))
         file_ids = dict(con.execute("SELECT path, id FROM files"))
@@ -892,50 +909,76 @@ class GraphStore:
             row = self._con.execute(
                 """
                 SELECT s.symbol, s.display_name, f.path, s.line, s.end_line, s.documentation,
-                       s.scip_kind
+                       s.scip_kind, s.signature_documentation
                 FROM symbols s LEFT JOIN files f ON f.id = s.file_id
                 WHERE s.symbol = ?
                 """,
                 (symbol,),
             ).fetchone()
         except sqlite3.OperationalError:
-            # Store predates `symbols.scip_kind` (schema v4, never migrated
-            # by apply_update/enrich_references) — degrade to the v4 shape
-            # rather than crash a plain read-only query (and keep `documentation`,
-            # which the released shape already carries).
+            # Store predates `symbols.signature_documentation` (schema v5 as
+            # first drafted, before this amendment) — degrade to that shape
+            # rather than crash a plain read-only query, keeping every datum
+            # the amended shape already carries.
             try:
                 row = self._con.execute(
                     """
-                    SELECT s.symbol, s.display_name, f.path, s.line, s.end_line, s.documentation
+                    SELECT s.symbol, s.display_name, f.path, s.line, s.end_line, s.documentation,
+                           s.scip_kind
                     FROM symbols s LEFT JOIN files f ON f.id = s.file_id
                     WHERE s.symbol = ?
                     """,
                     (symbol,),
                 ).fetchone()
             except sqlite3.OperationalError:
-                # Nor even `documentation` (schema v3) — degrade again.
+                # Store predates `symbols.scip_kind` (schema v4, never migrated
+                # by apply_update/enrich_references) — degrade to the v4 shape
+                # rather than crash a plain read-only query (and keep `documentation`,
+                # which the released shape already carries).
                 try:
                     row = self._con.execute(
                         """
-                        SELECT s.symbol, s.display_name, f.path, s.line, s.end_line
+                        SELECT s.symbol, s.display_name, f.path, s.line, s.end_line, s.documentation
                         FROM symbols s LEFT JOIN files f ON f.id = s.file_id
                         WHERE s.symbol = ?
                         """,
                         (symbol,),
                     ).fetchone()
                 except sqlite3.OperationalError:
-                    # Nor even `end_line` (schema v2) — the original fallback.
-                    row = self._con.execute(
-                        """
-                        SELECT s.symbol, s.display_name, f.path, s.line
-                        FROM symbols s LEFT JOIN files f ON f.id = s.file_id
-                        WHERE s.symbol = ?
-                        """,
-                        (symbol,),
-                    ).fetchone()
+                    # Nor even `documentation` (schema v3) — degrade again.
+                    try:
+                        row = self._con.execute(
+                            """
+                            SELECT s.symbol, s.display_name, f.path, s.line, s.end_line
+                            FROM symbols s LEFT JOIN files f ON f.id = s.file_id
+                            WHERE s.symbol = ?
+                            """,
+                            (symbol,),
+                        ).fetchone()
+                    except sqlite3.OperationalError:
+                        # Nor even `end_line` (schema v2) — the original fallback.
+                        row = self._con.execute(
+                            """
+                            SELECT s.symbol, s.display_name, f.path, s.line
+                            FROM symbols s LEFT JOIN files f ON f.id = s.file_id
+                            WHERE s.symbol = ?
+                            """,
+                            (symbol,),
+                        ).fetchone()
+                        if row is None:
+                            return None
+                        return Node(
+                            symbol=row[0], display_name=row[1] or "", file=row[2], line=row[3]
+                        )
                     if row is None:
                         return None
-                    return Node(symbol=row[0], display_name=row[1] or "", file=row[2], line=row[3])
+                    return Node(
+                        symbol=row[0],
+                        display_name=row[1] or "",
+                        file=row[2],
+                        line=row[3],
+                        end_line=row[4],
+                    )
                 if row is None:
                     return None
                 return Node(
@@ -944,6 +987,7 @@ class GraphStore:
                     file=row[2],
                     line=row[3],
                     end_line=row[4],
+                    documentation=row[5],
                 )
             if row is None:
                 return None
@@ -954,6 +998,7 @@ class GraphStore:
                 line=row[3],
                 end_line=row[4],
                 documentation=row[5],
+                scip_kind=row[6],
             )
         if row is None:
             return None
@@ -965,6 +1010,7 @@ class GraphStore:
             end_line=row[4],
             documentation=row[5],
             scip_kind=row[6],
+            signature_documentation=row[7],
         )
 
     def find(self, query: str, fuzzy: bool = False) -> list[Node]:
@@ -2342,10 +2388,12 @@ class GraphStore:
         changed_files = list(changed_files)
         with con:  # atomic: commit on success, rollback on error
             # (0) an older store may lack `end_line` (v2), `documentation`
-            # (v3), `refs.roles` (v4) or `symbols.scip_kind` (pending v5);
+            # (v3), `refs.roles` (v4) or `symbols.scip_kind` /
+            # `symbols.signature_documentation` (pending v5);
             # add them on demand — the same ALTER pattern `enrich_references`
             # uses for `refs.enclosing_id` — so the re-insert below can write
-            # body extents, doc text, access roles and fine-grained kinds.
+            # body extents, doc text, access roles, fine-grained kinds and
+            # recorded signatures.
             # The store is now v5-shaped, so stamp it.
             cols = {row[1] for row in con.execute("PRAGMA table_info(symbols)")}
             stale_shape = False
@@ -2357,6 +2405,9 @@ class GraphStore:
                 stale_shape = True
             if "scip_kind" not in cols:
                 con.execute("ALTER TABLE symbols ADD COLUMN scip_kind TEXT")
+                stale_shape = True
+            if "signature_documentation" not in cols:
+                con.execute("ALTER TABLE symbols ADD COLUMN signature_documentation TEXT")
                 stale_shape = True
             ref_cols = {row[1] for row in con.execute("PRAGMA table_info(refs)")}
             if "roles" not in ref_cols:
@@ -2395,7 +2446,8 @@ class GraphStore:
                 con.execute(f"DELETE FROM refs WHERE file_id IN ({ph})", chunk)
                 con.execute(
                     f"UPDATE symbols SET file_id = NULL, line = NULL, end_line = NULL, "
-                    f"documentation = NULL, scip_kind = NULL WHERE file_id IN ({ph})",
+                    f"documentation = NULL, scip_kind = NULL, signature_documentation = NULL "
+                    f"WHERE file_id IN ({ph})",
                     chunk,
                 )
 
@@ -2432,7 +2484,15 @@ class GraphStore:
                 # with NULL — a kindless partial downgrades the changed files'
                 # kinds, the accepted stock-update degradation), no fresh site
                 # keeps the old value.
-                "scip_kind = CASE WHEN ? IS NOT NULL THEN ? ELSE scip_kind END "
+                "scip_kind = CASE WHEN ? IS NOT NULL THEN ? ELSE scip_kind END, "
+                # `signature_documentation` travels with the fresh definition
+                # site exactly like documentation: a signature-carrying partial
+                # replaces it (even with NULL — a signature-less partial
+                # downgrades the changed files' recorded signatures, the
+                # accepted stock-update degradation), no fresh site keeps the
+                # old value.
+                "signature_documentation = CASE WHEN ? IS NOT NULL THEN ? "
+                "ELSE signature_documentation END "
                 "WHERE id = ?",
                 [
                     (
@@ -2445,6 +2505,8 @@ class GraphStore:
                         n.documentation,
                         file_id.get(n.file) if n.file else None,
                         n.scip_kind,
+                        file_id.get(n.file) if n.file else None,
+                        n.signature_documentation,
                         sym_id[n.symbol],
                     )
                     for n in partial.nodes.values()

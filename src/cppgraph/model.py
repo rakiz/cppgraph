@@ -37,6 +37,15 @@ class Node:
     # stays the source of truth for edge typing; surfaced by `explain`/`find`
     # and flagged `has_symbol_kind` in meta.
     scip_kind: str | None = None
+    # The symbol's signature as recorded by a signature-emitting scip-clang in
+    # `SymbolInformation.signature_documentation.text` (a `Signature` message
+    # mirroring `Document`'s shape), or None when there is none — a stock
+    # binary never sets the field, and empty text reads as None (no placeholder
+    # exists for signatures, unlike `documentation`). Surfaced by `explain`
+    # without a source read; distinct from the source-derived `signature`
+    # extraction (`--root`), which also captures defaulted parameters the
+    # recorded text may lack.
+    signature_documentation: str | None = None
 
 
 @dataclass(slots=True)
@@ -219,6 +228,7 @@ class Graph:
                     "end_line": n.end_line,
                     "documentation": n.documentation,
                     "scip_kind": n.scip_kind,
+                    "signature_documentation": n.signature_documentation,
                 }
                 for n in self.nodes.values()
             ],

@@ -2000,6 +2000,216 @@ def test_update_with_a_kindless_partial_degrades_changed_files(tmp_path: Path) -
     assert store.meta().get("has_symbol_kind") == "true"  # never flipped off
 
 
+# --- symbols.signature_documentation -----------------------------------------
+#
+# The signature text a signature-emitting binary records in
+# `SymbolInformation.signature_documentation.text`, ungated like
+# `documentation` (a plain nullable column, no meta flag). Empty/absent text
+# is "no data", never an error — a stock .scip must behave exactly as before
+# this feature.
+
+
+def test_signature_documentation_round_trip(tmp_path: Path) -> None:
+    graph = Graph()
+    graph.nodes[METHOD] = Node(
+        symbol=METHOD,
+        display_name="makeResumeToken",
+        file="a.cpp",
+        line=4,
+        signature_documentation="void makeResumeToken(const Document& doc)",
+    )
+    graph.add_node(OTHER)  # no signature: NULL column
+    store = _store(tmp_path, graph)
+
+    node = store.get_node(METHOD)
+    assert node is not None
+    assert node.signature_documentation == "void makeResumeToken(const Document& doc)"
+    assert store.get_node(OTHER).signature_documentation is None
+
+
+def test_get_node_degrades_on_a_pre_signature_documentation_store(tmp_path: Path) -> None:
+    """A store built before this amendment (no `signature_documentation`
+    column, never migrated) must read back with signature_documentation=None —
+    never crash — and the fallback cascade must NOT lose `documentation` or
+    `scip_kind`, the data the previous shape already carries."""
+    graph = Graph()
+    graph.nodes[METHOD] = Node(
+        symbol=METHOD,
+        display_name="makeResumeToken",
+        file="a.cpp",
+        line=4,
+        documentation="/** Doc. */",
+        scip_kind="StaticMethod",
+    )
+    db = tmp_path / "g.db"
+    write_sqlite(graph, db)
+    con = sqlite3.connect(db)
+    con.execute("ALTER TABLE symbols DROP COLUMN signature_documentation")
+    con.commit()
+    con.close()
+
+    store = GraphStore(db)
+    node = store.get_node(METHOD)
+    assert node is not None
+    assert node.signature_documentation is None
+    assert node.documentation == "/** Doc. */"
+    assert node.scip_kind == "StaticMethod"
+
+
+def test_update_carries_signature_documentation_from_the_partial(tmp_path: Path) -> None:
+    """An incremental update from a signature-emitting binary: the fresh
+    definition site's recorded signature replaces the stored one."""
+    db = tmp_path / "graph.db"
+    original = Graph()
+    original.add_node(METHOD, display_name="makeResumeToken")
+    write_sqlite(original, db)
+
+    partial = scip_pb2.Index()
+    doc = partial.documents.add(relative_path="foo.cpp")
+    doc.symbols.add(
+        symbol=METHOD
+    ).signature_documentation.text = "void makeResumeToken(const Document& doc)"
+    d = doc.occurrences.add(symbol=METHOD, symbol_roles=scip_pb2.SymbolRole.Definition)
+    d.range.extend([4, 0, 6])
+    update_store(db, partial)
+
+    store = GraphStore(db)
+    assert store.get_node(METHOD).signature_documentation == (
+        "void makeResumeToken(const Document& doc)"
+    )
+
+
+def test_update_with_a_signatureless_partial_degrades_changed_files(tmp_path: Path) -> None:
+    """A partial re-index from a stock binary (no recorded signatures): the
+    changed file's signature degrades to the partial's level (None) — a fresh
+    definition site wins even with NULL, the exact semantics of
+    `documentation`/`end_line` on a stock update."""
+    db = tmp_path / "graph.db"
+    original = Graph()
+    original.nodes[METHOD] = Node(
+        symbol=METHOD,
+        display_name="makeResumeToken",
+        file="foo.cpp",
+        line=4,
+        signature_documentation="void makeResumeToken(const Document& doc)",
+    )
+    write_sqlite(original, db)
+
+    partial = scip_pb2.Index()
+    doc = partial.documents.add(relative_path="foo.cpp")
+    doc.symbols.add(symbol=METHOD)  # no signature_documentation field
+    d = doc.occurrences.add(symbol=METHOD, symbol_roles=scip_pb2.SymbolRole.Definition)
+    d.range.extend([4, 0, 6])
+    update_store(db, partial)
+
+    store = GraphStore(db)
+    assert store.get_node(METHOD).signature_documentation is None  # degraded
+
+
+def test_update_clears_signature_documentation_when_definition_site_is_removed(
+    tmp_path: Path,
+) -> None:
+    """A symbol's definition can be cleared (file re-indexed with no occurrence
+    for it anymore) while it survives GC because something elsewhere still
+    calls it. The recorded signature must clear alongside file_id/line — not
+    linger as text paired with a NULL definition site."""
+    db = tmp_path / "graph.db"
+    original = Graph()
+    original.nodes["shared()."] = Node(
+        symbol="shared().",
+        file="foo.cpp",
+        line=10,
+        end_line=60,
+        documentation="/** Shared implementation. */",
+        signature_documentation="void shared()",
+    )
+    original.add_edge("calls", "b().", "shared().", file="bar.cpp", line=7)
+    write_sqlite(original, db)
+
+    # foo.cpp re-indexed with no occurrence of shared() at all (its definition
+    # was deleted from the source); bar.cpp (still calling it) is untouched.
+    update_store(db, _partial_index("foo.cpp"))
+
+    store = GraphStore(db)
+    assert store.has_symbol("shared().")  # kept: bar.cpp still calls it
+    node = store.get_node("shared().")
+    assert node is not None
+    assert node.file is None
+    assert node.signature_documentation is None  # not left stale
+
+
+def test_update_upgrades_a_pre_signature_documentation_store(tmp_path: Path) -> None:
+    """An older store (schema v5 as first drafted, before this amendment) has
+    no `signature_documentation` column; an incremental update whose partial
+    carries a recorded signature must add it on demand (the same ALTER pattern
+    the scip_kind migration uses), write the text, and stamp the current
+    schema version."""
+    db = tmp_path / "graph.db"
+    graph = Graph()
+    graph.add_node(METHOD, display_name="makeResumeToken")
+    graph.nodes[METHOD].file = "foo.cpp"
+    graph.nodes[METHOD].line = 41
+    write_sqlite(graph, db)
+    con = sqlite3.connect(db)
+    con.execute("ALTER TABLE symbols DROP COLUMN signature_documentation")
+    con.commit()
+    con.close()
+
+    partial = scip_pb2.Index()
+    doc = partial.documents.add(relative_path="foo.cpp")
+    doc.symbols.add(
+        symbol=METHOD
+    ).signature_documentation.text = "void makeResumeToken(const Document& doc)"
+    d = doc.occurrences.add(symbol=METHOD, symbol_roles=scip_pb2.SymbolRole.Definition)
+    d.range.extend([41, 0, 3])
+    update_store(db, partial)
+
+    store = GraphStore(db)
+    assert store.schema_version() == SCHEMA_VERSION
+    con = sqlite3.connect(db)
+    columns = {row[1] for row in con.execute("PRAGMA table_info(symbols)")}
+    con.close()
+    assert "signature_documentation" in columns
+    node = store.get_node(METHOD)
+    assert node is not None
+    assert node.signature_documentation == "void makeResumeToken(const Document& doc)"
+
+
+def test_enrich_references_adds_signature_column_but_never_backfills(tmp_path: Path) -> None:
+    """An old store missing `symbols.signature_documentation` gets the column
+    added — the stamped `schema_version` must be shaped to match what
+    `get_node`/`apply_update` read — but enrich-refs does NOT backfill
+    signature text, even when the .scip carries it: that's `cppgraph build`'s
+    job (the design decision made for this field)."""
+    typ = "cxx . . $ pkg/Widget#"
+    doc = scip_pb2.Document(relative_path="widget.cpp")
+    doc.symbols.add(symbol=typ).signature_documentation.text = "class Widget"
+    def_occ = doc.occurrences.add(symbol=typ, symbol_roles=scip_pb2.SymbolRole.Definition)
+    def_occ.range.extend([4, 0, 8])
+    index = scip_pb2.Index(documents=[doc])
+
+    graph = Graph()
+    graph.add_reference(typ, "widget.cpp", 6)
+    db = tmp_path / "g.db"
+    write_sqlite(graph, db)
+    con = sqlite3.connect(db)
+    con.execute("ALTER TABLE symbols DROP COLUMN signature_documentation")
+    con.commit()
+    con.close()
+
+    from cppgraph.store import enrich_references
+
+    enrich_references(db, index)
+
+    store = GraphStore(db)
+    assert store.schema_version() == SCHEMA_VERSION
+    con = sqlite3.connect(db)
+    columns = {row[1] for row in con.execute("PRAGMA table_info(symbols)")}
+    con.close()
+    assert "signature_documentation" in columns  # added...
+    assert store.get_node(typ).signature_documentation is None  # ...but not backfilled
+
+
 def test_references_empty_when_not_built(tmp_path: Path) -> None:
     # a graph with no references at all -> no has_references flag, empty query
     store = _sample(tmp_path)
