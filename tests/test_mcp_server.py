@@ -8,6 +8,7 @@ tiny fixture store — no transport needed.
 
 from __future__ import annotations
 
+import sqlite3
 import subprocess
 from pathlib import Path
 
@@ -16,7 +17,7 @@ import pytest
 from cppgraph import mcp_server
 from cppgraph.model import Graph, Node
 from cppgraph.proto import scip_pb2
-from cppgraph.store import GraphStore, write_sqlite
+from cppgraph.store import SCHEMA_VERSION, GraphStore, write_sqlite
 from cppgraph.updates import BYTES_PER_ATTRIBUTED_REF
 
 
@@ -1941,6 +1942,33 @@ def test_call_attaches_stale_flag(tmp_path: Path) -> None:
 
     (root / "a.cpp").write_text("int main(){return 1;}\n")  # drift
     assert find_tool(query="makeResumeToken")["stale"] is True
+
+
+def test_tool_reports_too_new_schema_as_clean_error_dict(tmp_path: Path) -> None:
+    """A store written by a NEWER cppgraph: opening it raises
+    `IncompatibleStoreError` at the `GraphStore` level. The tool layer must turn
+    that into a clean `{"error": …}` dict — the exception's own message, the
+    same shape as the no-index notice — instead of letting the exception escape
+    the tool call as a traceback. (The server also starts without crashing.)"""
+    from cppgraph.mcp_server import build_server
+
+    graph = Graph()
+    graph.nodes[FOO] = Node(symbol=FOO, display_name="makeResumeToken", file="a.cpp", line=1)
+    path = tmp_path / "g.db"
+    write_sqlite(graph, path)
+    con = sqlite3.connect(path)
+    con.execute(
+        "UPDATE meta SET value = ? WHERE key = 'schema_version'", (str(SCHEMA_VERSION + 1),)
+    )
+    con.commit()
+    con.close()
+
+    server = build_server(str(path))
+    find_tool = server._tool_manager._tools["find"].fn
+    result = find_tool(query="makeResumeToken")
+    assert set(result) == {"error"}
+    assert "newer than this cppgraph" in result["error"]
+    assert "upgrade cppgraph or rebuild the graph" in result["error"]
 
 
 def test_make_export_deps_returns_subgraph(store: GraphStore) -> None:

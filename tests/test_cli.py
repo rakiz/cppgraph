@@ -1,16 +1,18 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 
+from cppgraph import updates
 from cppgraph.cli import extract_signature, main
 from cppgraph.model import Graph, Node
 from cppgraph.proto import scip_pb2
-from cppgraph.store import GraphStore, write_sqlite
+from cppgraph.store import SCHEMA_VERSION, GraphStore, write_sqlite
 from cppgraph.updates import BYTES_PER_ATTRIBUTED_REF
 
 
@@ -161,6 +163,73 @@ def test_references_access_flag_without_role_data_reports(
 def test_callers_unknown_symbol_errors(graph_path: Path) -> None:
     with pytest.raises(SystemExit):
         main(["callers", "--graph", str(graph_path), "nonexistent"])
+
+
+def test_too_new_schema_errors_cleanly_not_as_traceback(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A store written by a NEWER cppgraph: `GraphStore` rejects it with
+    `IncompatibleStoreError` on open; the CLI must turn that into a clean
+    parser error — the exception's own message on stderr, exit code 2 — not a
+    raw Python traceback."""
+    graph = Graph()
+    graph.add_node("cxx . . $ mongo/Foo#makeResumeToken(a1).", display_name="makeResumeToken")
+    path = tmp_path / "future.db"
+    write_sqlite(graph, path)
+    con = sqlite3.connect(path)
+    con.execute(
+        "UPDATE meta SET value = ? WHERE key = 'schema_version'", (str(SCHEMA_VERSION + 1),)
+    )
+    con.commit()
+    con.close()
+
+    with pytest.raises(SystemExit) as exc:
+        main(["find", "--graph", str(path), "makeResumeToken"])
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert "newer than this cppgraph" in err
+    assert "upgrade cppgraph or rebuild the graph" in err
+    assert "Traceback" not in err
+
+
+def test_update_auto_discovered_too_new_schema_errors_cleanly_not_as_traceback(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same store as above, but reached through `cppgraph update` WITHOUT
+    --graph: the auto-discovered path opens the store inside
+    `pipeline.incremental_update`, not through `_open_store_at`, and must still
+    fail with a clean parser error (exit 2, the exception's own message) rather
+    than a traceback."""
+    from cppgraph import pipeline
+
+    graph = Graph()
+    graph.add_node("cxx . . $ mongo/Foo#makeResumeToken(a1).", display_name="makeResumeToken")
+    cpg = tmp_path / ".cppgraph"
+    cpg.mkdir()
+    path = cpg / "future.graph.db"
+    write_sqlite(graph, path)
+    con = sqlite3.connect(path)
+    con.execute(
+        "UPDATE meta SET value = ? WHERE key = 'schema_version'", (str(SCHEMA_VERSION + 1),)
+    )
+    con.commit()
+    con.close()
+
+    # Enough for discovery to succeed before the store is opened: the cwd owns
+    # the .cppgraph/ above, and a compdb exists at the project root.
+    (tmp_path / "compile_commands.json").write_text(json.dumps([]))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(pipeline.os, "access", lambda *a, **k: True)  # pretend scip-clang exists
+
+    with pytest.raises(SystemExit) as exc:
+        main(["update"])
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert "newer than this cppgraph" in err
+    assert "upgrade cppgraph or rebuild the graph" in err
+    assert "Traceback" not in err
 
 
 @pytest.fixture
@@ -467,6 +536,44 @@ def test_status_reports_symbol_kind_line(
     else:
         assert "symbols carry no SCIP kind data" in status
         assert "SymbolInformation.kind patch" in status  # the upgrade path is surfaced
+
+
+def test_status_reports_stale_scip_clang_as_advice_not_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Advisory-only anchor: a stale/mismatched scip-clang binary (installed AND
+    the one that indexed this graph) is surfaced as `!` advice lines by
+    `status` and the command still succeeds (exit 0, no exception, no block) —
+    that check is intentionally advisory, never a gate. `fetch_versions` and
+    the installed-binary sidecar are patched so the stale condition is
+    deterministic and offline."""
+    graph = Graph()
+    graph.add_node("cxx . . $ mongo/Foo#makeResumeToken(a1).", display_name="x")
+    path = tmp_path / "g.db"
+    write_sqlite(
+        graph,
+        path,
+        meta={"index_tool_version": "0.3.0", "index_tool_variant": "stock"},
+    )
+    monkeypatch.delenv("CPPGRAPH_NO_UPDATE_CHECK", raising=False)
+    monkeypatch.setattr(
+        updates,
+        "fetch_versions",
+        lambda **_: {
+            "latest": "0.3.0",
+            "releases": [],
+            "scip_clang": {"version": "0.4.0", "rebuild": "reindex", "patchset_version": 1},
+        },
+    )
+    monkeypatch.setattr(
+        updates, "installed_scip_clang", lambda: {"version": "0.3.0", "variant": "stock"}
+    )
+
+    assert main(["status", "--graph", str(path)]) == 0
+    out = capsys.readouterr().out
+    assert "scip-clang installed is 0.3.0 but the pinned version is 0.4.0" in out
+    assert "this graph was indexed with scip-clang 0.3.0" in out  # re-index advice
+    assert "re-index (scripts/index.sh) to match" in out
 
 
 def test_enrich_refs_upgrades_existing_store(

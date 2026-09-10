@@ -47,6 +47,7 @@ from cppgraph.filters import qualified_name as _qualified_name
 from cppgraph.filters import short_label as _short_label
 from cppgraph.store import (
     GraphStore,
+    IncompatibleStoreError,
     changed_files_since,
     commits_behind,
     discover_graph,
@@ -1797,8 +1798,28 @@ class _ReloadingStore:
 
     def __init__(self, graph_path: str | Path | None) -> None:
         self._path = Path(graph_path) if graph_path else None
-        self._store = GraphStore(self._path) if self._path else None
+        self._incompatible: str | None = None
+        self._store = self._open()
         self._mtime = self._current_mtime()
+
+    def _open(self) -> GraphStore | None:
+        """Open the store, capturing a too-new-schema rejection instead of
+        letting it escape: a store written by a NEWER cppgraph raises
+        `IncompatibleStoreError` on open, and the tools report that message
+        verbatim (a clean `{"error": …}` dict) rather than a traceback."""
+        if self._path is None:
+            return None
+        try:
+            store = GraphStore(self._path)
+        except IncompatibleStoreError as e:
+            self._incompatible = str(e)
+            return None
+        self._incompatible = None
+        return store
+
+    def incompatible(self) -> str | None:
+        """The captured too-new-schema message, or None when the store opens."""
+        return self._incompatible
 
     def _current_mtime(self) -> float | None:
         if self._path is None:
@@ -1817,7 +1838,7 @@ class _ReloadingStore:
         ):
             if self._store is not None:
                 self._store.close()
-            self._store = GraphStore(self._path)
+            self._store = self._open()
             self._mtime = current
         return self._store
 
@@ -1887,6 +1908,15 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
     stores = _ReloadingStore(graph_path)
     mcp = FastMCP("cppgraph", instructions=_server_instructions(stores.get()))
 
+    def _no_graph_notice() -> dict[str, Any]:
+        """What a tool returns when no usable store is open: the specific
+        too-new-schema error (the exception's own message) when the graph on
+        disk can't be opened by this cppgraph, else the generic no-index notice."""
+        incompatible = stores.incompatible()
+        if incompatible is not None:
+            return {"error": incompatible}
+        return dict(_NO_GRAPH)
+
     def _call(fn: Any, *args: Any, **kwargs: Any) -> dict[str, Any]:
         """Run a pure `(store, …) -> dict` query, or return the no-graph notice.
         Attaches a cheap `stale` flag (git diff, no rebuild) when `root` and a
@@ -1894,7 +1924,7 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         signal `status`'s full report already computes, without its cost."""
         s = stores.get()
         if s is None:
-            return dict(_NO_GRAPH)
+            return _no_graph_notice()
         result = fn(s, *args, **kwargs)
         if root is not None:
             try:
@@ -2555,7 +2585,7 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
 
         s = stores.get()
         if s is None:
-            return dict(_NO_GRAPH)
+            return _no_graph_notice()
         graph_json = make_export(
             s,
             symbol,

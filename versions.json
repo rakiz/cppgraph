@@ -7,7 +7,7 @@
     "rebuild": "reindex",
     "patchset_version": 6
   },
-  "latest": "0.3.0",
+  "latest": "0.3.1",
   "releases": [
     {
       "version": "0.1.0",
@@ -26,6 +26,12 @@
       "rebuild": "store",
       "notes": "Store schema v5 (`refs.roles`, `symbols.scip_kind`, `symbols.signature_documentation`, `symbols.is_out_of_project`) plus five new scip-clang syntactic-classifier patches on top of #504 (patchset 1→6): ForwardDefinition (fixes the declaration-site phantom-caller bug on stock-shaped graphs too), ReadAccess/WriteAccess (`--access {read,write}` on `references`/`find_references`), `SymbolInformation.kind` (`scip_kind` field), `signature_documentation` (signatures without a source read), and `Relationship.is_type_definition` (new `typed-by` edge kind: field/variable → its declared type, on `impact`/`reachable-from`/`boundary-violations`). Also consumes stock scip-clang's `Index.external_symbols` (`Node.is_out_of_project`, no patch needed — always-on, +~21% node count). v2–v4 stores keep working — store-level migration only, no re-index: rebuild from the existing `.scip` (`cppgraph build`) to get the new columns; `update`/`enrich-refs` migrate the schema shape without backfilling the new columns' data. Full detail in `CHANGELOG.md`.",
       "url": "https://github.com/rakiz/cppgraph/releases/tag/v0.3.0"
+    },
+    {
+      "version": "0.3.1",
+      "rebuild": "none",
+      "notes": "Bugfixes only — no schema change (still v5), safe to update in place. Fixes a signature-attribution bug (a field could render a neighbouring function/operator's signature) and CLI/MCP crashing with a raw traceback instead of a clean error on a too-new store schema. Sharper hint on ambiguous name resolution (type vs. member vs. operator candidates). Plus regression tests closing gaps found in a migration-test audit (store schema, scip-clang binary staleness, scip.proto compatibility). Full detail in `CHANGELOG.md`.",
+      "url": "https://github.com/rakiz/cppgraph/releases/tag/v0.3.1"
     }
   ]
 }

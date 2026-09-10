@@ -1682,6 +1682,21 @@ def test_legacy_store_without_version_opens(tmp_path: Path) -> None:
     assert store.schema_version() is None
 
 
+def test_unparseable_schema_version_treated_as_legacy(tmp_path: Path) -> None:
+    """A schema_version value that doesn't parse as an int (corrupted/garbage
+    meta row) takes the same lenient path as a missing version: the store opens,
+    no `IncompatibleStoreError`. Only a parseable version strictly greater than
+    this binary's is proof of a newer format — garbage is not."""
+    db = tmp_path / "weird.db"
+    write_sqlite(_graph_with_edge(), db)
+    con = sqlite3.connect(db)
+    con.execute("UPDATE meta SET value = 'not-a-number' WHERE key = 'schema_version'")
+    con.commit()
+    con.close()
+    store = GraphStore(db)  # must not raise
+    assert store.schema_version() is None
+
+
 def _graph_with_edge() -> Graph:
     graph = Graph()
     graph.add_edge("calls", CALLER, METHOD, file="foo.cpp", line=1)

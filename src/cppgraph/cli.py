@@ -29,6 +29,7 @@ from cppgraph.model import Edge, Node
 from cppgraph.proto import scip_pb2
 from cppgraph.store import (
     GraphStore,
+    IncompatibleStoreError,
     build_provenance,
     changed_files_since,
     commits_behind,
@@ -224,13 +225,23 @@ def _resolve_graph(args: argparse.Namespace, parser: argparse.ArgumentParser) ->
     return str(graph)
 
 
+def _open_store_at(graph_path: str | Path, parser: argparse.ArgumentParser) -> GraphStore:
+    """Open a known graph path, turning a too-new-schema rejection into a clean
+    parser error (exit 2, the exception's own message) instead of a raw
+    traceback — the shared open for every command that reads a store directly."""
+    try:
+        return GraphStore(graph_path)
+    except IncompatibleStoreError as e:
+        parser.error(str(e))
+
+
 def _open_store_checked(args: argparse.Namespace, parser: argparse.ArgumentParser) -> GraphStore:
     """Resolve the graph, open it, and — best-effort — warn on stderr if it has
     drifted from its source commit (same cheap `git diff` `status`'s drift check
     runs, no rebuild triggered). Mirrors the MCP tools' per-call `stale` flag for
     the CLI's plain-text output."""
     graph_path = _resolve_graph(args, parser)
-    store = GraphStore(graph_path)
+    store = _open_store_at(graph_path, parser)
     root = getattr(args, "root", None)
     if root is None:
         # The store's own recorded `project_root` is authoritative — it's the
@@ -1314,7 +1325,7 @@ def main(argv: list[str] | None = None) -> int:
 
             if args.graph:
                 graph_path = Path(args.graph)
-                store = GraphStore(graph_path)
+                store = _open_store_at(graph_path, parser)
                 try:
                     recorded_root = store.meta().get("project_root")
                 finally:
@@ -1343,12 +1354,19 @@ def main(argv: list[str] | None = None) -> int:
                     f"no compile_commands.json found at or above {project_root}; pass "
                     "--scip to apply an already-produced partial index instead."
                 )
-            return incremental_update(
-                graph_db=graph_path,
-                compdb=compdb_path,
-                project_root=project_root,
-                print_fn=print,
-            )
+            try:
+                return incremental_update(
+                    graph_db=graph_path,
+                    compdb=compdb_path,
+                    project_root=project_root,
+                    print_fn=print,
+                )
+            except IncompatibleStoreError as e:
+                # The auto-discover path opens the store inside
+                # pipeline.incremental_update, never through _open_store_at (only
+                # the explicit --graph branch above does), so a too-new schema
+                # would otherwise escape as a raw traceback. Same clean error.
+                parser.error(str(e))
         if not args.graph:
             parser.error("--graph is required together with --scip")
         index = scip_pb2.Index()
@@ -1931,7 +1949,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "status":
         graph_path = _resolve_graph(args, parser)
-        store = GraphStore(graph_path)
+        store = _open_store_at(graph_path, parser)
         m = store.meta()
         commit = m.get("source_commit")
         dirty = m.get("source_dirty") == "true"
@@ -2031,6 +2049,11 @@ def main(argv: list[str] | None = None) -> int:
             f"  format:        schema v{m.get('schema_version', '0 (legacy)')}"
             f", cppgraph {m.get('cppgraph_version', '?')}"
         )
+        # Deliberately advisory-only: a stale/mismatched scip-clang (and an
+        # out-of-date cppgraph) surface here as `!` advice lines and the exit
+        # code stays 0 — never a blocking check. Indexing and queries proceed
+        # regardless; don't turn this into a hard gate without discussion
+        # (see updates.py's module docstring for the fail-soft rationale).
         scip = scip_update_advice(
             {"version": m.get("index_tool_version"), "variant": m.get("index_tool_variant")}
         )

@@ -6,6 +6,76 @@ on-disk store also carries its own `schema_version` for forward-compatibility.
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-09-10
+
+Bugfixes and hardened test coverage around store/binary/proto migrations and
+name-resolution ergonomics. No schema change (still v5).
+
+### Fixed
+
+- **`extract_signature` misattributing a field's signature to an unrelated
+  neighbour** (`cli.py`): when a field declaration had no parenthesized
+  signature of its own, the lookahead used to scan past a `;`/`{` boundary and
+  could pick up the next declaration's parameter list instead — e.g.
+  `ShardId::_shardId` (a plain field) rendering the signature of the
+  following `operator==`. Fixed by stopping the lookahead at the first
+  `;`/`{` seen before an opening `(`. 12 new tests in `tests/test_cli.py`.
+- **CLI and MCP raised a raw traceback instead of a clean error on a
+  too-new `.graph.db` schema** (`GraphStore`'s `IncompatibleStoreError`,
+  raised when a store's `schema_version` is newer than the running code
+  supports): now caught at every store-opening call site on both surfaces —
+  CLI (`find`/`callers`/`callees`/…, `status`, and both the explicit
+  `--graph` and the auto-discovered `update` paths) prints the exception's
+  own message to stderr and exits with code 2; MCP returns a
+  `{"error": ...}` dict consistent with the existing `_NO_GRAPH`/`_UNKNOWN`
+  shapes instead of crashing the tool call. `pipeline.py` is untouched and
+  still raises — the conversion to a clean, surface-shaped error stays at
+  the CLI/MCP boundary. New tests in `tests/test_cli.py` and
+  `tests/test_mcp_server.py`.
+
+### Changed
+
+- **Sharper hint on ambiguous name resolution** (`cppgraph.filters
+  .ambiguous_candidate_hint`, used by both CLI `_resolve_symbol` and MCP
+  `_resolve`): when a query resolves to several candidates, the hint now
+  calls out (a) any candidate that is the type itself (a symbol ending in
+  `#` whose leaf matches the query — worded in the singular or plural
+  depending on how many match, never implying a single answer when several
+  types share the leaf name across namespaces) and (b) any candidate that is
+  an operator symbol (e.g. a conversion operator) sharing the queried name.
+  Investigated after a reported real-world mis-pick (a conversion operator
+  chosen over the intended class); `GraphStore.resolve()`/`find()` were
+  confirmed NOT at fault — they already return the full, uncapped candidate
+  list with no silent guess. Payload shape (`ambiguous`/`total`/`truncated`/
+  `candidates`/`hint`) unchanged, only the `hint` text is richer. New tests
+  in `tests/test_cli.py` and `tests/test_mcp_server.py`.
+
+### Tests
+
+Closed four gaps found in a migration-test audit (store schema, scip-clang
+binary versioning, `scip.proto` compatibility, CLI/MCP error surfaces) —
+no behaviour change beyond the two fixes above, but each area now has a
+regression test pinning the intended behaviour:
+
+- **Store schema migrations**: added a test for an unparseable/garbage
+  `schema_version` value being treated as legacy (the existing fallback
+  behaviour was correct; it just had no dedicated test).
+- **`scip.proto` backward/forward compatibility**: new `tests/test_scip_compat.py`
+  — regression tests for the "vendored `scip.proto` is a superset of what
+  any supported scip-clang emits, absent optional/repeated fields never
+  error" invariant (see `AGENTS.md`): an old/minimal-shape index (no
+  `enclosing_range`, access roles, or `SymbolInformation.kind`) parses and
+  degrades cleanly, and an index carrying an unrecognized future field
+  number still parses (forward compatibility). The module docstring scopes
+  exactly what is and isn't proven.
+- **scip-clang binary staleness stays advisory-only**: a new CLI test pins
+  that a stale/mismatched scip-clang binary surfaces as `!` advice lines in
+  `status` (exit 0), never a failure — anchoring the intentional non-blocking
+  design so it isn't turned into an enforcement gate without discussion. A
+  short comment was added at the call site in `cli.py`.
+- **CLI/MCP error-surface coverage**: see "Fixed" above — the schema
+  rejection tests are also new regression coverage for this audit.
+
 ## [0.3.0] - 2026-09-10
 
 Store schema v4 → v5 (`refs.roles`); five new scip-clang patches and a rename
