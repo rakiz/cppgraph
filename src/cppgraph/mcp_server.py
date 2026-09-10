@@ -72,6 +72,17 @@ EXPLAIN_LIMIT = 10
 
 _UNKNOWN = "unknown symbol {symbol!r} — use the `find` tool to look up its exact SCIP symbol string"
 
+# Shared by `path` and `visualize(mode="path")` when the static chain doesn't exist.
+_NO_STATIC_CHAIN_HINT = (
+    "No *static* call chain — this does not prove the two are unrelated. "
+    "The flow may cross a runtime-dispatch boundary the static graph can't "
+    "link: a virtual call, or a registered-factory hop (e.g. a "
+    "DocumentSource built by a pipeline parser and later run via "
+    "doGetNext), where the edge exists only at runtime. Try `path` "
+    "against the concrete override/implementation, or bridge the boundary "
+    "with `find_references` / `subclasses`."
+)
+
 # Degrade-cleanly responses for the enclosing-range-gated (#504) tools, the
 # same `available: false` + `reason` convention `references` uses when the
 # graph was built `--no-references`: say why, point at the upgrade, never a
@@ -718,15 +729,7 @@ def call_path(store: GraphStore, src: str, dst: str) -> dict[str, Any]:
             "dst": dst,
             "found": False,
             "path": None,
-            "hint": (
-                "No *static* call chain — this does not prove the two are unrelated. "
-                "The flow may cross a runtime-dispatch boundary the static graph can't "
-                "link: a virtual call, or a registered-factory hop (e.g. a "
-                "DocumentSource built by a pipeline parser and later run via "
-                "doGetNext), where the edge exists only at runtime. Try `path` "
-                "against the concrete override/implementation, or bridge the boundary "
-                "with `find_references` / `subclasses`."
-            ),
+            "hint": _NO_STATIC_CHAIN_HINT,
         }
     # chain is a list of edges src->...->dst; render as the node sequence.
     nodes = [{"symbol": src, "file": None, "line": None}]
@@ -1783,12 +1786,18 @@ def make_export(
     store: GraphStore,
     symbol: str,
     mode: str = "deps",
-    depth: int = 2,
+    depth: int | None = None,
     direction: str = "both",
     exclude_tests: bool = False,
+    dst: str | None = None,
+    expand_paths: bool = False,
+    limit: int = DEFAULT_LIMIT,
 ) -> dict[str, Any] | None:
     """Build the graph.json dict for a symbol, or None if unknown (see
-    `cppgraph.cli.build_export_json`)."""
+    `cppgraph.cli.build_export_json`; `dst` is only used by mode="path", where
+    it must already be a resolved exact symbol). `depth=None` resolves
+    mode-aware inside `build_export_json`: 2 for deps, 0 for path (pure
+    chain/corridor unless the caller explicitly passes context depth)."""
     return build_export_json(
         store,
         symbol,
@@ -1796,6 +1805,9 @@ def make_export(
         depth=depth,
         direction=direction,
         exclude_tests=exclude_tests,
+        dst=dst,
+        expand_paths=expand_paths,
+        limit=limit,
     )
 
 
@@ -2598,10 +2610,13 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
     def visualize(
         symbol: str,
         mode: str = "deps",
-        depth: int = 2,
+        depth: int | None = None,
         direction: str = "both",
         exclude_tests: bool = False,
         open_browser: bool = True,
+        dst: str | None = None,
+        expand_paths: bool = False,
+        limit: int = DEFAULT_LIMIT,
     ) -> dict[str, Any]:
         """Render a small graph around `symbol` as a self-contained HTML in a temp
         dir and (by default) open it in the user's browser — the "show me the
@@ -2616,8 +2631,25 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         only what the symbol reaches, "in" only what reaches it. Set
         exclude_tests=True to drop test files and show production usage only. Set
         open_browser=False to just get the HTML path without launching a browser.
-        Returns the HTML path and the command to open it (in case the browser
-        didn't launch)."""
+        mode="path" = instead of a neighbourhood, render the call graph between
+        `symbol` and `dst` (required in this mode; a plain name or exact SCIP
+        string, resolved like `symbol` itself) — the "how do these two connect?"
+        view. expand_paths=False (default) draws the single shortest `calls`
+        chain; expand_paths=True draws the CORRIDOR: every node/edge lying on
+        SOME `calls` path between the two (two capped BFS passes intersected —
+        the chain is always inside it; siblings that don't reach `dst` are not).
+        In path mode `depth` means context, not the answer's radius: every
+        chain/corridor node's depth-hop neighbourhood (same mixed-edge-kind walk
+        as deps mode, honouring `direction`) is unioned into the graph. It
+        defaults to 0 in path mode — the pure chain/corridor without context —
+        vs deps mode's 2-hop radius; set depth=1+ for context.
+        `limit` (path mode, default 40) caps the final node count — chain/
+        corridor nodes kept first, then context; when the result was cut, the
+        reply carries `truncated: true` and the pre-cut node count as `total`.
+        With no static chain the reply says so (`found: false` + a hint) instead
+        of writing/opening a near-empty HTML; `hops` reports the number of
+        `calls` edges in the chain/corridor proper. Returns the HTML path and
+        the command to open it (in case the browser didn't launch)."""
         from cppgraph.viz_html import open_in_browser, write_temp_html
 
         s = stores.get()
@@ -2626,6 +2658,18 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         symbol, _alt = _resolve(s, symbol)
         if _alt is not None:
             return _alt
+        if mode == "path" and not dst:
+            return {
+                "error": (
+                    "mode='path' requires dst — call visualize(symbol, mode='path', "
+                    "dst='<destination symbol>')"
+                )
+            }
+        dst_resolved: str | None = None
+        if mode == "path" and dst is not None:
+            dst_resolved, _alt = _resolve(s, dst)
+            if _alt is not None:
+                return _alt
         graph_json = make_export(
             s,
             symbol,
@@ -2633,9 +2677,26 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
             depth=depth,
             direction=direction,
             exclude_tests=exclude_tests,
+            dst=dst_resolved,
+            expand_paths=expand_paths,
+            limit=limit,
         )
         if graph_json is None:
             return {"error": _UNKNOWN.format(symbol=symbol)}
+        if not graph_json["nodes"]:
+            return {
+                "src": symbol,
+                "dst": dst_resolved,
+                "found": False,
+                "path": None,
+                "truncated": bool(graph_json.get("truncated", False)),
+                "hint": _NO_STATIC_CHAIN_HINT,
+            }
+        # Strip build_export_json's path-mode metadata before embedding: the
+        # rendered window.GRAPH stays a pure graphify container.
+        truncated = bool(graph_json.pop("truncated", False))
+        total = int(graph_json.pop("total", 0))
+        core_edges = int(graph_json.pop("core_edges", 0))
         html_path = write_temp_html(graph_json)
         result: dict[str, Any] = {
             "path": str(html_path),
@@ -2644,6 +2705,11 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
             "edges": len(graph_json["links"]),
             "open_command": f"open {html_path}",
         }
+        if mode == "path":
+            result["dst"] = dst_resolved
+            result["hops"] = core_edges
+            result["truncated"] = truncated
+            result["total"] = total
         if open_browser:
             launched, _ = open_in_browser(html_path)
             result["opened"] = launched

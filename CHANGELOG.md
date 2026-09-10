@@ -6,6 +6,19 @@ on-disk store also carries its own `schema_version` for forward-compatibility.
 
 ## [Unreleased]
 
+### Added
+
+- **Path/corridor mode on `export`/`view`/MCP `visualize`** — `mode="path"`
+  with `--dst <target>` renders how two symbols connect: the shortest
+  `calls`-edge chain between them by default, `--expand-paths`/`expand_paths`
+  for the full corridor (every node/edge lying on *some* path between the
+  two, computed as a safe forward∩backward BFS intersection — never an
+  exponential path enumeration; the shortest chain is always inside the
+  corridor). `depth`/`direction` are repurposed in path mode as a
+  context-expansion radius (backward-compatible: they default to 0 — the
+  pure chain/corridor — unless explicitly requested), and `limit` caps the
+  merged result with `truncated`/`total` reporting when it was cut.
+
 ### Fixed
 
 - **MCP `visualize` didn't resolve plain names** — the one MCP tool that bypassed

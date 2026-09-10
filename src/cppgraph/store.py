@@ -839,6 +839,13 @@ def _tarjan_sccs(adjacency: dict[int, list[int]]) -> list[list[int]]:
     return components
 
 
+# `call_corridor`'s safety valve: each of its two BFS passes stops once this many
+# distinct nodes are visited, so a corridor query between two near-universal hubs
+# can neither hang nor blow up memory. When a pass stops early its corridor is a
+# lower bound, surfaced as the method's `truncated` flag (never silent).
+_MAX_CORRIDOR_BFS_NODES = 20_000
+
+
 class GraphStore:
     """Query + incremental-update handle over a SQLite store written by
     `write_sqlite`.
@@ -1458,6 +1465,117 @@ class GraphStore:
                     visited.add(e_dst_id)
                     queue.append((e_dst_id, e_dst_symbol, path + [edge]))
         return None
+
+    def _bfs_reachable_ids(self, start_id: int, *, forward: bool) -> tuple[set[int], bool]:
+        """Distinct symbol ids reachable from `start_id` over `calls` edges only.
+
+        `forward=True` walks callees (`src_id -> dst_id`, the `shortest_call_path`
+        direction, over `ix_src`); `forward=False` walks callers (`dst_id ->
+        src_id` — everything that can reach `start_id`, over `ix_dst`, the same
+        query `impact` uses). BFS in id-space, one indexed lookup per expanded
+        node. Returns `(visited, truncated)`: `truncated` is True only when a NEW
+        node was discovered while `len(visited)` was already at
+        `_MAX_CORRIDOR_BFS_NODES` — i.e. the pass provably stopped with unexplored
+        nodes left. A pass that exhausts the graph exactly at the cap is complete,
+        not truncated.
+        """
+        visited = {start_id}
+        frontier = [start_id]
+        truncated = False
+        # Both column/matcher spellings are internal literals, never user input.
+        column, matcher = ("dst_id", "src_id") if forward else ("src_id", "dst_id")
+        while frontier:
+            next_frontier: list[int] = []
+            for node_id in frontier:
+                for (nxt,) in self._con.execute(
+                    f"SELECT {column} FROM edges WHERE kind = 'calls' AND {matcher} = ?",
+                    (node_id,),
+                ).fetchall():
+                    if nxt in visited:
+                        continue
+                    # New nodes only: exhausting the graph at the cap is complete, not truncated.
+                    if len(visited) >= _MAX_CORRIDOR_BFS_NODES:
+                        truncated = True
+                        break
+                    visited.add(nxt)
+                    next_frontier.append(nxt)
+                if truncated:
+                    break
+            if truncated:
+                break
+            frontier = next_frontier
+        return visited, truncated
+
+    def call_corridor(self, src: str, dst: str) -> tuple[list[Node], list[Edge], bool]:
+        """Every node/edge lying on *some* `calls` path from `src` to `dst`.
+
+        The corridor is the set of nodes reachable from `src` AND able to reach
+        `dst` (two capped BFS passes, intersected — see `_bfs_reachable_ids` and
+        `_MAX_CORRIDOR_BFS_NODES`), plus every `calls` edge *induced* on that node
+        set (both endpoints in it). Induced is the point: an edge between two
+        corridor nodes always completes a real src->dst path (src reaches the
+        edge's src, the edge, its dst reaches dst), so the corridor is exactly
+        "the subgraph of all routes" without enumerating every path (which can be
+        exponential). Nodes reachable from `src` that cannot reach `dst` — and
+        nodes that can reach `dst` but are unreachable from `src` — are excluded.
+
+        Returns `(nodes, edges, truncated)`: nodes in id order (deterministic;
+        same definition-site shape `subgraph` returns), the induced `calls` edges,
+        and `truncated` — True when either BFS pass hit the cap early, i.e. the
+        corridor is a lower bound (the same flag callers use for output-size
+        capping; never a silent partial result). `src == dst` is that single node
+        with no edges. `([], [], truncated)` when the intersection is empty (no
+        path) — or when either symbol is unknown, which callers that need to tell
+        apart check first via `has_symbol` (as `build_export_json` does).
+        """
+        src_id = self._symbol_id(src)
+        dst_id = self._symbol_id(dst)
+        if src_id is None or dst_id is None:
+            return [], [], False
+        if src_id == dst_id:
+            node = self.get_node(src)
+            return ([node] if node is not None else []), [], False
+
+        fwd_ids, fwd_truncated = self._bfs_reachable_ids(src_id, forward=True)
+        bwd_ids, bwd_truncated = self._bfs_reachable_ids(dst_id, forward=False)
+        truncated = fwd_truncated or bwd_truncated
+        corridor_ids = fwd_ids & bwd_ids
+        if not corridor_ids:
+            return [], [], truncated
+
+        ids = sorted(corridor_ids)
+        placeholders = ",".join("?" * len(ids))
+        nodes = [
+            Node(symbol=sym, display_name=name or "", file=path, line=line)
+            for sym, name, path, line in self._con.execute(
+                f"""
+                SELECT s.symbol, s.display_name, f.path, s.line
+                FROM symbols s
+                LEFT JOIN files f ON f.id = s.file_id
+                WHERE s.id IN ({placeholders})
+                ORDER BY s.id
+                """,
+                ids,
+            ).fetchall()
+        ]
+        edges = [
+            Edge(kind="calls", src=src_sym, dst=dst_sym, file=path, line=line)
+            for src_sym, dst_sym, path, line in self._con.execute(
+                f"""
+                SELECT s.symbol, d.symbol, f.path, e.line
+                FROM edges e
+                JOIN symbols s ON s.id = e.src_id
+                JOIN symbols d ON d.id = e.dst_id
+                LEFT JOIN files f ON f.id = e.file_id
+                WHERE e.kind = 'calls'
+                  AND e.src_id IN ({placeholders}) AND e.dst_id IN ({placeholders})
+                ORDER BY e.src_id, e.dst_id
+                """,
+                # ids twice: one IN per endpoint — an induced edge needs both ends in the corridor.
+                ids + ids,
+            ).fetchall()
+        ]
+        return nodes, edges, truncated
 
     def impact(self, symbol: str, max_depth: int | None = None, kind: str = "calls") -> set[str]:
         """Symbols that transitively reach `symbol` backward along `kind` edges.

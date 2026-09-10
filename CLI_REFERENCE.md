@@ -194,20 +194,25 @@ cppgraph boundary-violations --rule src/common/:src/platform/   # common/ must n
 site, doc comment, snippet, callers/callees. `export` and `view` render a
 bounded subgraph around one symbol: `view` writes a self-contained HTML and
 opens it in your browser, `export` writes the graph.json for `viz/` or
-graphify.
+graphify. `--mode path --dst OTHER` renders the call graph between two symbols
+instead: the shortest chain by default, or with `--expand-paths` the corridor
+of *every* route between them (two capped BFS passes intersected). `--depth N`
+there means context around the chain/corridor (default 0 — the pure answer),
+and `--limit` caps the node count (default 40), reporting truncation.
 
 <!-- cppgraph-gen:explain export view -->
 | Command | Purpose (from `--help`) | Arguments |
 |---|---|---|
 | `explain` | summarize a symbol: definition site, doc comment, source snippet, callers/callees | --graph, <symbol>, --root, --context N |
-| `export` | export a viewable subgraph around a symbol as graphify-compatible graph.json (open it in viz/ or in graphify) | --graph, <symbol>, --depth N, --direction, --mode, --no-tests, --out PATH |
-| `view` | one-shot visualize: build the subgraph, write a self-contained HTML to a temp dir, and open it in your browser | --graph, <symbol>, --mode, --depth N, --direction, --no-tests, --no-open |
+| `export` | export a viewable subgraph around a symbol as graphify-compatible graph.json (open it in viz/ or in graphify) | --graph, <symbol>, --depth N, --direction, --mode, --dst SYMBOL, --expand-paths, --limit N, --no-tests, --out PATH |
+| `view` | one-shot visualize: build the subgraph, write a self-contained HTML to a temp dir, and open it in your browser | --graph, <symbol>, --mode, --dst SYMBOL, --expand-paths, --limit N, --depth N, --direction, --no-tests, --no-open |
 <!-- /cppgraph-gen -->
 
 ```bash
 cppgraph explain MyClass::method --root .    # definition, docs, snippet, callers/callees
 cppgraph export Shape --mode usage --out shape-usage.json
 cppgraph view Shape --mode usage --no-open   # writes the HTML, prints the path
+cppgraph export parse --mode path --dst finalize --expand-paths --depth 1
 ```
 
 ---

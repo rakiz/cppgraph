@@ -2030,6 +2030,178 @@ def test_visualize_tool_ambiguous_name_lists_candidates(tmp_path: Path) -> None:
     assert "path" not in r
 
 
+def _chain_server(tmp_path: Path):
+    """A graph with the caller -> mid -> makeResumeToken chain, as a built server."""
+    from cppgraph.mcp_server import build_server
+
+    graph = Graph()
+    graph.nodes[FOO] = Node(symbol=FOO, display_name="makeResumeToken", file="foo.cpp", line=234)
+    graph.nodes[CALLER] = Node(symbol=CALLER, display_name="caller", file="foo.cpp", line=9)
+    graph.nodes[MID] = Node(symbol=MID, display_name="mid", file="foo.cpp", line=49)
+    graph.add_edge("calls", CALLER, MID, file="foo.cpp", line=11)
+    graph.add_edge("calls", MID, FOO, file="foo.cpp", line=51)
+    path = tmp_path / "g.db"
+    write_sqlite(graph, path)
+    return build_server(str(path))
+
+
+def test_visualize_tool_path_mode_renders_chain(tmp_path: Path) -> None:
+    """mode="path" renders the shortest chain between symbol and dst — both
+    accepted as plain unique names, like every other tool parameter."""
+    server = _chain_server(tmp_path)
+    viz = server._tool_manager._tools["visualize"].fn
+    r = viz("caller", mode="path", dst="makeResumeToken", open_browser=False)
+    assert "error" not in r
+    assert r["mode"] == "path"
+    assert r["nodes"] == 3 and r["edges"] == 2
+    assert r["hops"] == 2
+    assert r["dst"] == FOO  # resolved from the plain name
+    assert Path(r["path"]).exists()
+    assert "window.GRAPH" in Path(r["path"]).read_text(encoding="utf-8")
+
+
+def test_visualize_tool_path_mode_requires_dst(tmp_path: Path) -> None:
+    server = _chain_server(tmp_path)
+    viz = server._tool_manager._tools["visualize"].fn
+    r = viz("caller", mode="path", open_browser=False)
+    assert set(r) == {"error"}
+    assert "mode='path' requires dst" in r["error"]
+
+
+def test_visualize_tool_path_mode_unknown_dst_is_error(tmp_path: Path) -> None:
+    server = _chain_server(tmp_path)
+    viz = server._tool_manager._tools["visualize"].fn
+    r = viz("caller", mode="path", dst="does::not::exist", open_browser=False)
+    assert "error" in r
+    assert "does::not::exist" in r["error"]
+
+
+def test_visualize_tool_path_mode_ambiguous_dst_lists_candidates(tmp_path: Path) -> None:
+    server = _chain_server(tmp_path)
+    viz = server._tool_manager._tools["visualize"].fn
+    r = viz("caller", mode="path", dst="Foo", open_browser=False)
+    assert r.get("ambiguous") == "Foo"
+    assert {"ambiguous", "total", "candidates", "hint"} <= r.keys()
+
+
+def test_visualize_tool_path_mode_no_path_says_found_false(tmp_path: Path) -> None:
+    """No static chain between valid symbols: `found: False` + the shared hint,
+    NOT a written/opened near-empty HTML the caller can't tell from success."""
+    server = _chain_server(tmp_path)
+    viz = server._tool_manager._tools["visualize"].fn
+    r = viz("makeResumeToken", mode="path", dst="caller", open_browser=False)
+    assert r["found"] is False
+    assert r["src"] == FOO and r["dst"] == CALLER
+    assert "runtime-dispatch" in r["hint"]
+    assert r["path"] is None  # no chain (same shape as the `path` tool), no HTML
+
+
+def _diamond_server(tmp_path: Path, *, with_sibling: bool = False):
+    """The `src -> {left, right} -> dst` diamond as a built server;
+    `with_sibling` adds a src -> sibling dead-end (context, not corridor)."""
+    from cppgraph.mcp_server import build_server
+
+    d_src = "cxx . . $ mongo/Flow#src(a1)."
+    d_left = "cxx . . $ mongo/Flow#left()."
+    d_right = "cxx . . $ mongo/Flow#right()."
+    d_dst = "cxx . . $ mongo/Flow#dst(a2)."
+    d_sib = "cxx . . $ mongo/Flow#sibling()."
+    graph = Graph()
+    for sym, name, line in [
+        (d_src, "src", 1),
+        (d_left, "left", 2),
+        (d_right, "right", 3),
+        (d_dst, "dst", 4),
+        *([(d_sib, "sibling", 5)] if with_sibling else []),
+    ]:
+        graph.nodes[sym] = Node(symbol=sym, display_name=name, file="f.cpp", line=line)
+    for src, dst in [
+        (d_src, d_left),
+        (d_src, d_right),
+        (d_left, d_dst),
+        (d_right, d_dst),
+    ]:
+        graph.add_edge("calls", src, dst, file="f.cpp", line=11)
+    if with_sibling:
+        graph.add_edge("calls", d_src, d_sib, file="f.cpp", line=15)
+    path = tmp_path / "diamond.db"
+    write_sqlite(graph, path)
+    return build_server(str(path))
+
+
+def test_visualize_tool_path_mode_expand_paths_renders_corridor(tmp_path: Path) -> None:
+    """expand_paths=True: the corridor — both diamond routes at once, not just
+    the BFS-first chain (which would be 3 nodes / 2 edges)."""
+    server = _diamond_server(tmp_path)
+    viz = server._tool_manager._tools["visualize"].fn
+    r = viz(
+        "cxx . . $ mongo/Flow#src(a1).",
+        mode="path",
+        dst="cxx . . $ mongo/Flow#dst(a2).",
+        expand_paths=True,
+        open_browser=False,
+    )
+    assert "error" not in r
+    assert r["mode"] == "path"
+    assert r["nodes"] == 4 and r["edges"] == 4
+    assert r["hops"] == 4  # corridor edges, reported via core_edges
+    assert r["truncated"] is False and r["total"] == 4
+    assert Path(r["path"]).exists()
+    assert "window.GRAPH" in Path(r["path"]).read_text(encoding="utf-8")
+    # the embedded graph stays a pure graphify container (metadata stripped)
+    assert '"truncated"' not in Path(r["path"]).read_text(encoding="utf-8")
+
+
+def test_visualize_tool_path_mode_depth_expands_context(tmp_path: Path) -> None:
+    """depth=1 in path mode unions every chain/corridor node's neighbourhood
+    (the deps-mode walk) into the graph — the dead-end sibling joins it."""
+    server = _diamond_server(tmp_path, with_sibling=True)
+    viz = server._tool_manager._tools["visualize"].fn
+    r = viz(
+        "cxx . . $ mongo/Flow#src(a1).",
+        mode="path",
+        dst="cxx . . $ mongo/Flow#dst(a2).",
+        depth=1,
+        open_browser=False,
+    )
+    assert r["nodes"] == 5 and r["edges"] == 5
+    assert r["hops"] == 2  # the chain proper is unchanged by context expansion
+
+
+def test_visualize_tool_path_mode_omitted_depth_stays_pure(tmp_path: Path) -> None:
+    """Backward-compatibility guard: visualize's depth default (2 in deps mode)
+    must NOT leak into path mode — omitting depth keeps the pure chain, so the
+    pre-feature callers see exactly what they saw before."""
+    server = _diamond_server(tmp_path, with_sibling=True)
+    viz = server._tool_manager._tools["visualize"].fn
+    r = viz(
+        "cxx . . $ mongo/Flow#src(a1).",
+        mode="path",
+        dst="cxx . . $ mongo/Flow#dst(a2).",
+        open_browser=False,
+    )
+    assert r["nodes"] == 3 and r["edges"] == 2  # chain only, no sibling context
+
+
+def test_visualize_tool_path_mode_limit_truncation_reported(tmp_path: Path) -> None:
+    """limit caps the merged node count (corridor kept whole, context cut) and
+    the response reports the `truncated`/`total` pair like the other capped
+    tools."""
+    server = _diamond_server(tmp_path, with_sibling=True)
+    viz = server._tool_manager._tools["visualize"].fn
+    r = viz(
+        "cxx . . $ mongo/Flow#src(a1).",
+        mode="path",
+        dst="cxx . . $ mongo/Flow#dst(a2).",
+        expand_paths=True,
+        depth=1,
+        limit=4,
+        open_browser=False,
+    )
+    assert r["nodes"] == 4 and r["truncated"] is True and r["total"] == 5
+    assert r["hops"] == 4
+
+
 def test_discover_graph_finds_nearest_cppgraph(tmp_path: Path) -> None:
     proj = tmp_path / "proj"
     (proj / ".cppgraph").mkdir(parents=True)

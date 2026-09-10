@@ -2537,8 +2537,6 @@ def test_reachable_from_on_type_prints_notice(
 def test_export_writes_graphify_json(
     graph_path: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    import json as _json
-
     out = tmp_path / "g.json"
     rc = main(
         [
@@ -2553,7 +2551,7 @@ def test_export_writes_graphify_json(
         ]
     )
     assert rc == 0
-    data = _json.loads(out.read_text())
+    data = json.loads(out.read_text())
     ids = {n["id"] for n in data["nodes"]}
     assert "cxx . . $ mongo/Foo#makeResumeToken(a1)." in ids
     assert "cxx . . $ mongo/Foo#caller(a2)." in ids  # depth-1 in-neighbour
@@ -2569,8 +2567,6 @@ def test_export_unknown_symbol_errors(graph_path: Path) -> None:
 def test_export_usage_mode_emits_file_graph(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    import json as _json
-
     from cppgraph.model import Graph
 
     sym = "cxx . . $ mongo/ResumeTokenData#"
@@ -2585,7 +2581,7 @@ def test_export_usage_mode_emits_file_graph(
     out = tmp_path / "usage.json"
     rc = main(["export", "--graph", str(db), sym, "--mode", "usage", "--out", str(out)])
     assert rc == 0
-    data = _json.loads(out.read_text())
+    data = json.loads(out.read_text())
     files = {lk["target"] for lk in data["links"]}
     assert files == {"file:a/foo.cpp", "file:b/bar.h"}
     assert "usage graph" in capsys.readouterr().out
@@ -2611,6 +2607,314 @@ def test_view_no_open_writes_standalone_html(
     # the printed path should be a real self-contained file
     html_path = Path(out.split("open it with: open ")[1].strip())
     assert html_path.exists()
+    assert "window.GRAPH" in html_path.read_text(encoding="utf-8")
+
+
+# --- export/view --mode path: the shortest call chain as a viewable graph ---
+
+
+def test_export_path_mode_writes_chain(
+    graph_path: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    out = tmp_path / "p.json"
+    # Plain names on both ends: --dst resolves like the main symbol.
+    rc = main(
+        [
+            "export",
+            "--graph",
+            str(graph_path),
+            "caller",
+            "--mode",
+            "path",
+            "--dst",
+            "makeResumeToken",
+            "--out",
+            str(out),
+        ]
+    )
+    assert rc == 0
+    data = json.loads(out.read_text())
+    ids = [n["id"] for n in data["nodes"]]
+    assert ids == ["cxx . . $ mongo/Foo#caller(a2).", "cxx . . $ mongo/Foo#makeResumeToken(a1)."]
+    assert [(lk["source"], lk["target"]) for lk in data["links"]] == [
+        ("cxx . . $ mongo/Foo#caller(a2).", "cxx . . $ mongo/Foo#makeResumeToken(a1).")
+    ]
+    assert "path graph" in capsys.readouterr().out
+
+
+def test_export_path_mode_requires_dst(
+    graph_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        main(["export", "--graph", str(graph_path), "caller", "--mode", "path"])
+    assert excinfo.value.code == 2  # parser.error: clean usage error, no traceback
+    assert "--mode path requires --dst" in capsys.readouterr().err
+
+
+def test_export_path_mode_unknown_dst_errors(
+    graph_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Same clean error UX as an unknown main symbol.
+    with pytest.raises(SystemExit):
+        main(["export", "--graph", str(graph_path), "caller", "--mode", "path", "--dst", "nope"])
+    assert "unknown dst symbol: nope" in capsys.readouterr().err
+
+
+def test_export_path_mode_ambiguous_dst_errors(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    graph = Graph()
+    graph.add_node("cxx . . $ mongo/A#run(a1).", display_name="run")
+    graph.add_node("cxx . . $ mongo/B#run(a2).", display_name="run")
+    path = tmp_path / "g.db"
+    write_sqlite(graph, path)
+    # exact SCIP main symbol; only --dst is ambiguous -> the dst-specific error.
+    with pytest.raises(SystemExit):
+        main(
+            [
+                "export",
+                "--graph",
+                str(path),
+                "cxx . . $ mongo/A#run(a1).",
+                "--mode",
+                "path",
+                "--dst",
+                "run",
+            ]
+        )
+    assert "ambiguous dst symbol: run" in capsys.readouterr().err
+
+
+def test_export_path_mode_no_path_prints_message(
+    graph_path: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # FOO has no outgoing edges: valid symbols, no chain — the message says so
+    # explicitly (the empty graph.json is still written).
+    out = tmp_path / "empty.json"
+    rc = main(
+        [
+            "export",
+            "--graph",
+            str(graph_path),
+            "makeResumeToken",
+            "--mode",
+            "path",
+            "--dst",
+            "caller",
+            "--out",
+            str(out),
+        ]
+    )
+    assert rc == 0
+    out_text = capsys.readouterr().out
+    assert "no static call path" in out_text
+    assert "runtime-dispatch" in out_text  # the same hint the `path` command gives
+    assert json.loads(out.read_text())["nodes"] == []
+
+
+def test_view_path_mode_no_path_skips_html(
+    graph_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    rc = main(
+        [
+            "view",
+            "--graph",
+            str(graph_path),
+            "makeResumeToken",
+            "--mode",
+            "path",
+            "--dst",
+            "caller",
+            "--no-open",
+        ]
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "no static call path" in out
+    assert ".html" not in out  # no empty/confusing HTML written or opened
+
+
+# --- export/view path mode: corridor (--expand-paths), context (--depth), --limit ---
+
+
+def _diamond_graph_path(tmp_path: Path, *, with_sibling: bool = False) -> Path:
+    """`src -> {left, right} -> dst` diamond; `with_sibling` adds a src ->
+    sibling dead-end that never reaches dst (context, not corridor)."""
+    d_src = "cxx . . $ mongo/Flow#src(a1)."
+    d_left = "cxx . . $ mongo/Flow#left()."
+    d_right = "cxx . . $ mongo/Flow#right()."
+    d_dst = "cxx . . $ mongo/Flow#dst(a2)."
+    d_sib = "cxx . . $ mongo/Flow#sibling()."
+    graph = Graph()
+    for sym, name in [
+        (d_src, "src"),
+        (d_left, "left"),
+        (d_right, "right"),
+        (d_dst, "dst"),
+        *([(d_sib, "sibling")] if with_sibling else []),
+    ]:
+        graph.add_node(sym, display_name=name)
+    for src, dst in [
+        (d_src, d_left),
+        (d_src, d_right),
+        (d_left, d_dst),
+        (d_right, d_dst),
+    ]:
+        graph.add_edge("calls", src, dst, file="f.cpp", line=1)
+    if with_sibling:
+        graph.add_edge("calls", d_src, d_sib, file="f.cpp", line=9)
+    path = tmp_path / "diamond.db"
+    write_sqlite(graph, path)
+    return path
+
+
+def test_export_path_expand_paths_writes_corridor(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = _diamond_graph_path(tmp_path)
+    out = tmp_path / "corridor.json"
+    rc = main(
+        [
+            "export",
+            "--graph",
+            str(path),
+            "src",
+            "--mode",
+            "path",
+            "--dst",
+            "dst",
+            "--expand-paths",
+            "--out",
+            str(out),
+        ]
+    )
+    assert rc == 0
+    data = json.loads(out.read_text())
+    assert set(data) == {"nodes", "links"}  # the exported file stays pure graphify
+    assert {n["id"] for n in data["nodes"]} == {
+        "cxx . . $ mongo/Flow#src(a1).",
+        "cxx . . $ mongo/Flow#left().",
+        "cxx . . $ mongo/Flow#right().",
+        "cxx . . $ mongo/Flow#dst(a2).",
+    }
+    assert len(data["links"]) == 4  # both routes, not just the shortest one
+    assert "path graph" in capsys.readouterr().out
+
+
+def test_export_path_depth_adds_context_but_default_stays_pure(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = _diamond_graph_path(tmp_path, with_sibling=True)
+
+    # Explicit --depth 1: context around every chain node (the dead-end sibling
+    # and the second diamond route join the chain).
+    out = tmp_path / "context.json"
+    rc = main(
+        [
+            "export",
+            "--graph",
+            str(path),
+            "src",
+            "--mode",
+            "path",
+            "--dst",
+            "dst",
+            "--depth",
+            "1",
+            "--out",
+            str(out),
+        ]
+    )
+    assert rc == 0
+    context = json.loads(out.read_text())
+    assert len(context["nodes"]) == 5
+    assert len(context["links"]) == 5
+
+    # Omitted --depth: still the pure chain (the pre-feature behaviour — the
+    # deps-mode default of 2 must not leak into path mode).
+    out_pure = tmp_path / "pure.json"
+    rc = main(
+        [
+            "export",
+            "--graph",
+            str(path),
+            "src",
+            "--mode",
+            "path",
+            "--dst",
+            "dst",
+            "--out",
+            str(out_pure),
+        ]
+    )
+    assert rc == 0
+    pure = json.loads(out_pure.read_text())
+    assert len(pure["nodes"]) == 3
+    assert len(pure["links"]) == 2
+    assert "sibling" not in {n["label"] for n in pure["nodes"]}
+
+
+def test_export_path_limit_truncation_reported(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = _diamond_graph_path(tmp_path, with_sibling=True)
+    out = tmp_path / "capped.json"
+    rc = main(
+        [
+            "export",
+            "--graph",
+            str(path),
+            "src",
+            "--mode",
+            "path",
+            "--dst",
+            "dst",
+            "--expand-paths",
+            "--depth",
+            "1",
+            "--limit",
+            "4",
+            "--out",
+            str(out),
+        ]
+    )
+    assert rc == 0
+    data = json.loads(out.read_text())
+    assert len(data["nodes"]) == 4  # the corridor is kept whole, sibling cut
+    assert {n["id"] for n in data["nodes"]} == {
+        "cxx . . $ mongo/Flow#src(a1).",
+        "cxx . . $ mongo/Flow#left().",
+        "cxx . . $ mongo/Flow#right().",
+        "cxx . . $ mongo/Flow#dst(a2).",
+    }
+    # the MCP response's `truncated`/`total` pair, as a printed note
+    out_text = capsys.readouterr().out
+    assert "dropped by --limit 4" in out_text
+    assert "1 more" in out_text  # 5 total - 4 kept
+
+
+def test_view_path_expand_paths_renders_corridor(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = _diamond_graph_path(tmp_path)
+    rc = main(
+        [
+            "view",
+            "--graph",
+            str(path),
+            "src",
+            "--mode",
+            "path",
+            "--dst",
+            "dst",
+            "--expand-paths",
+            "--no-open",
+        ]
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "4 nodes, 4 edges" in out  # the corridor, not a 3-node chain
+    html_path = Path(out.split("open it with: open ")[1].strip())
     assert "window.GRAPH" in html_path.read_text(encoding="utf-8")
 
 

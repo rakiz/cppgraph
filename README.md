@@ -244,13 +244,16 @@ and complete on large C++. Numbers: [COMPARISON.md](COMPARISON.md).
 - Being a linter or a refactoring engine. This is about *understanding structure*
   (who calls what, impact/blast-radius, inheritance) for humans and LLMs.
 
-## Visualize a neighbourhood
+## Visualize a neighbourhood or call path
 
 Secondary to the query tools: `cppgraph export <symbol> --depth 2 --out graph.json`
 (run from the indexed project — graph auto-discovered, `<symbol>` a plain name or
 exact SCIP string), or the `visualize` MCP tool, writes a bounded neighbourhood and
 opens it in a self-contained, offline viewer (`viz/cppgraph-viz.html`). The
 `graph.json` is [graphify](https://github.com/Graphify-Labs/graphify)-compatible.
+`export`/`view` (and the MCP `visualize`) also take `--mode path --dst <target>` to
+draw how two symbols connect — the shortest `calls` chain by default,
+`--expand-paths` for the full corridor of every route between them.
 Details: [viz/README.md](viz/README.md).
 
 ## Where is this type used?

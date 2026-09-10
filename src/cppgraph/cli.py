@@ -264,6 +264,42 @@ def _open_store_checked(args: argparse.Namespace, parser: argparse.ArgumentParse
     return store
 
 
+_NO_STATIC_PATH_HINT = (
+    "  note: this does not prove they're unrelated — the flow may cross a "
+    "runtime-dispatch boundary (a virtual call, or a registered-factory hop) "
+    "that has no static edge. Try the concrete override, or bridge with "
+    "references/subtypes."
+)
+
+
+def _pop_path_metadata(graph_json: dict) -> tuple[bool, int]:
+    """Strip `build_export_json`'s path-mode metadata (`truncated`/`total`/
+    `core_edges`) from the graph dict — the exported graph.json / embedded
+    window.GRAPH stays a pure graphify container. Returns (truncated, total)."""
+    truncated = bool(graph_json.pop("truncated", False))
+    total = int(graph_json.pop("total", 0))
+    graph_json.pop("core_edges", None)
+    return truncated, total
+
+
+def _print_path_truncation(truncated: bool, total: int, n_nodes: int, limit: int) -> None:
+    """The `truncated`/`total` convention the capped MCP tools return as fields
+    has nowhere to live in a graph.json file, so on the CLI it surfaces as
+    printed notes — the same shape as the `... and N more` rows elsewhere."""
+    if not truncated:
+        return
+    if n_nodes < total:
+        print(
+            f"  ... and {total - n_nodes} more nodes were dropped by --limit {limit} "
+            "(raise it to see them)"
+        )
+    else:
+        print(
+            "  note: the path/corridor search hit an internal safety cap — "
+            "the result may be incomplete"
+        )
+
+
 def _resolve_symbol(
     store: GraphStore,
     query: str,
@@ -307,9 +343,12 @@ def build_export_json(
     symbol: str,
     *,
     mode: str = "deps",
-    depth: int = 2,
+    depth: int | None = None,
     direction: str = "both",
     exclude_tests: bool = False,
+    dst: str | None = None,
+    expand_paths: bool = False,
+    limit: int = 40,
 ) -> dict | None:
     """The graph.json for a symbol, or None if the symbol is unknown.
 
@@ -321,7 +360,107 @@ def build_export_json(
     `--attributed-refs`), else at *file* granularity — both exact. `exclude_tests`
     drops test / test-support files (usage) or symbols defined in them (deps) —
     production view only. Shared by the `export`/`view` CLI commands and the MCP.
+
+    `mode="path"` = the call graph between `symbol` and `dst` (both must already
+    be resolved to exact symbols by the caller — the CLI/MCP boundary does that,
+    like `symbol` itself). `dst=None` here is a programmer error and raises
+    `ValueError`. Returns None if either symbol is unknown; an EMPTY graph
+    (0 nodes) when both are known but no static path exists — the caller can tell
+    the two apart. In this mode `exclude_tests` is deliberately ignored: the
+    chain is computed over the whole graph, and dropping a node from its middle
+    would silently break the connectivity — a path either exists as computed or
+    it doesn't. Two composable knobs:
+
+    - `expand_paths=False` (default): the single shortest `calls` chain.
+      `expand_paths=True`: the CORRIDOR — every node/edge lying on *some*
+      `calls` path from `symbol` to `dst` (`GraphStore.call_corridor`: two capped
+      BFS passes intersected, never a path enumeration). The shortest chain is
+      always inside the corridor.
+    - `depth` is the context radius: when > 0, every path/corridor node's
+      neighbourhood is pulled in via the same mixed-edge-kind walk `mode="deps"`
+      uses (`GraphStore.subgraph`, honouring `direction`) and unioned with the
+      chain/corridor. The default is MODE-AWARE: None resolves to 0 for
+      `mode="path"` — the pure chain/corridor, no context — and to 2 for
+      `mode="deps"` (the existing neighbourhood radius).
+      `limit` (path mode only; ignored by deps/usage, which bound themselves via
+      `depth`) caps the final merged node count: chain/corridor nodes are kept
+      first, remaining budget goes to context nodes in discovery order.
+
+    In `mode="path"` the returned dict carries three extra top-level metadata
+    keys beside `nodes`/`links`, for the CLI/MCP surfaces to report (and strip
+    before writing/embedding the file): `truncated` (True when the corridor's
+    internal BFS safety cap fired OR `limit` cut nodes — the result may be
+    incomplete either way), `total` (the merged node count BEFORE the `limit`
+    cut) and `core_edges` (the number of `calls` edges in the chain/corridor
+    proper, before context expansion — the MCP reports it as `hops`).
     """
+    # Mode-aware default: path -> 0 (pure chain/corridor), deps -> 2 (neighbourhood radius).
+    if depth is None:
+        depth = 2 if mode == "deps" else 0
+
+    if mode == "path":
+        if dst is None:
+            raise ValueError("mode='path' requires dst")
+        if not store.has_symbol(symbol) or not store.has_symbol(dst):
+            return None
+        if expand_paths:
+            nodes, edges, truncated = store.call_corridor(symbol, dst)
+        else:
+            truncated = False
+            chain = store.shortest_call_path(symbol, dst)
+            if chain is None:
+                nodes, edges = [], []
+            else:
+                # chain is src->...->dst as edges; render as the node sequence (same
+                # shape `call_path` uses), skipping any node the store can't fetch.
+                nodes = []
+                first = store.get_node(symbol)
+                if first is not None:
+                    nodes.append(first)
+                for edge in chain:
+                    node = store.get_node(edge.dst)
+                    if node is not None:
+                        nodes.append(node)
+                edges = list(chain)
+        if not nodes:
+            graph = to_graphify_graph([], [])
+            graph["truncated"] = truncated
+            graph["total"] = 0
+            graph["core_edges"] = 0
+            return graph
+        core_edges = len(edges)
+
+        # Context expansion (depth > 0): union every core node's neighbourhood
+        # (the same mixed-edge-kind walk deps mode uses) into the result. Only
+        # the CORE nodes are expanded — the pulled-in context is not re-expanded,
+        # or one `depth` would flood outward from the whole corridor.
+        if depth > 0:
+            merged = {n.symbol: n for n in nodes}
+            seen = {(e.kind, e.src, e.dst, e.file, e.line) for e in edges}
+            for core in list(nodes):
+                sub_nodes, sub_edges = store.subgraph(core.symbol, depth=depth, direction=direction)
+                for sub in sub_nodes:
+                    merged.setdefault(sub.symbol, sub)
+                for sub in sub_edges:
+                    key = (sub.kind, sub.src, sub.dst, sub.file, sub.line)
+                    if key not in seen:
+                        seen.add(key)
+                        edges.append(sub)
+            nodes = list(merged.values())
+
+        total = len(nodes)
+        if total > limit:
+            # nodes is core-first (chain/corridor order, then context in
+            # discovery order) — the actual answer survives the cut, deterministically.
+            nodes = nodes[:limit]
+            truncated = True
+        kept = {n.symbol for n in nodes}
+        edges = [e for e in edges if e.src in kept and e.dst in kept]
+        graph = to_graphify_graph(nodes, edges)
+        graph["truncated"] = truncated
+        graph["total"] = total
+        graph["core_edges"] = core_edges
+        return graph
     if not store.has_symbol(symbol):
         return None
     if mode == "usage":
@@ -1113,11 +1252,13 @@ def main(argv: list[str] | None = None) -> int:
     p_export.add_argument(
         "--depth",
         type=int,
-        default=2,
+        default=None,
         metavar="N",
         help="neighbourhood radius in hops around the symbol (default: 2). The "
         "full graph is too large to render; a bounded neighbourhood is the unit "
-        "you actually view.",
+        "you actually view. In --mode path: context hops pulled in around every "
+        "chain/corridor node (default: 0 — the pure chain/corridor; set N to add "
+        "context).",
     )
     p_export.add_argument(
         "--direction",
@@ -1128,13 +1269,38 @@ def main(argv: list[str] | None = None) -> int:
     )
     p_export.add_argument(
         "--mode",
-        choices=("deps", "usage"),
+        choices=("deps", "usage", "path"),
         default="deps",
         help="'deps' (default): the call/inherit dependency subgraph around the "
         "symbol (uses --depth/--direction). 'usage': a symbol->file graph of "
         "where the symbol is used, from its exact reference locations — the right "
-        "view for a type ('used in these N files'). 'usage' needs a graph built "
-        "with references.",
+        "view for a type ('used in these N files'). 'path': the call graph "
+        "between the symbol and --dst — the shortest chain, or every route at "
+        "once with --expand-paths. 'usage' needs a graph built with references.",
+    )
+    p_export.add_argument(
+        "--dst",
+        default=None,
+        metavar="SYMBOL",
+        help="destination symbol for --mode path (a name or exact SCIP string, "
+        "resolved like the main symbol)",
+    )
+    p_export.add_argument(
+        "--expand-paths",
+        action="store_true",
+        help="with --mode path: render the corridor instead of just the shortest "
+        "chain — every node/edge lying on SOME call path to --dst (two capped "
+        "BFS passes intersected, never a path enumeration). Chain nodes stay in "
+        "the corridor.",
+    )
+    p_export.add_argument(
+        "--limit",
+        type=int,
+        default=40,
+        metavar="N",
+        help="cap the path graph's node count (--mode path only; default: 40). "
+        "Chain/corridor nodes are kept first, remaining budget goes to --depth "
+        "context nodes; truncation is reported on stdout.",
     )
     p_export.add_argument(
         "--no-tests",
@@ -1166,16 +1332,43 @@ def main(argv: list[str] | None = None) -> int:
     )
     p_view.add_argument(
         "--mode",
-        choices=("deps", "usage"),
+        choices=("deps", "usage", "path"),
         default="deps",
-        help="'deps' (call/inherit subgraph) or 'usage' (symbol->file usage graph)",
+        help="'deps' (call/inherit subgraph), 'usage' (symbol->file usage graph) "
+        "or 'path' (the call graph between the symbol and --dst: the shortest "
+        "chain, or every route at once with --expand-paths)",
+    )
+    p_view.add_argument(
+        "--dst",
+        default=None,
+        metavar="SYMBOL",
+        help="destination symbol for --mode path (a name or exact SCIP string, "
+        "resolved like the main symbol)",
+    )
+    p_view.add_argument(
+        "--expand-paths",
+        action="store_true",
+        help="with --mode path: render the corridor instead of just the shortest "
+        "chain — every node/edge lying on SOME call path to --dst (two capped "
+        "BFS passes intersected, never a path enumeration)",
+    )
+    p_view.add_argument(
+        "--limit",
+        type=int,
+        default=40,
+        metavar="N",
+        help="cap the path graph's node count (--mode path only; default: 40). "
+        "Chain/corridor nodes are kept first, remaining budget goes to --depth "
+        "context nodes; truncation is reported on stdout.",
     )
     p_view.add_argument(
         "--depth",
         type=int,
-        default=2,
+        default=None,
         metavar="N",
-        help="neighbourhood radius for --mode deps (default: 2)",
+        help="neighbourhood radius for --mode deps (default: 2). In --mode path: "
+        "context hops around every chain/corridor node (default: 0 — the pure "
+        "chain/corridor)",
     )
     p_view.add_argument(
         "--direction",
@@ -1547,12 +1740,7 @@ def main(argv: list[str] | None = None) -> int:
         chain = store.shortest_call_path(args.src, args.dst)
         if chain is None:
             print(f"[cppgraph] no static call path from {args.src} to {args.dst}")
-            print(
-                "  note: this does not prove they're unrelated — the flow may cross a "
-                "runtime-dispatch boundary (a virtual call, or a registered-factory hop) "
-                "that has no static edge. Try the concrete override, or bridge with "
-                "references/subtypes."
-            )
+            print(_NO_STATIC_PATH_HINT)
             return 1
         print(f"[cppgraph] {len(chain)} hop(s) from {args.src} to {args.dst}")
         print(f"  {args.src}")
@@ -2239,6 +2427,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "export":
         store = _open_store_checked(args, parser)
         args.symbol = _resolve_symbol(store, args.symbol, parser)
+        dst: str | None = None
+        if args.mode == "path":
+            if not args.dst:
+                parser.error("--mode path requires --dst")
+            dst = _resolve_symbol(store, args.dst, parser, what="dst symbol")
         graph_json = build_export_json(
             store,
             args.symbol,
@@ -2246,20 +2439,35 @@ def main(argv: list[str] | None = None) -> int:
             depth=args.depth,
             direction=args.direction,
             exclude_tests=args.no_tests,
+            dst=dst,
+            expand_paths=args.expand_paths,
+            limit=args.limit,
         )
         if graph_json is None:
             parser.error(f"unknown symbol: {args.symbol} (use `cppgraph find` to look it up)")
+        truncated, total = _pop_path_metadata(graph_json)
         with open(args.out, "w", encoding="utf-8") as f:
             json.dump(graph_json, f, indent=1)
         n_nodes, n_links = len(graph_json["nodes"]), len(graph_json["links"])
-        if args.mode == "usage":
+        if args.mode == "path":
+            if n_nodes == 0:
+                print(f"[cppgraph] no static call path from {args.symbol} to {dst}")
+                print(_NO_STATIC_PATH_HINT)
+            else:
+                print(
+                    f"[cppgraph] exported path graph: {n_nodes} nodes, {n_links} "
+                    f"edges -> {args.out}"
+                )
+            _print_path_truncation(truncated, total, n_nodes, args.limit)
+        elif args.mode == "usage":
             print(f"[cppgraph] exported usage graph: {n_links} file(s) used -> {args.out}")
             if n_links == 0:
                 print("  (0 references — was the graph built with references? see `status`)")
         else:
+            depth_shown = args.depth if args.depth is not None else 2
             print(
                 f"[cppgraph] exported {n_nodes} nodes, {n_links} edges "
-                f"(depth {args.depth}, {args.direction}) -> {args.out}"
+                f"(depth {depth_shown}, {args.direction}) -> {args.out}"
             )
         print(
             f"  open viz/cppgraph-viz.html and load {args.out} "
@@ -2270,6 +2478,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "view":
         store = _open_store_checked(args, parser)
         args.symbol = _resolve_symbol(store, args.symbol, parser)
+        dst: str | None = None
+        if args.mode == "path":
+            if not args.dst:
+                parser.error("--mode path requires --dst")
+            dst = _resolve_symbol(store, args.dst, parser, what="dst symbol")
         graph_json = build_export_json(
             store,
             args.symbol,
@@ -2277,14 +2490,25 @@ def main(argv: list[str] | None = None) -> int:
             depth=args.depth,
             direction=args.direction,
             exclude_tests=args.no_tests,
+            dst=dst,
+            expand_paths=args.expand_paths,
+            limit=args.limit,
         )
         if graph_json is None:
             parser.error(f"unknown symbol: {args.symbol} (use `cppgraph find` to look it up)")
+        truncated, total = _pop_path_metadata(graph_json)
+        n_nodes, n_links = len(graph_json["nodes"]), len(graph_json["links"])
+        if args.mode == "path" and n_nodes == 0:
+            print(f"[cppgraph] no static call path from {args.symbol} to {dst}")
+            print(_NO_STATIC_PATH_HINT)
+            _print_path_truncation(truncated, total, n_nodes, args.limit)
+            return 0
         from cppgraph.viz_html import open_in_browser, write_temp_html
 
         html_path = write_temp_html(graph_json)
-        n_nodes, n_links = len(graph_json["nodes"]), len(graph_json["links"])
         print(f"[cppgraph] {n_nodes} nodes, {n_links} edges -> {html_path}")
+        if args.mode == "path":
+            _print_path_truncation(truncated, total, n_nodes, args.limit)
         if args.no_open:
             print(f"  open it with: open {html_path}")
         else:
