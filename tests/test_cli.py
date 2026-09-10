@@ -44,6 +44,23 @@ def test_find_no_match_returns_nonzero(
     assert main(["find", "--graph", str(graph_path), "nope"]) == 1
 
 
+def test_find_retries_cxx_colon_spelling_as_scip_separator(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # `Foo::method` (C++ spelling) is retried as `Foo#method` (SCIP's) — the
+    # same first relaxation resolve()/the MCP find try — instead of a bare
+    # "no symbol matching"; when neither spelling hits, the miss stays a miss.
+    graph = Graph()
+    graph.add_node("cxx . . $ mongo/Foo#caller(a0).")
+    path = tmp_path / "colon.db"
+    write_sqlite(graph, path)
+    assert main(["find", "--graph", str(path), "Foo::caller"]) == 0
+    out = capsys.readouterr().out
+    assert "Foo#caller" in out
+    assert "member separator" in out  # the substitution is surfaced, not silent
+    assert main(["find", "--graph", str(path), "Bar::baz"]) == 1
+
+
 def test_callers_lists_caller_with_location(
     graph_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

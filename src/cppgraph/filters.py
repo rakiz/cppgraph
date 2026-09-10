@@ -215,9 +215,12 @@ def ambiguous_candidate_hint(query: str, candidates: list[Node]) -> str:
     *are* — the same guidance on both surfaces. Two recurring lookalike traps:
     the type itself (`Foo#`, a symbol ending in `#`) sitting next to its own
     members, and a conversion/overloaded operator (`operator Foo()`) that merely
-    shares the name. States the fact — never picks a candidate. Empty when
-    neither trap is present."""
-    q = query.casefold()
+    shares the name. The query is normalized the same way a candidate's leaf is
+    (namespace prefix and trailing `#` stripped), so a qualified query — e.g.
+    `mongo/Foo#` copied from a prior `find` result — compares against the bare
+    leaf instead of never matching. States the fact — never picks a candidate.
+    Empty when neither trap is present."""
+    q = query.casefold().rsplit("/", 1)[-1].rstrip("#").rsplit("#", 1)[-1]
     type_labels: list[str] = []
     has_operator = False
     for n in candidates:

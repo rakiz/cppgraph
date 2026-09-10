@@ -1994,6 +1994,42 @@ def test_make_export_unknown_symbol_is_none(store: GraphStore) -> None:
     assert mcp_server.make_export(store, "nope") is None
 
 
+def test_visualize_tool_resolves_plain_unique_name(tmp_path: Path) -> None:
+    """`visualize` accepts a plain unique name like every other tool (CLI/MCP
+    parity with `export`/`view`): it resolves it, not just exact SCIP strings."""
+    from cppgraph.mcp_server import build_server
+
+    graph = Graph()
+    graph.nodes[FOO] = Node(symbol=FOO, display_name="makeResumeToken", file="foo.cpp", line=234)
+    path = tmp_path / "g.db"
+    write_sqlite(graph, path)
+    server = build_server(str(path))
+    viz = server._tool_manager._tools["visualize"].fn
+    r = viz("makeResumeToken", open_browser=False)
+    assert "error" not in r
+    assert "path" in r
+    assert r["nodes"] == 1
+
+
+def test_visualize_tool_ambiguous_name_lists_candidates(tmp_path: Path) -> None:
+    """An ambiguous name gets the same candidate-list reply as the other tools —
+    not a plain unknown-symbol error — and no graph is built for a guess."""
+    from cppgraph.mcp_server import build_server
+
+    graph = Graph()
+    graph.nodes[FOO] = Node(symbol=FOO, display_name="makeResumeToken", file="foo.cpp", line=234)
+    graph.nodes[CALLER] = Node(symbol=CALLER, display_name="caller", file="foo.cpp", line=9)
+    graph.nodes[MID] = Node(symbol=MID, display_name="mid", file="foo.cpp", line=49)
+    path = tmp_path / "g.db"
+    write_sqlite(graph, path)
+    server = build_server(str(path))
+    viz = server._tool_manager._tools["visualize"].fn
+    r = viz("Foo", open_browser=False)
+    assert r.get("ambiguous") == "Foo"
+    assert {"ambiguous", "total", "candidates", "hint"} <= r.keys()
+    assert "path" not in r
+
+
 def test_discover_graph_finds_nearest_cppgraph(tmp_path: Path) -> None:
     proj = tmp_path / "proj"
     (proj / ".cppgraph").mkdir(parents=True)
@@ -2157,6 +2193,43 @@ def test_find_relaxes_qualified_zero_hit(tmp_path: Path) -> None:
     assert r["relaxed"] is True
     assert r["relaxed_query"] == "buildPipeline"
     assert r["results"][0]["symbol"] == free
+
+
+def test_find_colon_relaxation_tries_scip_separator_before_leaf(tmp_path: Path) -> None:
+    # `Class::method` (C++ spelling) must first be retried as `Class#method`
+    # (SCIP's separator) — which hits exactly — instead of loosening to the bare
+    # leaf `caller`, which would also drag in same-named methods on other classes.
+    foo = "cxx . . $ mongo/Foo#caller(a0)."
+    other = "cxx . . $ mongo/Bar#caller(a1)."
+    graph = Graph()
+    graph.nodes[foo] = Node(symbol=foo, file="f.cpp", line=1)
+    graph.nodes[other] = Node(symbol=other, file="f.cpp", line=2)
+    path = tmp_path / "colon.db"
+    write_sqlite(graph, path)
+
+    r = mcp_server.find_symbols(GraphStore(path), "Foo::caller")
+    assert r["total"] == 1
+    assert r["results"][0]["symbol"] == foo
+    assert r["relaxed"] is True
+    assert r["relaxed_query"] == "Foo#caller"
+    assert "member separator" in r["note"]
+
+
+def test_find_colon_relaxation_falls_through_when_qualified_misses(tmp_path: Path) -> None:
+    # `Class::method` where neither spelling exists: the `::`->`#` retry misses
+    # too, so the cascade continues (fuzzy, then bare leaf) exactly as before.
+    free = "cxx . . $ mongo/change_stream/pipeline_helpers/buildPipeline(a1)."
+    graph = Graph()
+    graph.nodes[free] = Node(symbol=free, file="ph.cpp", line=1)
+    path = tmp_path / "colon-miss.db"
+    write_sqlite(graph, path)
+
+    r = mcp_server.find_symbols(GraphStore(path), "Pipeline::buildPipeline")
+    assert r["total"] == 1
+    assert r["results"][0]["symbol"] == free
+    assert r["relaxed"] is True
+    assert r["relaxed_query"] == "buildPipeline"  # the leaf kind, not the colon kind
+    assert "loosened" in r["note"]
 
 
 def test_find_no_relax_when_exact_hits(store: GraphStore) -> None:

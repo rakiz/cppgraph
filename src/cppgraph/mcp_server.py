@@ -277,11 +277,13 @@ def find_symbols(
     `exclude_paths` filter matches by their definition file's path prefix (e.g.
     scope out vendored deps).
 
-    On an exact-zero result, `find` relaxes once and flags the response
-    `relaxed`: first case/separator-insensitively (the `change_stream` vs
-    `changeStream` vs `changestream` trap), then, for a *qualified* query
-    (`Class#method`, a wrong guess), on the bare leaf name. So a naming miss
-    degrades to a hint instead of a silent empty answer.
+    On an exact-zero result, `find` relaxes and flags the response `relaxed`:
+    first a C++-spelled qualified guess (`Class::method`) is retried with
+    SCIP's `Class#method` separator (the same step `GraphStore.resolve` tries
+    before anything fuzzier), then case/separator-insensitively (the
+    `change_stream` vs `changeStream` vs `changestream` trap), then, for a
+    *qualified* query (`Class#method`, a wrong guess), on the bare leaf name.
+    So a naming miss degrades to a hint instead of a silent empty answer.
 
     Grouped overloads carry a best-effort `signature` read from source (when
     `root` is available), since scip-clang distinguishes them only by hash.
@@ -300,6 +302,16 @@ def find_symbols(
     matches = store.find(query)
     relaxation: str | None = None
     relaxed_query: str | None = None
+    if not matches and "::" in query:
+        # `Class::method` in C++ spelling is `Class#method` in SCIP's — the same
+        # first relaxation `GraphStore.resolve` tries (before fuzzy), so a
+        # qualified guess resolves exactly instead of loosening to the bare
+        # leaf and dragging in same-named methods on unrelated classes.
+        scip_query = query.replace("::", "#")
+        matches = store.find(scip_query)
+        if matches:
+            relaxation = "colon"
+            relaxed_query = scip_query
     if not matches:
         fuzzy = store.find(query, fuzzy=True)
         if fuzzy:
@@ -381,6 +393,14 @@ def find_symbols(
         result["note"] = (
             f"no exact match for {query!r}; matched case/separator-insensitively "
             "(e.g. `changestream` ~ `change_stream` / `changeStream`)"
+        )
+    elif relaxation == "colon":
+        result["relaxed"] = True
+        result["relaxed_query"] = relaxed_query
+        result["note"] = (
+            f"no exact match for {query!r}; showing results for "
+            f"{relaxed_query!r} (C++ `::` normalized to SCIP's `#` member "
+            "separator)"
         )
     elif relaxation == "leaf":
         result["relaxed"] = True
@@ -1958,13 +1978,17 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         arms disagree) rides on the entry and each arm — absent on graphs
         without that data. If
         nothing matches exactly, `find` relaxes
-        once (case/separator-insensitive — `changestream` ~ `change_stream` —
-        then, for a `Class#method` guess, the bare leaf name) and flags the
-        response `relaxed`. Set `hide_trivial=True` to drop compiler-generated /
+        (a `Class::method` guess is first retried with SCIP's `Class#method`
+        separator, then case/separator-insensitively — `changestream` ~
+        `change_stream` — then, for a `Class#method` guess, the bare leaf name)
+        and flags the response `relaxed`. Set `hide_trivial=True` to drop compiler-generated /
         boilerplate hits (lambdas, operators, `*assert`, `makeStatus`, …) —
         `trivial_hidden` reports how many were cut. `include_paths`/
         `exclude_paths` filter matches by their definition file's path prefix
-        (e.g. scope out vendored deps). `limit` caps the list
+        (e.g. scope out vendored deps) — if a broad query returns mostly
+        generated-code clutter (IDL Spec/getter classes and the like), scope it
+        with these prefixes; the tool won't auto-detect "generated code".
+        `limit` caps the list
         (default 40): lower it to spend fewer tokens, raise it when `truncated`."""
         return _call(
             find_symbols,
@@ -2207,7 +2231,10 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         (`full_symbols=True` for raw SCIP); pass `exclude_tests=True` to drop
         edges whose call site is in a test file. `include_paths`/`exclude_paths`
         further filter by definition-file path prefix (e.g. scope out vendored
-        deps). `limit` caps the list (default
+        deps) — pass them by their exact names: an unrecognized parameter name
+        (a typo like `path=`) is silently ignored by the underlying MCP
+        argument validation rather than raising, so a typo silently yields an
+        unfiltered result. `limit` caps the list (default
         40): lower it to spend fewer tokens, raise it when `truncated`."""
         return _call(
             hotspot_ranking,
@@ -2291,7 +2318,10 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         on a stock-binary graph the tool returns `available: false` with the
         rebuild pointer instead of a silently empty list. `exclude_tests` drops
         definitions in test files; `include_paths`/`exclude_paths` filter by
-        definition-file path prefix (e.g. scope out vendored deps). `limit`
+        definition-file path prefix — pass them by their exact names: an
+        unrecognized parameter name (a typo like `path=`) is silently ignored
+        by the underlying MCP argument validation rather than raising, so a
+        typo silently yields an unfiltered result. `limit`
         caps the list (default 40): lower it to spend fewer tokens, raise it
         when `truncated` — `total` always reports the full count."""
         return _call(
@@ -2324,8 +2354,11 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         included) instead of answering. Compact `name` + `file:line` by
         default (`full_symbols=True` for raw SCIP). `exclude_tests` drops
         definitions in test files, but a test caller still counts as a caller.
-        `include_paths`/`exclude_paths` filter by definition-file path prefix.
-        `limit` caps the list (default 40) — `total` always reports the full
+        `include_paths`/`exclude_paths` filter by definition-file path prefix —
+        pass them by their exact names: an unrecognized parameter name (a typo
+        like `path=`) is silently ignored by the underlying MCP argument
+        validation rather than raising, so a typo silently yields an unfiltered
+        result. `limit` caps the list (default 40) — `total` always reports the full
         count."""
         return _call(
             no_incoming_calls_report,
@@ -2411,7 +2444,11 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         answer is call sites only, flagged `refs_available: false` with a
         note (type uses are invisible without the reference index).
         `exclude_tests` drops uses whose use site or used definition is in a
-        test file. `limit` caps the list (default 40): raise it when
+        test file. `module_prefix` must be passed by its exact name: an
+        unrecognized parameter name (a typo like `path=`) is silently ignored
+        by the underlying MCP argument validation rather than raising, so a
+        typo silently yields an unfiltered (whole-tree) result. `limit` caps
+        the list (default 40): raise it when
         `truncated` — `total` always reports the full count."""
         return _call(
             api_surface_report,
@@ -2586,6 +2623,9 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         s = stores.get()
         if s is None:
             return _no_graph_notice()
+        symbol, _alt = _resolve(s, symbol)
+        if _alt is not None:
+            return _alt
         graph_json = make_export(
             s,
             symbol,

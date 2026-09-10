@@ -579,7 +579,9 @@ def main(argv: list[str] | None = None) -> int:
     p_find.add_argument(
         "query",
         help="name to match against the symbol or display name; a substring, or "
-        "several space-separated words that must all appear (order-free AND)",
+        "several space-separated words that must all appear (order-free AND). "
+        "If a broad query returns mostly generated-code clutter (IDL Spec/getter "
+        "classes), scope with --include-path/--exclude-path instead",
     )
     _add_path_filters(p_find)
 
@@ -1394,6 +1396,18 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "find":
         store = _open_store_checked(args, parser)
         matches = store.find(args.query)
+        if not matches and "::" in args.query:
+            # The same first relaxation `GraphStore.resolve` (and the MCP
+            # `find`) tries: C++ `Class::method` is `Class#method` in SCIP's
+            # spelling. Otherwise strict — CLI find has no fuzzy/leaf cascade.
+            scip_query = args.query.replace("::", "#")
+            matches = store.find(scip_query)
+            if matches:
+                print(
+                    f"[cppgraph] no exact match for {args.query!r}; showing "
+                    f"results for {scip_query!r} (`::` normalized to SCIP's `#` "
+                    "member separator)"
+                )
         if args.include_paths or args.exclude_paths:
             matches = [
                 n

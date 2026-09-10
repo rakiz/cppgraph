@@ -7,8 +7,12 @@ primitive — see `test_mcp_server.py`/`test_cli.py` for the per-tool wiring.
 
 from __future__ import annotations
 
-from cppgraph.filters import filter_by_path, matches_path_prefix
-from cppgraph.model import Graph
+from cppgraph.filters import (
+    ambiguous_candidate_hint,
+    filter_by_path,
+    matches_path_prefix,
+)
+from cppgraph.model import Graph, Node
 from cppgraph.store import GraphStore, write_sqlite
 
 
@@ -116,3 +120,49 @@ def test_filter_by_path_include_keeps_only_project_caller(tmp_path) -> None:
         store, edges, on="src", include_paths=["src/myproject/"], exclude_paths=None
     )
     assert {e.src for e in kept} == {"proj_caller"}
+
+
+# --- ambiguous_candidate_hint: qualified-query normalization ------------------
+
+BASE = "cxx . . $ mongo/DocumentSource#"
+M1 = "cxx . . $ mongo/DocumentSource#createFromBson(a0)."
+M2 = "cxx . . $ mongo/DocumentSource#doGetNext(a1)."
+CONV_OP = "cxx . . $ mongo/OtherClass#operator mongo/DocumentSource()(a0)."
+
+
+def _hint_candidates(*symbols: str) -> list[Node]:
+    return [Node(symbol=s, file="d.cpp", line=1) for s in symbols]
+
+
+def test_ambiguous_hint_type_itself_fires_for_qualified_query() -> None:
+    """The repro: a query already in SCIP form (`mongo/Foo#` — exactly what an
+    LLM copy-pastes from a prior `find` result) must be normalized to the bare
+    leaf before comparing, or the type-itself hint never fires."""
+    hint = ambiguous_candidate_hint("mongo/DocumentSource#", _hint_candidates(BASE, M1, M2))
+    assert "type itself" in hint
+    assert "mongo/DocumentSource#" in hint
+
+
+def test_ambiguous_hint_type_itself_fires_for_bare_leaf_query() -> None:
+    # The pre-existing bare-leaf shape must keep working exactly as before.
+    hint = ambiguous_candidate_hint("DocumentSource", _hint_candidates(BASE, M1, M2))
+    assert "type itself" in hint
+    assert "mongo/DocumentSource#" in hint
+
+
+def test_ambiguous_hint_operator_fires_for_qualified_query() -> None:
+    """Same gap on the operator half: the qualified query's bare leaf must
+    substring-match the conversion operator's label (`OtherClass#operator
+    mongo/DocumentSource()`), where the raw qualified string never could."""
+    hint = ambiguous_candidate_hint("mongo/DocumentSource#", _hint_candidates(BASE, CONV_OP))
+    assert "type itself" in hint
+    assert "operator" in hint
+    # And the bare spelling keeps firing the operator half too.
+    bare = ambiguous_candidate_hint("DocumentSource", _hint_candidates(BASE, CONV_OP))
+    assert "operator" in bare
+
+
+def test_ambiguous_hint_silent_for_member_only_candidates() -> None:
+    # Neither trap present: methods of other shapes must not trip the hints.
+    assert ambiguous_candidate_hint("mongo/DocumentSource#", _hint_candidates(M1, M2)) == ""
+    assert ambiguous_candidate_hint("createFromBson", _hint_candidates(M1, M2)) == ""

@@ -139,6 +139,18 @@ in `CHANGELOG.md`, releases in `versions.json`.
   revisit the "Claude Code-only" premise if adoption data ever shows non-Claude usage
   demand, not a reason to build it speculatively now.
 
+- **MCP argument validation is lenient upstream (`mcp` SDK) — mistyped parameter
+  names are silently ignored.** An unknown/mistyped kwarg passed to an MCP tool
+  (e.g. `path=` instead of `include_paths=`) is accepted and dropped by the
+  underlying `mcp` SDK's default Pydantic argument validation (`ArgModelBase`
+  doesn't set `extra="forbid"`), so a typo silently produces an unfiltered/global
+  result instead of a clear failure — confirmed on `hotspots` via a live
+  `call_tool` (known upstream-library gap, **no local fix planned**: monkeypatching
+  a third-party library's pydantic model configs would be fragile). The four
+  path-scoping tools' docstrings (`hotspots`, `no_incoming_calls`, `line_span`,
+  `api_surface` in `mcp_server.py`) warn about it. A real fix needs the `mcp` SDK
+  to support strict/forbid-extra argument models.
+
 ## scip-clang (upstream)
 
 cppgraph is downstream of scip-clang: some features are blocked not by our code but by

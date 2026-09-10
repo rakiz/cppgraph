@@ -6,6 +6,45 @@ on-disk store also carries its own `schema_version` for forward-compatibility.
 
 ## [Unreleased]
 
+### Fixed
+
+- **MCP `visualize` didn't resolve plain names** — the one MCP tool that bypassed
+  `_resolve()` entirely, unlike every other tool and unlike the CLI's equivalent
+  `export`/`view` commands: a plain "human" name that wasn't already an exact
+  SCIP string returned an unhelpful unknown-symbol error instead of resolving
+  (or listing ambiguous candidates). Now calls `_resolve()` like every other
+  MCP tool. Found via a real-world stress test on a large C++ codebase.
+- **`find` (MCP and CLI) missed the `::`→`#` relaxation step that
+  `GraphStore.resolve()` already had** — a qualified query like
+  `Class::method` jumped straight from an exact-match miss to a bare-leaf
+  relaxation (dropping the class qualifier entirely), burying the real match
+  among unrelated same-named methods on other classes, instead of first
+  trying the SCIP separator form `Class#method`. Both surfaces now try that
+  substitution before falling back further (fuzzy/leaf on MCP; CLI stays
+  exact-only, as before). Found via the same stress test.
+- **`ambiguous_candidate_hint()` didn't normalize a qualified query** — the
+  "one candidate is the type itself" / operator-detection hint (added in
+  0.3.1) only fired when the caller passed a bare leaf name (e.g.
+  `DocumentSource`); a qualified query copy-pasted straight from a `find`
+  result (e.g. `mongo/DocumentSource#` — the realistic, common case) silently
+  produced no hint at all, because the query itself was never stripped of its
+  namespace prefix/trailing `#` before comparison. Fixed by normalizing the
+  query the same way a candidate's leaf already is.
+
+### Changed
+
+- **`find`'s docstring/help now points at `include_paths`/`exclude_paths`**
+  as the fix for a broad query dominated by generated-code clutter (IDL
+  Spec/getter classes and the like) — the tool won't auto-detect "generated
+  code", so scoping by path prefix is the actual lever.
+- Documented (docstrings on `hotspots`/`line_span`/`no_incoming_calls`/
+  `api_surface`, plus a `TODO.md` entry) that an unrecognized/mistyped
+  parameter name is silently ignored by the underlying MCP SDK's lenient
+  argument validation (confirmed via a live repro) rather than raising an
+  error — a deliberately-unpatched upstream limitation (no local pydantic
+  monkeypatch planned), not a cppgraph bug, so a typo'd kwarg like `path=`
+  produces a silent unfiltered/global result instead of a clear failure.
+
 ## [0.3.1] - 2026-09-10
 
 Bugfixes and hardened test coverage around store/binary/proto migrations and
