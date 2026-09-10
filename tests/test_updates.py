@@ -6,6 +6,9 @@ network+cache layer is exercised only for its fail-soft behaviour (no real HTTP)
 
 from __future__ import annotations
 
+import subprocess
+from pathlib import Path
+
 import pytest
 
 from cppgraph import updates
@@ -18,6 +21,56 @@ REGISTRY = {
         {"version": "0.3.0", "rebuild": "none"},
     ],
 }
+
+
+def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", "-C", str(cwd), *args], check=True, capture_output=True, text=True
+    )
+
+
+def test_git_describe_ignores_non_version_tags_from_this_repo(tmp_path: Path) -> None:
+    """Regression: this repo's tag namespace also carries
+    `scip-clang-patched-vX.Y.Z-pN` / `scip-clang-504-vX.Y.Z` release tags
+    (published on the SAME repo by scripts/publish-scip-clang-patched.sh),
+    alongside cppgraph's own `vX.Y.Z` tags. An unfiltered `git describe --tags`
+    picks whichever tag is nearest in the commit graph, which can be one of
+    those scip-clang tags instead of a real cppgraph version — observed in
+    practice breaking `status`'s update-advice comparison. `_git_describe`
+    must only ever consider `vX.Y.Z`-shaped tags."""
+    _git(tmp_path, "init", "-q")
+    _git(tmp_path, "config", "user.email", "t@example.com")
+    _git(tmp_path, "config", "user.name", "t")
+    (tmp_path / "a.txt").write_text("1\n")
+    _git(tmp_path, "add", "a.txt")
+    _git(tmp_path, "commit", "-q", "-m", "v0.2.0 commit")
+    _git(tmp_path, "tag", "v0.2.0")
+
+    (tmp_path / "a.txt").write_text("2\n")
+    _git(tmp_path, "add", "a.txt")
+    _git(tmp_path, "commit", "-q", "-m", "later, tagged as a scip-clang binary release")
+    # A tag nearer than v0.2.0, on the same repo, shaped like our own release
+    # tags — but not a cppgraph version at all.
+    _git(tmp_path, "tag", "scip-clang-patched-v0.4.0-p6")
+
+    described = updates._git_describe(pkg_dir=tmp_path)
+    assert described is not None
+    assert described.startswith("v0.2.0-"), described
+    assert "scip-clang-patched" not in described
+
+
+def test_git_describe_still_finds_exact_version_tag(tmp_path: Path) -> None:
+    """Sanity check the fix doesn't just always fail to match: an exact
+    cppgraph version tag on HEAD is still reported plainly."""
+    _git(tmp_path, "init", "-q")
+    _git(tmp_path, "config", "user.email", "t@example.com")
+    _git(tmp_path, "config", "user.name", "t")
+    (tmp_path / "a.txt").write_text("1\n")
+    _git(tmp_path, "add", "a.txt")
+    _git(tmp_path, "commit", "-q", "-m", "init")
+    _git(tmp_path, "tag", "v0.3.0")
+
+    assert updates._git_describe(pkg_dir=tmp_path) == "v0.3.0"
 
 
 def test_parse_version_orders_and_tolerates_noise() -> None:

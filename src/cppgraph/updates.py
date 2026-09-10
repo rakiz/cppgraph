@@ -48,20 +48,39 @@ _ENV_DISABLE = "CPPGRAPH_NO_UPDATE_CHECK"
 _ENV_URL = "CPPGRAPH_VERSIONS_URL"
 
 
-def _git_describe() -> str | None:
-    """`git describe --tags` of the checkout this package lives in, or None.
+def _git_describe(pkg_dir: Path | None = None) -> str | None:
+    """`git describe --tags --match 'v[0-9]*'` of the checkout this package
+    lives in, or None.
 
     cppgraph is pure Python installed editable from a git checkout, so a version
     *is* a tag: describing the working tree reports the truth live, without a
     build step or a hand-maintained version constant — checkout a different tag
     and the reported version follows, no reinstall. None when there are no tags
-    yet (fresh clone), or the source isn't a git checkout (tarball install)."""
+    yet (fresh clone), or the source isn't a git checkout (tarball install).
+
+    The `--match 'v[0-9]*'` restriction is required, not cosmetic: this repo's
+    tag namespace also carries `scip-clang-patched-vX.Y.Z-pN` and
+    `scip-clang-504-vX.Y.Z` tags (from `scripts/publish-scip-clang-patched.sh`,
+    published on this same repo for asset hosting) alongside cppgraph's own
+    `vX.Y.Z` release tags. An unfiltered `git describe --tags` picks whichever
+    tag is nearest in the commit graph — which can be one of those scip-clang
+    binary tags instead of a real cppgraph version, silently reporting
+    "scip-clang-patched-v0.4.0-p6-9-g<sha>" as cppgraph's own current_version
+    (observed in practice: it broke the `status` update-advice comparison
+    against `versions.json`'s `latest`, since that string doesn't parse as a
+    cppgraph version at all).
+
+    `pkg_dir` is a test-only override (defaults to this file's own directory,
+    i.e. the real checkout) so a test can point this at a throwaway git repo
+    with a synthetic tag collision instead of depending on this repo's actual
+    tag history."""
     import subprocess
 
-    pkg_dir = Path(__file__).resolve().parent
+    if pkg_dir is None:
+        pkg_dir = Path(__file__).resolve().parent
     try:
         out = subprocess.run(
-            ["git", "-C", str(pkg_dir), "describe", "--tags", "--dirty"],
+            ["git", "-C", str(pkg_dir), "describe", "--tags", "--dirty", "--match", "v[0-9]*"],
             capture_output=True,
             text=True,
             timeout=1.5,
