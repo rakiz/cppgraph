@@ -1,9 +1,7 @@
 #!/usr/bin/env bash
-# Build scip-clang (v0.4.0 + our patches from scip-clang-patches/: enclosing_range
-# / PR #504, the ForwardDefinition bit fix, the ReadAccess/WriteAccess
-# classifier, the SymbolInformation.kind classifier, the
-# SymbolInformation.signature_documentation emitter, and the
-# Relationship.is_type_definition emitter) NATIVELY on macOS, for
+# Build scip-clang (v0.4.0 + this repo's full patch bundle from
+# scip-clang-patches/ — see scip-clang-patches/README.md for the current
+# list) NATIVELY on macOS, for
 # THIS Mac's CPU architecture. Mirrors docker/build-scip-clang-patched-linux/build.sh's role
 # but skips Docker entirely — a Linux container on a Mac can only ever produce
 # a Linux binary, so getting a native macOS binary means building on the host.

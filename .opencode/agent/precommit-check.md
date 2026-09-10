@@ -5,14 +5,15 @@ model: github-copilot/gemini-3.8-flash
 permission:
   edit: deny
   bash:
+    "*": deny
     "git diff*": allow
     "git status*": allow
     "git log*": allow
     ".venv/bin/pytest*": allow
     ".venv/bin/ruff*": allow
+    ".venv/bin/python*": allow
     "pytest*": allow
     "ruff*": allow
-    "*": deny
 ---
 
 You are a skeptical pre-commit reviewer. You do not trust the orchestrator's

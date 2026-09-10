@@ -66,9 +66,9 @@ DOCKER_BUILDKIT=1 docker build \
 BIN="${OUT_DIR}/scip-clang"
 chmod +x "$BIN"
 
-# Provenance sidecar next to the binary (same format setup.sh writes): this build
-# carries the patch bundle (PR #504 + ForwardDefinition + ReadAccess/WriteAccess +
-# SymbolInformation.kind), so the variant is
+# Provenance sidecar next to the binary (same format setup.sh writes): this
+# build carries this repo's full patch bundle (see scip-clang-patches/README.md
+# for the current list), so the variant is
 # "patched", stamped with the patchset pin it was built from. `cppgraph status`
 # reads it to compare against the pin. Version parsed from the binary
 # ("scip-clang X").

@@ -666,18 +666,18 @@ def enrich_references(path: str | Path, index: scip_pb2.Index) -> tuple[int, int
         # both read the column.
         if "documentation" not in sym_cols:
             con.execute("ALTER TABLE symbols ADD COLUMN documentation TEXT")
-        # Same for `symbols.scip_kind` (pending schema v5): fine-grained
+        # Same for `symbols.scip_kind` (schema v5): fine-grained
         # `SymbolInformation.kind` names from a kind-patched binary.
         if "scip_kind" not in sym_cols:
             con.execute("ALTER TABLE symbols ADD COLUMN scip_kind TEXT")
-        # Same for `symbols.signature_documentation` (pending schema v5): add
+        # Same for `symbols.signature_documentation` (schema v5): add
         # the column only — enrich-refs never backfills signature text (that's
         # `cppgraph build`'s job; unlike roles/kinds, no ride-along) — but the
         # stamped `schema_version` below must end up shaped to match what
         # `get_node`'s full SELECT and `apply_update`'s re-insert read.
         if "signature_documentation" not in sym_cols:
             con.execute("ALTER TABLE symbols ADD COLUMN signature_documentation TEXT")
-        # Same for `symbols.is_out_of_project` (pending schema v5): add the
+        # Same for `symbols.is_out_of_project` (schema v5): add the
         # column only — enrich-refs never backfills the classification (that's
         # `cppgraph build`'s job over a COMPLETE index; this .scip may be
         # partial, and a whole-store classification is never this function's
@@ -2491,10 +2491,10 @@ class GraphStore:
         con = self._con
         changed_files = list(changed_files)
         with con:  # atomic: commit on success, rollback on error
-            # (0) an older store may lack `end_line` (v2), `documentation`
-            # (v3), `refs.roles` (v4) or `symbols.scip_kind`,
+            # (0) an older store may lack `end_line` (introduced in schema v3),
+            # `documentation` (v4), or `refs.roles` / `symbols.scip_kind` /
             # `symbols.signature_documentation` / `symbols.is_out_of_project`
-            # (pending v5); add them on demand — the same ALTER pattern
+            # (all v5); add them on demand — the same ALTER pattern
             # `enrich_references` uses for `refs.enclosing_id` — so the
             # re-insert below can write body extents, doc text, access roles,
             # fine-grained kinds, recorded signatures and the external-symbol

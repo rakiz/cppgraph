@@ -1,6 +1,7 @@
 # syntax=docker/dockerfile:1
 #
-# Build `scip-clang` v0.4.0 + the `enclosing_range` feature (PR #504) natively
+# Build `scip-clang` v0.4.0 + this repo's full patch bundle (see
+# scip-clang-patches/README.md for the current list) natively
 # for the CPU architecture of the machine running the build.
 #
 #   * arm64 (aarch64) host -> native arm64-linux binary (upstream doesn't ship one)

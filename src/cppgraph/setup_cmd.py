@@ -55,8 +55,9 @@ def platform_sources() -> tuple[str | None, str | None, bool]:
     """`(native_asset, native_patched_asset, host_can_build)` for this machine.
     `native_asset` is the prebuilt stock release asset name (upstream
     sourcegraph/scip-clang), or None when none is published. `native_patched_asset`
-    is the prebuilt patched (enclosing_range + ForwardDefinition +
-    ReadAccess/WriteAccess) asset name published by this project's own releases (see
+    is the prebuilt patched (this project's full patch bundle — see
+    `scip-clang-patches/README.md` for the current list)
+    asset name published by this project's own releases (see
     `scripts/publish-scip-clang-patched.sh`), or None when this host's platform has
     no published patched binary yet. `host_can_build` is True on Linux (a local
     patched build compiles a Linux binary for the host)."""
@@ -116,8 +117,8 @@ def _download_scip(bin_dir: Path, asset: str, version: str, p: Prompter) -> bool
 
 
 def _download_patched(bin_dir: Path, asset: str, version: str, p: Prompter) -> bool:
-    """Download a prebuilt patched binary (enclosing_range + ForwardDefinition +
-    ReadAccess/WriteAccess)
+    """Download a prebuilt patched binary (this project's full patch bundle —
+    see `scip-clang-patches/README.md` for the current list)
     from this project's own GitHub releases (published by
     `scripts/publish-scip-clang-patched.sh`), verified against its `.sha256`
     sidecar asset."""
@@ -162,7 +163,7 @@ def _build_scip(bin_dir: Path, p: Prompter) -> bool:
         return False
     p.note(
         "==> Building scip-clang locally with the patchset "
-        "(enclosing_range + ForwardDefinition + ReadAccess/WriteAccess) (~30-60 min)"
+        "(this project's full patch bundle — see scip-clang-patches/README.md) (~30-60 min)"
     )
     proc = subprocess.run([str(build), str(bin_dir)])
     return proc.returncode == 0
@@ -177,8 +178,8 @@ def _valid_sources(
         options.append(
             (
                 "download-patched",
-                "download prebuilt patched (enclosing_range + ForwardDefinition + "
-                "ReadAccess/WriteAccess) — ~1 min",
+                "download prebuilt patched (full patch bundle — see "
+                "scip-clang-patches/README.md) — ~1 min",
             )
         )
     if native:
