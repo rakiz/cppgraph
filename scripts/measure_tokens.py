@@ -336,7 +336,11 @@ _SUITE: list[tuple[str, list[tuple[str, str, str]]]] = [
     (
         "closest to grep — rare unique name (grep's raw dump is cheaper, until it reads)",
         [
-            ("setBlockNewUserShardedDDL", "setBlockNewUserShardedDDL", "raw grep wins; loses on read"),  # noqa: E501
+            (
+                "setBlockNewUserShardedDDL",
+                "setBlockNewUserShardedDDL",
+                "raw grep wins; loses on read",
+            ),  # noqa: E501
             (
                 "_amIFreshEnoughForPriorityTakeover",
                 "_amIFreshEnoughForPriorityTakeover",
@@ -367,8 +371,7 @@ def run_suite(src_root: str, store: GraphStore) -> None:
     print('Suite: "who calls NAME?" — grep vs cppgraph (untargeted, whole tree)')
     print(f"(tokens ~ chars / {CHARS_PER_TOKEN}, conservative for code; cppgraph = MCP JSON)\n")
     header = (
-        f"  {'symbol':<38}{'grep raw':>9}{'grep+read':>12}{'cppgraph':>10}"
-        f"{'verdict*':>12}   noise"
+        f"  {'symbol':<38}{'grep raw':>9}{'grep+read':>12}{'cppgraph':>10}{'verdict*':>12}   noise"
     )
     for tier, entries in _SUITE:
         print(f"── {tier}")
