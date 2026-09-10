@@ -1506,6 +1506,34 @@ class GraphStore:
             frontier = next_frontier
         return visited, truncated
 
+    def _induced_edges(self, ids: list[int], kind: str = "calls") -> list[Edge]:
+        """Every `kind` edge *induced* on an id set — both endpoints in it —
+        resolved to `Edge`, ordered by (src_id, dst_id). The shared pattern of
+        `call_corridor` and `component_containing`: an edge whose two ends both
+        belong to the set is part of the set's subgraph even when no walk needs
+        it as a tree edge (a chord between two corridor nodes completes a real
+        src->dst path through it; a chord inside a cycle is a route Tarjan never
+        walks but the picture must still show). `kind` is an internal literal,
+        never user input."""
+        placeholders = ",".join("?" * len(ids))
+        return [
+            Edge(kind=edge_kind, src=src_sym, dst=dst_sym, file=path, line=line)
+            for edge_kind, src_sym, dst_sym, path, line in self._con.execute(
+                f"""
+                SELECT e.kind, s.symbol, d.symbol, f.path, e.line
+                FROM edges e
+                JOIN symbols s ON s.id = e.src_id
+                JOIN symbols d ON d.id = e.dst_id
+                LEFT JOIN files f ON f.id = e.file_id
+                WHERE e.kind = ?
+                  AND e.src_id IN ({placeholders}) AND e.dst_id IN ({placeholders})
+                ORDER BY e.src_id, e.dst_id
+                """,
+                # ids twice: one IN per endpoint — an induced edge needs both ends in the set.
+                (kind, *ids, *ids),
+            ).fetchall()
+        ]
+
     def call_corridor(self, src: str, dst: str) -> tuple[list[Node], list[Edge], bool]:
         """Every node/edge lying on *some* `calls` path from `src` to `dst`.
 
@@ -1558,23 +1586,7 @@ class GraphStore:
                 ids,
             ).fetchall()
         ]
-        edges = [
-            Edge(kind="calls", src=src_sym, dst=dst_sym, file=path, line=line)
-            for src_sym, dst_sym, path, line in self._con.execute(
-                f"""
-                SELECT s.symbol, d.symbol, f.path, e.line
-                FROM edges e
-                JOIN symbols s ON s.id = e.src_id
-                JOIN symbols d ON d.id = e.dst_id
-                LEFT JOIN files f ON f.id = e.file_id
-                WHERE e.kind = 'calls'
-                  AND e.src_id IN ({placeholders}) AND e.dst_id IN ({placeholders})
-                ORDER BY e.src_id, e.dst_id
-                """,
-                # ids twice: one IN per endpoint — an induced edge needs both ends in the corridor.
-                ids + ids,
-            ).fetchall()
-        ]
+        edges = self._induced_edges(ids)
         return nodes, edges, truncated
 
     def impact(self, symbol: str, max_depth: int | None = None, kind: str = "calls") -> set[str]:
@@ -2473,6 +2485,57 @@ class GraphStore:
             reported.append([symbol for symbol, _path, _line in members])
         reported.sort(key=lambda ms: (-len(ms), ms))
         return reported[:limit], len(reported)
+
+    def component_containing(self, symbol: str) -> tuple[list[Node], list[Edge]]:
+        """The multi-member strongly-connected component containing `symbol`:
+        its member `Node`s (sorted by definition `file:line` then symbol — the
+        same order `strongly_connected_components` reports members in) plus
+        every `calls` edge *induced* on the member set (both endpoints members).
+        The symbol-centered view of the same Tarjan computation
+        (`_tarjan_sccs`) `strongly_connected_components` runs — never a second
+        SCC implementation. Induction is the point: a chord between two members
+        belongs to the cycle's picture even though nothing needs it to walk the
+        loop (`_induced_edges`).
+
+        Returns `([], [])` when `symbol` is in no multi-member cycle — including
+        an unknown symbol, which callers that need to tell the two apart check
+        first via `has_symbol` (as `build_export_json` does; the same convention
+        as `call_corridor`). A direct self-loop is a one-node cycle: a singleton
+        component, out of scope here exactly as it is out of
+        `strongly_connected_components`' reporting (size > 1).
+        """
+        sym_id = self._symbol_id(symbol)
+        if sym_id is None:
+            return [], []
+        adjacency: dict[int, list[int]] = {}
+        for src_id, dst_id in self._con.execute(
+            "SELECT src_id, dst_id FROM edges WHERE kind = 'calls'"
+        ).fetchall():
+            adjacency.setdefault(src_id, []).append(dst_id)
+        # Tarjan partitions ALL vertices into SCCs — every acyclic node is its own
+        # size-1 component — so len > 1 is what actually means "a real multi-member
+        # cycle" here (the same convention `strongly_connected_components` reports by).
+        comp = next((c for c in _tarjan_sccs(adjacency) if len(c) > 1 and sym_id in c), None)
+        if comp is None:
+            return [], []
+
+        ids = sorted(comp)
+        placeholders = ",".join("?" * len(ids))
+        nodes = [
+            Node(symbol=sym, display_name=name or "", file=path, line=line)
+            for sym, name, path, line in self._con.execute(
+                f"""
+                SELECT s.symbol, s.display_name, f.path, s.line
+                FROM symbols s
+                LEFT JOIN files f ON f.id = s.file_id
+                WHERE s.id IN ({placeholders})
+                """,
+                ids,
+            ).fetchall()
+        ]
+        nodes.sort(key=lambda n: (n.file or "", n.line if n.line is not None else -1, n.symbol))
+        edges = self._induced_edges(ids)
+        return nodes, edges
 
     def subgraph(
         self, symbol: str, depth: int = 2, direction: str = "both"

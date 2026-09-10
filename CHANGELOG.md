@@ -8,6 +8,30 @@ on-disk store also carries its own `schema_version` for forward-compatibility.
 
 ### Added
 
+- **Cycle mode on `export`/`view`/MCP `visualize`** — `mode="cycle"` renders
+  the multi-member call cycle (the strongly-connected component of the
+  `calls` subgraph) containing a symbol, the symbol-centered view of
+  `strongly_connected_components`: the cycle's members as nodes and every
+  `calls` edge induced on them as links (a chord between two members is
+  drawn even though nothing needs it to walk the loop). `depth`/`limit`
+  behave exactly as in path mode (context expansion around the members /
+  merged-count cap with `truncated`/`total`/`hops` reporting; `depth`
+  defaults to 0 — the pure cycle). Backed by a new
+  `GraphStore.component_containing()`, which reuses the existing Tarjan
+  computation and shares `call_corridor`'s induced-edges SQL via a new
+  `_induced_edges()` helper.
+- **MCP `visualize_boundary_violations`** — the visual counterpart of
+  `boundary_violations`: the edges crossing your declared layering rules
+  rendered as a self-contained HTML graph (nodes = every distinct endpoint
+  of a violating edge, edges = the violations themselves — direct, no
+  induction). Zero violations is a real, good outcome: a clean result with
+  a note, no HTML written or browser opened. On the CLI,
+  `boundary-violations --out PATH` writes the same graph.json beside the
+  stdout table (both surfaces share one `boundary_violations_graph()`
+  helper).
+
+### Fixed
+
 - **Path/corridor mode on `export`/`view`/MCP `visualize`** — `mode="path"`
   with `--dst <target>` renders how two symbols connect: the shortest
   `calls`-edge chain between them by default, `--expand-paths`/`expand_paths`

@@ -33,7 +33,13 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from cppgraph.cli import SOURCE_EXTS, build_export_json, extract_signature, read_source_snippet
+from cppgraph.cli import (
+    SOURCE_EXTS,
+    boundary_violations_graph,
+    build_export_json,
+    extract_signature,
+    read_source_snippet,
+)
 from cppgraph.export import is_test_file
 from cppgraph.filters import access_tag as _access_tag
 from cppgraph.filters import ambiguous_candidate_hint as _ambiguous_candidate_hint
@@ -71,6 +77,23 @@ DEFAULT_LIMIT = 40
 EXPLAIN_LIMIT = 10
 
 _UNKNOWN = "unknown symbol {symbol!r} — use the `find` tool to look up its exact SCIP symbol string"
+
+# The malformed-rules hint shared by `boundary_violations` and
+# `visualize_boundary_violations` (same rules, same expected shape).
+_RULES_HINT = (
+    "each rule is a [from_prefix, forbidden_prefix] pair, e.g. "
+    '[["common/", "platform/"]] = "common/ must not call platform/"'
+)
+
+# Shared by `visualize(mode="cycle")` when a valid symbol is in no multi-member
+# cycle: the same shape as the no-static-chain case — a real (good) outcome
+# stated plainly, no HTML written or opened, never an error.
+_NO_CYCLE_NOTE = (
+    "this symbol is not part of any multi-member call cycle (strongly-connected "
+    "component) — a lower bound, as always: runtime dispatch (virtual calls, "
+    "registered factories) can complete a cycle with no static edge. "
+    "`strongly_connected_components` lists every cycle the graph does contain."
+)
 
 # Shared by `path` and `visualize(mode="path")` when the static chain doesn't exist.
 _NO_STATIC_CHAIN_HINT = (
@@ -1262,13 +1285,7 @@ def boundary_violation_report(
             [tuple(r) for r in rules], edge_kinds=kinds, limit=limit
         )
     except ValueError as e:
-        return {
-            "error": f"invalid rules: {e}",
-            "hint": (
-                "each rule is a [from_prefix, forbidden_prefix] pair, e.g. "
-                '[["common/", "platform/"]] = "common/ must not call platform/"'
-            ),
-        }
+        return {"error": f"invalid rules: {e}", "hint": _RULES_HINT}
 
     def _name(symbol: str) -> str:
         return symbol if full_symbols else _label(symbol, store.get_node(symbol))
@@ -1795,9 +1812,10 @@ def make_export(
 ) -> dict[str, Any] | None:
     """Build the graph.json dict for a symbol, or None if unknown (see
     `cppgraph.cli.build_export_json`; `dst` is only used by mode="path", where
-    it must already be a resolved exact symbol). `depth=None` resolves
-    mode-aware inside `build_export_json`: 2 for deps, 0 for path (pure
-    chain/corridor unless the caller explicitly passes context depth)."""
+    it must already be a resolved exact symbol — cycle mode ignores it).
+    `depth=None` resolves mode-aware inside `build_export_json`: 2 for deps, 0
+    for path/cycle (the pure chain/corridor/cycle unless the caller explicitly
+    passes context depth)."""
     return build_export_json(
         store,
         symbol,
@@ -2440,6 +2458,86 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         )
 
     @mcp.tool()
+    def visualize_boundary_violations(
+        rules: list[list[str]],
+        edge_kinds: list[str] | None = None,
+        limit: int = DEFAULT_LIMIT,
+        full_symbols: bool = False,
+        open_browser: bool = True,
+    ) -> dict[str, Any]:
+        """Render the edges that cross your declared layering rules as a
+        self-contained HTML graph in a temp dir and (by default) open it in the
+        user's browser — the visual counterpart of `boundary_violations`, for
+        when a violations list is easier to judge as a picture. Same rules from
+        YOU ([from_prefix, forbidden_prefix] pairs, e.g.
+        [["common/", "platform/"]] = "no symbol defined under common/ may call
+        one defined under platform/"), same exact edges: nodes are every
+        distinct endpoint of a violating edge, edges are the violations
+        themselves (direct — the violation check already computed them; no
+        induction/BFS). A violation matching several rules appears once per
+        rule, drawn from the same pair of endpoints. edge_kinds defaults to
+        ["calls", "inherits"] ("implements"/"typed-by" opt-in). `limit` caps
+        the list (default 40) — the graph renders the reported (capped)
+        violations and the reply flags `truncated: true` with the full `total`
+        when more exist. full_symbols=True labels nodes with the raw SCIP
+        strings instead of readable display names. With ZERO violations
+        nothing is written or opened — 0 is a real, good outcome, not an
+        error: the reply says so (`violations: 0` + a note, `path: null`)
+        instead of launching a browser for an empty picture, and the standing
+        lower-bound caveat still applies (0 means no *statically indexed* edge
+        crosses these rules — runtime dispatch can). Malformed rules come back
+        as an `{"error", "hint"}` dict, not an exception. Returns the HTML
+        path and the command to open it (in case the browser didn't
+        launch)."""
+        from cppgraph.viz_html import open_in_browser, write_temp_html
+
+        s = stores.get()
+        if s is None:
+            return _no_graph_notice()
+        kinds = tuple(edge_kinds) if edge_kinds else ("calls", "inherits")
+        try:
+            violations, total = s.boundary_violations(
+                [tuple(r) for r in rules], edge_kinds=kinds, limit=limit
+            )
+        except ValueError as e:
+            return {"error": f"invalid rules: {e}", "hint": _RULES_HINT}
+        # Deliberate UX, not the general capped-output pattern: 0 violations is a
+        # clean, successful outcome — say so instead of writing/opening a
+        # confusing near-empty HTML.
+        if not violations:
+            return {
+                "violations": 0,
+                "total": total,
+                "truncated": False,
+                "path": None,
+                "note": (
+                    "no edge crosses these rules — nothing to render, no HTML "
+                    "written or opened (0 is a clean outcome, not an error; the "
+                    "lower-bound caveat still applies: runtime dispatch can "
+                    "cross a boundary with no static edge)"
+                ),
+            }
+        graph_json = boundary_violations_graph(s, violations)
+        if full_symbols:
+            # The other tools' full_symbols convention: raw SCIP strings as the
+            # labels, not the readable display names.
+            for g_node in graph_json["nodes"]:
+                g_node["label"] = g_node["id"]
+        html_path = write_temp_html(graph_json)
+        result: dict[str, Any] = {
+            "path": str(html_path),
+            "nodes": len(graph_json["nodes"]),
+            "edges": len(graph_json["links"]),
+            "truncated": total > len(violations),
+            "total": total,
+            "open_command": f"open {html_path}",
+        }
+        if open_browser:
+            launched, _ = open_in_browser(html_path)
+            result["opened"] = launched
+        return result
+
+    @mcp.tool()
     def api_surface(
         module_prefix: str,
         limit: int = DEFAULT_LIMIT,
@@ -2648,7 +2746,21 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         reply carries `truncated: true` and the pre-cut node count as `total`.
         With no static chain the reply says so (`found: false` + a hint) instead
         of writing/opening a near-empty HTML; `hops` reports the number of
-        `calls` edges in the chain/corridor proper. Returns the HTML path and
+        `calls` edges in the chain/corridor proper. mode="cycle" = the
+        multi-member call cycle (strongly-connected component of the `calls`
+        subgraph) containing `symbol` — the visual counterpart of
+        `strongly_connected_components`, centered on one of its members. Nodes
+        are the cycle's members, edges every `calls` edge induced on them (a
+        chord between two members is drawn even though nothing needs it to walk
+        the loop). `dst` is not used in this mode and ignored if passed (a cycle
+        is found from `symbol` alone; passing one adds a note to the reply).
+        depth/limit behave EXACTLY as in path mode: depth > 0 unions every
+        member's neighbourhood into the graph (default 0 — the pure cycle),
+        limit caps the merged node count; the reply carries `hops` (the cycle's
+        own `calls` edges, before context expansion), `truncated` and `total`.
+        A valid symbol in no multi-member cycle returns `found: false` + a note
+        (no HTML written/opened — the same clean shape as path mode's no-chain
+        case). Returns the HTML path and
         the command to open it (in case the browser didn't launch)."""
         from cppgraph.viz_html import open_in_browser, write_temp_html
 
@@ -2684,6 +2796,15 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         if graph_json is None:
             return {"error": _UNKNOWN.format(symbol=symbol)}
         if not graph_json["nodes"]:
+            if mode == "cycle":
+                # A valid symbol in no multi-member cycle: a real (good)
+                # outcome, stated plainly — no HTML written or opened.
+                return {
+                    "src": symbol,
+                    "found": False,
+                    "path": None,
+                    "note": _NO_CYCLE_NOTE,
+                }
             return {
                 "src": symbol,
                 "dst": dst_resolved,
@@ -2692,8 +2813,8 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
                 "truncated": bool(graph_json.get("truncated", False)),
                 "hint": _NO_STATIC_CHAIN_HINT,
             }
-        # Strip build_export_json's path-mode metadata before embedding: the
-        # rendered window.GRAPH stays a pure graphify container.
+        # Strip build_export_json's path/cycle-mode metadata before embedding:
+        # the rendered window.GRAPH stays a pure graphify container.
         truncated = bool(graph_json.pop("truncated", False))
         total = int(graph_json.pop("total", 0))
         core_edges = int(graph_json.pop("core_edges", 0))
@@ -2705,11 +2826,16 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
             "edges": len(graph_json["links"]),
             "open_command": f"open {html_path}",
         }
-        if mode == "path":
-            result["dst"] = dst_resolved
+        if mode in ("path", "cycle"):
             result["hops"] = core_edges
             result["truncated"] = truncated
             result["total"] = total
+        if mode == "path":
+            result["dst"] = dst_resolved
+        if mode == "cycle" and dst is not None:
+            result["note"] = (
+                "dst is ignored in mode='cycle' (a cycle is found from the symbol alone)"
+            )
         if open_browser:
             launched, _ = open_in_browser(html_path)
             result["opened"] = launched

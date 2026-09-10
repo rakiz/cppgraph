@@ -1969,6 +1969,47 @@ def test_boundary_violations_requires_a_rule(boundary_graph: Path) -> None:
         main(["boundary-violations", "--graph", str(boundary_graph)])
 
 
+def test_boundary_violations_out_writes_violation_graph(
+    boundary_graph: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # --out: in addition to the stdout table, the violating edges become a
+    # viewable graphify graph.json (nodes = the edges' distinct endpoints).
+    out = tmp_path / "violations.json"
+    exit_code = main(
+        [
+            "boundary-violations",
+            "--graph",
+            str(boundary_graph),
+            "--rule",
+            "common/:platform/",
+            "--out",
+            str(out),
+        ]
+    )
+    assert exit_code == 0
+    data = json.loads(out.read_text())
+    assert {n["id"] for n in data["nodes"]} == {"common_fn", "platform_secret"}
+    assert [(lk["source"], lk["target"], lk["relation"]) for lk in data["links"]] == [
+        ("common_fn", "platform_secret", "calls")
+    ]
+    out_text = capsys.readouterr().out
+    # the same notice style `export` prints, pointing at the bundled viewer
+    assert "exported 2 nodes, 1 edges" in out_text
+    assert "viz/cppgraph-viz.html" in out_text
+    assert str(out) in out_text
+
+
+def test_boundary_violations_without_out_prints_no_graph_notice(
+    boundary_graph: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # --out is opt-in: the plain table carries no export notice.
+    exit_code = main(
+        ["boundary-violations", "--graph", str(boundary_graph), "--rule", "common/:platform/"]
+    )
+    assert exit_code == 0
+    assert "viz/cppgraph-viz.html" not in capsys.readouterr().out
+
+
 # --- api-surface ---------------------------------------------------------------
 
 
@@ -2916,6 +2957,111 @@ def test_view_path_expand_paths_renders_corridor(
     assert "4 nodes, 4 edges" in out  # the corridor, not a 3-node chain
     html_path = Path(out.split("open it with: open ")[1].strip())
     assert "window.GRAPH" in html_path.read_text(encoding="utf-8")
+
+
+# --- export/view --mode cycle: the containing SCC as a viewable graph -----------
+
+
+def _cycle_graph_path(tmp_path: Path, *, with_outsiders: bool = False) -> Path:
+    """n1 -> n2 -> n3 -> n1 plus the chord n1 -> n3; `with_outsiders` adds a
+    caller into the cycle and a callee out of it (context, not members)."""
+    c1 = "cxx . . $ mongo/Loop#n1(a1)."
+    c2 = "cxx . . $ mongo/Loop#n2(a2)."
+    c3 = "cxx . . $ mongo/Loop#n3(a3)."
+    caller = "cxx . . $ mongo/Loop#caller(a4)."
+    callee = "cxx . . $ mongo/Loop#callee(a5)."
+    graph = Graph()
+    members = [(c1, "n1", 1), (c2, "n2", 2), (c3, "n3", 3)]
+    if with_outsiders:
+        members += [(caller, "caller", 8), (callee, "callee", 9)]
+    for sym, name, line in members:
+        graph.nodes[sym] = Node(symbol=sym, display_name=name, file="loop.cpp", line=line)
+    for src, dst, line in [
+        (c1, c2, 1),
+        (c2, c3, 2),
+        (c3, c1, 3),
+        (c1, c3, 4),  # the chord — induced, not part of the minimal loop
+        *([(caller, c1, 8), (c3, callee, 9)] if with_outsiders else []),
+    ]:
+        graph.add_edge("calls", src, dst, file="loop.cpp", line=line)
+    path = tmp_path / "cycle.db"
+    write_sqlite(graph, path)
+    return path
+
+
+def test_export_cycle_mode_writes_cycle(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    path = _cycle_graph_path(tmp_path)
+    out = tmp_path / "c.json"
+    # Plain name, no --dst (not required in cycle mode).
+    rc = main(["export", "--graph", str(path), "n1", "--mode", "cycle", "--out", str(out)])
+    assert rc == 0
+    data = json.loads(out.read_text())
+    assert set(data) == {"nodes", "links"}  # metadata stripped from the file
+    assert len(data["nodes"]) == 3
+    assert len(data["links"]) == 4  # the 3 loop edges + the induced chord
+    assert "cycle graph" in capsys.readouterr().out
+
+
+def test_export_cycle_mode_no_cycle_prints_message(
+    graph_path: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The shared fixture is acyclic: valid symbol, no cycle — the message says
+    # so explicitly (the empty graph.json is still written, as for path mode).
+    out = tmp_path / "empty.json"
+    rc = main(
+        ["export", "--graph", str(graph_path), "caller", "--mode", "cycle", "--out", str(out)]
+    )
+    assert rc == 0
+    out_text = capsys.readouterr().out
+    assert "no multi-member call cycle contains" in out_text
+    assert "strongly-connected-components" in out_text  # points at the list view
+    assert json.loads(out.read_text())["nodes"] == []
+
+
+def test_export_cycle_mode_dst_gets_an_ignored_note(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A --dst passed with --mode cycle is meaningless: not required, never
+    # resolved — but noted, not silently swallowed.
+    path = _cycle_graph_path(tmp_path)
+    out = tmp_path / "c.json"
+    rc = main(
+        [
+            "export",
+            "--graph",
+            str(path),
+            "n1",
+            "--mode",
+            "cycle",
+            "--dst",
+            "no-such-symbol",
+            "--out",
+            str(out),
+        ]
+    )
+    assert rc == 0
+    assert "--dst is ignored in --mode cycle" in capsys.readouterr().out
+    assert len(json.loads(out.read_text())["nodes"]) == 3
+
+
+def test_view_cycle_mode_renders(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    path = _cycle_graph_path(tmp_path, with_outsiders=True)
+    rc = main(["view", "--graph", str(path), "n1", "--mode", "cycle", "--depth", "1", "--no-open"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "5 nodes, 6 edges" in out  # members + both outsider neighbours
+    html_path = Path(out.split("open it with: open ")[1].strip())
+    assert "window.GRAPH" in html_path.read_text(encoding="utf-8")
+
+
+def test_view_cycle_mode_no_cycle_skips_html(
+    graph_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    rc = main(["view", "--graph", str(graph_path), "caller", "--mode", "cycle", "--no-open"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "no multi-member call cycle" in out
+    assert ".html" not in out  # no empty/confusing HTML written or opened
 
 
 # --- symbol resolution: accept a plain name, not just the exact SCIP string ---

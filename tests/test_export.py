@@ -468,3 +468,176 @@ def test_path_mode_limit_core_alone_exceeding_keeps_a_prefix(tmp_path: Path) -> 
     assert g["truncated"] is True
     assert g["total"] == 6
     assert g["core_edges"] == 5
+
+
+# --- mode="cycle": the SCC containing a symbol, as a viewable graph -------------
+
+
+C1 = "cxx . . $ mongo/Loop#n1(a1)."
+C2 = "cxx . . $ mongo/Loop#n2(a2)."
+C3 = "cxx . . $ mongo/Loop#n3(a3)."
+C_CALLER = "cxx . . $ mongo/Loop#caller(a4)."
+C_CALLEE = "cxx . . $ mongo/Loop#callee(a5)."
+
+_CYCLE_EDGES = [(C1, C2), (C2, C3), (C3, C1)]
+_CHORD = (C1, C3)
+
+
+def _cycle_store(tmp_path: Path) -> GraphStore:
+    """n1 -> n2 -> n3 -> n1 (a 3-member cycle) with a chord n1 -> n3; `caller`
+    calls into the cycle and `callee` is called out of it — neighbours, never
+    members."""
+    graph = Graph()
+    for s, name, line in [
+        (C1, "n1", 1),
+        (C2, "n2", 2),
+        (C3, "n3", 3),
+        (C_CALLER, "caller", 8),
+        (C_CALLEE, "callee", 9),
+    ]:
+        graph.nodes[s] = Node(symbol=s, display_name=name, file="loop.cpp", line=line)
+    for i, (src, dst) in enumerate([*_CYCLE_EDGES, _CHORD]):
+        graph.add_edge("calls", src, dst, file="loop.cpp", line=i + 1)
+    graph.add_edge("calls", C_CALLER, C1, file="loop.cpp", line=8)
+    graph.add_edge("calls", C3, C_CALLEE, file="loop.cpp", line=9)
+    db = tmp_path / "cycle.db"
+    write_sqlite(graph, db)
+    return GraphStore(db)
+
+
+def test_component_containing_returns_members_and_induced_edges(tmp_path: Path) -> None:
+    # Any member identifies the same component; the chord n1 -> n3 is INDUCED
+    # (both endpoints are members) — mirroring call_corridor's "induced not
+    # just walked" rigour — while the caller's edge in and the call out to
+    # callee are excluded (an endpoint outside the component).
+    store = _cycle_store(tmp_path)
+    nodes, edges = store.component_containing(C2)
+    assert {n.symbol for n in nodes} == {C1, C2, C3}
+    assert {(e.src, e.dst) for e in edges} == {*_CYCLE_EDGES, _CHORD}
+    assert all(e.kind == "calls" for e in edges)
+
+
+def test_component_containing_members_sorted_by_definition_site(tmp_path: Path) -> None:
+    store = _cycle_store(tmp_path)
+    nodes, _ = store.component_containing(C1)
+    assert [n.symbol for n in nodes] == [C1, C2, C3]  # file:line order (all f.cpp)
+
+
+def test_component_containing_no_cycle_is_empty(tmp_path: Path) -> None:
+    store = _store(tmp_path)  # a -> b -> c, d -> a: acyclic
+    for sym in (A, B, C, D):
+        assert store.component_containing(sym) == ([], [])
+
+
+def test_component_containing_self_loop_is_not_a_cycle(tmp_path: Path) -> None:
+    # A direct self-loop is a one-node (singleton) SCC — out of scope, the same
+    # size>1 rule `strongly_connected_components` reports by.
+    graph = Graph()
+    graph.add_node(A, display_name="a")
+    graph.add_edge("calls", A, A, file="f.cpp", line=1)
+    db = tmp_path / "self.db"
+    write_sqlite(graph, db)
+    store = GraphStore(db)
+    assert store.component_containing(A) == ([], [])
+
+
+def test_component_containing_unknown_symbol_is_empty(tmp_path: Path) -> None:
+    # Callers that must tell "unknown" from "no cycle" check has_symbol first
+    # (as build_export_json does) — the store method itself just stays empty.
+    store = _cycle_store(tmp_path)
+    assert store.component_containing("nope") == ([], [])
+
+
+def test_cycle_mode_build_helper_returns_the_cycle(tmp_path: Path) -> None:
+    from cppgraph.cli import build_export_json
+
+    store = _cycle_store(tmp_path)
+    g = build_export_json(store, C1, mode="cycle")
+    assert g is not None
+    assert {n["id"] for n in g["nodes"]} == {C1, C2, C3}
+    assert {(lk["source"], lk["target"]) for lk in g["links"]} == {*_CYCLE_EDGES, _CHORD}
+    assert g["truncated"] is False
+    assert g["total"] == 3
+    assert g["core_edges"] == 4  # the cycle's own edges, chord included
+
+
+def test_cycle_mode_unknown_symbol_is_none(tmp_path: Path) -> None:
+    from cppgraph.cli import build_export_json
+
+    store = _cycle_store(tmp_path)
+    assert build_export_json(store, "nope", mode="cycle") is None
+
+
+def test_cycle_mode_no_cycle_is_empty_graph_not_none(tmp_path: Path) -> None:
+    # Valid symbol, no cycle: an EMPTY graph (0 nodes) — distinct from the None
+    # "unknown symbol" reply, so callers can tell the two apart (the same
+    # convention mode="path" established for "no static path").
+    from cppgraph.cli import build_export_json
+
+    store = _store(tmp_path)
+    g = build_export_json(store, A, mode="cycle")
+    assert g is not None
+    assert g["nodes"] == []
+    assert g["links"] == []
+
+
+def test_cycle_mode_ignores_dst(tmp_path: Path) -> None:
+    # dst is meaningless in cycle mode and IGNORED (documented): a cycle is
+    # found from the symbol alone, so even an unknown one is never resolved.
+    from cppgraph.cli import build_export_json
+
+    store = _cycle_store(tmp_path)
+    g = build_export_json(store, C1, mode="cycle", dst="not-a-symbol")
+    assert g is not None
+    assert {n["id"] for n in g["nodes"]} == {C1, C2, C3}
+
+
+def test_cycle_mode_depth_expands_context(tmp_path: Path) -> None:
+    # depth=1 pulls the outside caller and callee in around the members — the
+    # SAME mixed-edge-kind neighbourhood walk path/deps mode uses.
+    from cppgraph.cli import build_export_json
+
+    store = _cycle_store(tmp_path)
+    g = build_export_json(store, C1, mode="cycle", depth=1)
+    assert {n["id"] for n in g["nodes"]} == {C1, C2, C3, C_CALLER, C_CALLEE}
+    assert {(lk["source"], lk["target"]) for lk in g["links"]} == {
+        *_CYCLE_EDGES,
+        _CHORD,
+        (C_CALLER, C1),
+        (C3, C_CALLEE),
+    }
+    assert g["core_edges"] == 4  # the cycle proper, unchanged by the context union
+
+
+def test_cycle_mode_default_depth_stays_pure_cycle(tmp_path: Path) -> None:
+    # THE backward-compatibility guard, mirroring path mode's: omitting depth
+    # (deps mode's default is 2!) must give the pure cycle — no context.
+    from cppgraph.cli import build_export_json
+
+    store = _cycle_store(tmp_path)
+    omitted = build_export_json(store, C1, mode="cycle")
+    explicit_zero = build_export_json(store, C1, mode="cycle", depth=0)
+    assert omitted is not None and explicit_zero is not None
+    assert omitted == explicit_zero
+    assert {n["id"] for n in omitted["nodes"]} == {C1, C2, C3}
+    assert C_CALLER not in {n["id"] for n in omitted["nodes"]}
+    assert C_CALLEE not in {n["id"] for n in omitted["nodes"]}
+
+
+def test_cycle_mode_limit_truncates_and_reports(tmp_path: Path) -> None:
+    from cppgraph.cli import build_export_json
+
+    store = _cycle_store(tmp_path)
+    g = build_export_json(store, C1, mode="cycle", depth=1, limit=4)
+    assert g is not None
+    # The cycle (the actual answer) is kept whole; the first-discovered context
+    # neighbour (the caller, found from member n1) keeps its seat, the callee
+    # (found from n3) is the overflow that gets cut, edge and all.
+    assert {n["id"] for n in g["nodes"]} == {C1, C2, C3, C_CALLER}
+    assert {(lk["source"], lk["target"]) for lk in g["links"]} == {
+        *_CYCLE_EDGES,
+        _CHORD,
+        (C_CALLER, C1),
+    }
+    assert g["truncated"] is True
+    assert g["total"] == 5

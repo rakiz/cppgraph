@@ -177,7 +177,7 @@ row is not a dead-code order, a cycle is not a bad-architecture finding.
 | `line_span` | rank definitions by body extent (end_line - start, largest first); needs a graph indexed with a #504-built scip-clang | --graph, --limit, --exclude-tests/--no-exclude-tests, --full-symbols, --include-path PREFIX, --exclude-path PREFIX |
 | `no_incoming_calls` | defined callables with zero incoming calls edges (a fact, not a dead-code verdict); needs a graph indexed with a #504-built scip-clang | --graph, --limit, --exclude-tests/--no-exclude-tests, --full-symbols, --include-path PREFIX, --exclude-path PREFIX |
 | `strongly-connected-components` | cycles in the calls graph: groups of 2+ symbols that can all reach each other (a fact, not a bad-architecture verdict) | --graph, --limit, --exclude-tests/--no-exclude-tests, --full-symbols, --include-path PREFIX, --exclude-path PREFIX |
-| `boundary-violations` | declared-layering conformance: list calls/inherits edges that cross a rule you supply (zero false positives — each hit is a real edge) | --graph, --rule FROM:FORBIDDEN*, --kind, --limit, --full-symbols |
+| `boundary-violations` | declared-layering conformance: list calls/inherits edges that cross a rule you supply (zero false positives — each hit is a real edge) | --graph, --rule FROM:FORBIDDEN*, --kind, --limit, --full-symbols, --out PATH |
 <!-- /cppgraph-gen -->
 
 ```bash
@@ -199,6 +199,9 @@ instead: the shortest chain by default, or with `--expand-paths` the corridor
 of *every* route between them (two capped BFS passes intersected). `--depth N`
 there means context around the chain/corridor (default 0 — the pure answer),
 and `--limit` caps the node count (default 40), reporting truncation.
+`--mode cycle` renders the multi-member call cycle containing a symbol
+instead: nodes are the cycle's members, edges every `calls` edge induced on
+them; `--dst` is not used for this mode.
 
 <!-- cppgraph-gen:explain export view -->
 | Command | Purpose (from `--help`) | Arguments |

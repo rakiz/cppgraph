@@ -465,7 +465,11 @@ designing the builder so this isn't a later rewrite:
     `boundary_violations` (declared-layering conformance — rules supplied per
     query by the caller, the graph stores no intended architecture; every hit
     is a real edge, zero false positives, and 0 hits a lower bound, never a
-     conformance verdict), `api_surface` (the actually-used external surface
+     conformance verdict), `visualize_boundary_violations` (the same check
+    drawn as a self-contained HTML graph — nodes are the violating edges'
+    endpoints, edges the violations themselves; with 0 violations nothing is
+    written or opened, a clean outcome not an error), `api_surface` (the
+    actually-used external surface
     of a module — definitions under a prefix called/referenced from outside
     it, separate `external_calls`/`external_refs` counters ranked by their
     sum; calls-only with a note on a `--no-references` store), `outline`

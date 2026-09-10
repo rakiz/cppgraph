@@ -8,6 +8,8 @@ tiny fixture store — no transport needed.
 
 from __future__ import annotations
 
+import json
+import re
 import sqlite3
 import subprocess
 from pathlib import Path
@@ -827,6 +829,106 @@ def test_boundary_violations_tool_registered_and_routes_through_call(
     result = tool(rules=[["common/", "platform/"]])
     assert result["total"] == 1
     assert result["violations"][0]["dst"] == "platform_secret"
+
+
+def test_visualize_boundary_violations_renders_violations(tmp_path: Path) -> None:
+    """End-to-end: the violations become a written (openable) HTML graph whose
+    nodes are the violating edges' distinct endpoints — the same response-shape
+    conventions as `visualize`."""
+    from cppgraph.mcp_server import build_server
+
+    graph = Graph()
+    graph.add_edge("calls", "common_fn", "platform_secret", file="common/util.cpp", line=9)
+    graph.nodes["common_fn"].file = "common/util.cpp"
+    graph.nodes["platform_secret"].file = "platform/hidden.cpp"
+    path = tmp_path / "g.db"
+    write_sqlite(graph, path)
+    server = build_server(str(path))
+    viz = server._tool_manager._tools["visualize_boundary_violations"].fn
+    r = viz(rules=[["common/", "platform/"]], open_browser=False)
+    assert "error" not in r
+    assert r["nodes"] == 2 and r["edges"] == 1
+    assert r["truncated"] is False and r["total"] == 1
+    assert Path(r["path"]).exists()
+    assert "window.GRAPH" in Path(r["path"]).read_text(encoding="utf-8")
+    assert "open_command" in r
+    assert "opened" not in r  # open_browser=False: only the command is returned
+
+
+def test_visualize_boundary_violations_zero_violations_skip_html(tmp_path: Path) -> None:
+    """0 violations is a real, good outcome — a clean result saying so, and NO
+    HTML written or browser opened for an empty picture (even with
+    open_browser=True: there is nothing to open)."""
+    from cppgraph.mcp_server import build_server
+
+    graph = Graph()
+    # A legal downward edge only: platform/ -> common/ crosses nothing.
+    graph.add_edge("calls", "platform_fn", "common_fn", file="platform/io.cpp", line=1)
+    graph.nodes["platform_fn"].file = "platform/io.cpp"
+    graph.nodes["common_fn"].file = "common/util.cpp"
+    path = tmp_path / "g.db"
+    write_sqlite(graph, path)
+    server = build_server(str(path))
+    viz = server._tool_manager._tools["visualize_boundary_violations"].fn
+    r = viz(rules=[["common/", "platform/"]], open_browser=True)
+    assert r["violations"] == 0
+    assert r["total"] == 0
+    assert r["path"] is None
+    assert "note" in r
+    assert "opened" not in r
+    assert "open_command" not in r
+
+
+def test_visualize_boundary_violations_invalid_rules_are_error(tmp_path: Path) -> None:
+    """Malformed rules: the same `{"error", "hint"}` dict the report tool
+    returns, not an exception."""
+    from cppgraph.mcp_server import build_server
+
+    graph = Graph()
+    graph.add_node("a")
+    path = tmp_path / "g.db"
+    write_sqlite(graph, path)
+    server = build_server(str(path))
+    viz = server._tool_manager._tools["visualize_boundary_violations"].fn
+    r = viz(rules=[["common/"]])  # not a pair
+    assert "error" in r
+    assert "[from_prefix, forbidden_prefix]" in r["hint"]
+
+
+def _embedded_graph(html_path: str) -> dict:
+    """Parse the window.GRAPH JSON out of a standalone viz HTML — the tool
+    response carries only counts; the node labels live in the container."""
+    html = Path(html_path).read_text(encoding="utf-8")
+    m = re.search(r"window\.GRAPH = (.*?);</script>", html, re.DOTALL)
+    assert m is not None
+    return json.loads(m.group(1))
+
+
+def test_visualize_boundary_violations_full_symbols_labels_raw_scip(tmp_path: Path) -> None:
+    """full_symbols=True labels the graph's nodes with the raw SCIP strings —
+    the same full_symbols convention as every other tool — instead of the
+    readable display names the default labels carry."""
+    from cppgraph.mcp_server import build_server
+
+    src = "cxx . . $ common/util#helper(a1)."
+    dst = "cxx . . $ platform/secret#impl(a2)."
+    graph = Graph()
+    graph.nodes[src] = Node(symbol=src, display_name="helper", file="common/util.cpp", line=1)
+    graph.nodes[dst] = Node(symbol=dst, display_name="impl", file="platform/hidden.cpp", line=2)
+    graph.add_edge("calls", src, dst, file="common/util.cpp", line=3)
+    path = tmp_path / "g.db"
+    write_sqlite(graph, path)
+    server = build_server(str(path))
+    viz = server._tool_manager._tools["visualize_boundary_violations"].fn
+
+    r = viz(rules=[["common/", "platform/"]], open_browser=False)
+    default_graph = _embedded_graph(r["path"])
+    assert {n["label"] for n in default_graph["nodes"]} == {"helper", "impl"}
+
+    r_full = viz(rules=[["common/", "platform/"]], full_symbols=True, open_browser=False)
+    full_graph = _embedded_graph(r_full["path"])
+    assert {n["id"] for n in full_graph["nodes"]} == {src, dst}
+    assert all(n["label"] == n["id"] for n in full_graph["nodes"])  # raw SCIP labels
 
 
 # --- api_surface ---------------------------------------------------------------
@@ -2200,6 +2302,111 @@ def test_visualize_tool_path_mode_limit_truncation_reported(tmp_path: Path) -> N
     )
     assert r["nodes"] == 4 and r["truncated"] is True and r["total"] == 5
     assert r["hops"] == 4
+
+
+# --- visualize mode="cycle": the containing SCC as a viewable graph -------------
+
+
+def _cycle_server(tmp_path: Path, *, with_outsiders: bool = False):
+    """n1 -> n2 -> n3 -> n1 (plus the chord n1 -> n3) as a built server;
+    `with_outsiders` adds a caller into the cycle and a callee out of it
+    (context, not members)."""
+    from cppgraph.mcp_server import build_server
+
+    c1 = "cxx . . $ mongo/Loop#n1(a1)."
+    c2 = "cxx . . $ mongo/Loop#n2(a2)."
+    c3 = "cxx . . $ mongo/Loop#n3(a3)."
+    caller = "cxx . . $ mongo/Loop#caller(a4)."
+    callee = "cxx . . $ mongo/Loop#callee(a5)."
+    graph = Graph()
+    members = [(c1, "n1", 1), (c2, "n2", 2), (c3, "n3", 3)]
+    if with_outsiders:
+        members += [(caller, "caller", 8), (callee, "callee", 9)]
+    for sym, name, line in members:
+        graph.nodes[sym] = Node(symbol=sym, display_name=name, file="loop.cpp", line=line)
+    for src, dst, line in [
+        (c1, c2, 1),
+        (c2, c3, 2),
+        (c3, c1, 3),
+        (c1, c3, 4),  # the chord — induced, not part of the minimal loop
+        *([(caller, c1, 8), (c3, callee, 9)] if with_outsiders else []),
+    ]:
+        graph.add_edge("calls", src, dst, file="loop.cpp", line=line)
+    db = tmp_path / "cycle.db"
+    write_sqlite(graph, db)
+    return build_server(str(db))
+
+
+def test_visualize_tool_cycle_mode_renders_cycle(tmp_path: Path) -> None:
+    """mode="cycle" renders the multi-member SCC containing the symbol (a
+    plain unique name resolves like in every other mode) — members as nodes,
+    induced edges as links, chord included."""
+    server = _cycle_server(tmp_path)
+    viz = server._tool_manager._tools["visualize"].fn
+    r = viz("n1", mode="cycle", open_browser=False)
+    assert "error" not in r
+    assert r["mode"] == "cycle"
+    assert r["nodes"] == 3 and r["edges"] == 4  # the loop + the induced chord
+    assert r["hops"] == 4
+    assert r["truncated"] is False and r["total"] == 3
+    assert Path(r["path"]).exists()
+    assert "window.GRAPH" in Path(r["path"]).read_text(encoding="utf-8")
+    assert "dst" not in r  # dst plays no part in cycle mode
+
+
+def test_visualize_tool_cycle_mode_no_cycle_says_found_false(tmp_path: Path) -> None:
+    """A valid symbol in no multi-member cycle: found=false + a note, no HTML
+    written or opened (the clean shape of path mode's no-chain case)."""
+    server = _chain_server(tmp_path)  # caller -> mid -> makeResumeToken: acyclic
+    viz = server._tool_manager._tools["visualize"].fn
+    r = viz("caller", mode="cycle", open_browser=False)
+    assert r["found"] is False
+    assert r["path"] is None
+    assert "note" in r
+    assert "strongly_connected_components" in r["note"]
+
+
+def test_visualize_tool_cycle_mode_depth_expands_context(tmp_path: Path) -> None:
+    """depth=1 in cycle mode unions every member's neighbourhood into the
+    graph (the same walk path/deps modes use) — the outside caller and callee
+    join their cycle members."""
+    server = _cycle_server(tmp_path, with_outsiders=True)
+    viz = server._tool_manager._tools["visualize"].fn
+    r = viz("n1", mode="cycle", depth=1, open_browser=False)
+    assert r["nodes"] == 5 and r["edges"] == 6
+    assert r["hops"] == 4  # the cycle proper, unchanged by the context union
+
+
+def test_visualize_tool_cycle_mode_omitted_depth_stays_pure(tmp_path: Path) -> None:
+    """Backward-compatibility guard (mirrors path mode's): the deps-mode depth
+    default of 2 must NOT leak into cycle mode — omitting depth keeps the pure
+    cycle, however many context neighbours are one hop away."""
+    server = _cycle_server(tmp_path, with_outsiders=True)
+    viz = server._tool_manager._tools["visualize"].fn
+    r = viz("n1", mode="cycle", open_browser=False)
+    assert r["nodes"] == 3 and r["edges"] == 4  # members only, no caller/callee
+
+
+def test_visualize_tool_cycle_mode_limit_truncation_reported(tmp_path: Path) -> None:
+    """limit caps the merged node count (cycle kept whole, context cut) and
+    the response reports the `truncated`/`total` pair like path mode."""
+    server = _cycle_server(tmp_path, with_outsiders=True)
+    viz = server._tool_manager._tools["visualize"].fn
+    r = viz("n1", mode="cycle", depth=1, limit=4, open_browser=False)
+    assert r["nodes"] == 4 and r["truncated"] is True and r["total"] == 5
+    assert r["hops"] == 4
+
+
+def test_visualize_tool_cycle_mode_dst_gets_an_ignored_note(tmp_path: Path) -> None:
+    """A dst passed with mode="cycle" is meaningless: not required, never
+    resolved — but noted, not silently swallowed (the CLI's
+    test_export_cycle_mode_dst_gets_an_ignored_note covers the same note)."""
+    server = _cycle_server(tmp_path)
+    viz = server._tool_manager._tools["visualize"].fn
+    r = viz("n1", mode="cycle", dst="ignored_target", open_browser=False)
+    assert "error" not in r
+    assert r["note"] == "dst is ignored in mode='cycle' (a cycle is found from the symbol alone)"
+    assert r["nodes"] == 3 and r["edges"] == 4  # the cycle itself, dst played no part
 
 
 def test_discover_graph_finds_nearest_cppgraph(tmp_path: Path) -> None:
