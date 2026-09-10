@@ -16,7 +16,7 @@ from cppgraph.builder import READ_ACCESS, WRITE_ACCESS
 from cppgraph.export import is_test_file
 
 if TYPE_CHECKING:
-    from cppgraph.model import Edge, Reference
+    from cppgraph.model import Edge, Node, Reference
     from cppgraph.store import GraphStore
 
 
@@ -198,3 +198,50 @@ def filter_by_access(refs: list[Reference], access: str) -> list[Reference]:
     if access == "read":
         return [r for r in refs if not r.roles & WRITE_ACCESS]
     raise ValueError(f"invalid access filter {access!r}: valid choices are 'read', 'write'")
+
+
+# --- ambiguous-resolve hint (shared by the MCP `_resolve` and the CLI) --------
+
+
+# An operator candidate (`operator Foo()`, `operator+`): "operator" at the start
+# of the label or right after a `#` member separator, not part of a longer name
+# (`operatorate`). Matched against the readable label — display_name is often
+# empty (scip-clang doesn't populate it), so the SCIP string is what's there.
+_OPERATOR_RE = re.compile(r"(?:^|#)operator(?![A-Za-z0-9_])")
+
+
+def ambiguous_candidate_hint(query: str, candidates: list[Node]) -> str:
+    """Extra `hint` sentences for an ambiguous resolve, from what the candidates
+    *are* — the same guidance on both surfaces. Two recurring lookalike traps:
+    the type itself (`Foo#`, a symbol ending in `#`) sitting next to its own
+    members, and a conversion/overloaded operator (`operator Foo()`) that merely
+    shares the name. States the fact — never picks a candidate. Empty when
+    neither trap is present."""
+    q = query.casefold()
+    type_labels: list[str] = []
+    has_operator = False
+    for n in candidates:
+        label = n.display_name or short_label(n.symbol)
+        leaf = label.rsplit("/", 1)[-1]
+        if n.symbol.endswith("#") and leaf.rstrip("#").rsplit("#", 1)[-1].casefold() == q:
+            type_labels.append(label)
+        if not has_operator and q in label.casefold() and _OPERATOR_RE.search(label):
+            has_operator = True
+    parts: list[str] = []
+    if len(type_labels) == 1:
+        parts.append(
+            f"one candidate is the type itself ({type_labels[0]}, a symbol ending in `#`), "
+            "alongside members/related symbols — if you meant the type, use that one"
+        )
+    elif type_labels:
+        parts.append(
+            f"{len(type_labels)} candidates are types themselves ({', '.join(type_labels)} — "
+            "symbols ending in `#`), alongside members/related symbols — if you meant one of "
+            "the types, use its exact symbol"
+        )
+    if has_operator:
+        parts.append(
+            "some candidates are operator symbols (e.g. a conversion operator sharing "
+            "the name), not the named type/function itself"
+        )
+    return "; ".join(parts)

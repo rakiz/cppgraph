@@ -17,6 +17,7 @@ from cppgraph.export import (
 )
 from cppgraph.filters import (
     access_tag,
+    ambiguous_candidate_hint,
     drop_test_edges,
     filter_by_access,
     filter_by_path,
@@ -284,6 +285,9 @@ def _resolve_symbol(
         print(f"    {node.symbol}  ({node.display_name or '?'} @ {loc})", file=sys.stderr)
     if len(candidates) > 10:
         print(f"    ... and {len(candidates) - 10} more", file=sys.stderr)
+    extra = ambiguous_candidate_hint(query, candidates)
+    if extra:
+        print(f"[cppgraph] note: {extra}.", file=sys.stderr)
     parser.error(f"ambiguous {what}: {query}")
 
 

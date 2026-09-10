@@ -36,6 +36,7 @@ from typing import TYPE_CHECKING, Any
 from cppgraph.cli import SOURCE_EXTS, build_export_json, extract_signature, read_source_snippet
 from cppgraph.export import is_test_file
 from cppgraph.filters import access_tag as _access_tag
+from cppgraph.filters import ambiguous_candidate_hint as _ambiguous_candidate_hint
 from cppgraph.filters import drop_test_edges as _drop_test_edges
 from cppgraph.filters import filter_by_access as _filter_by_access
 from cppgraph.filters import filter_by_path as _filter_by_path
@@ -410,15 +411,19 @@ def _resolve(store: GraphStore, symbol: str) -> tuple[str | None, dict[str, Any]
     if not candidates:
         return None, {"error": _UNKNOWN.format(symbol=symbol)}
     shown = candidates[:DEFAULT_LIMIT]
+    hint = (
+        f"{len(candidates)} symbols match {symbol!r}; re-call with the exact "
+        "`symbol` from candidates (or use `find` to narrow a broad name)."
+    )
+    extra = _ambiguous_candidate_hint(symbol, candidates)
+    if extra:
+        hint = f"{hint} {extra}."
     return None, {
         "ambiguous": symbol,
         "total": len(candidates),
         "truncated": len(candidates) > len(shown),
         "candidates": [_node_dict(n, full_symbols=True) for n in shown],
-        "hint": (
-            f"{len(candidates)} symbols match {symbol!r}; re-call with the exact "
-            "`symbol` from candidates (or use `find` to narrow a broad name)."
-        ),
+        "hint": hint,
     }
 
 

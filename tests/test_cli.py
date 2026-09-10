@@ -2020,6 +2020,50 @@ def test_class_members_ambiguous_name_lists_candidates_and_errors(
     assert "ambiguous" in err
 
 
+def test_class_members_ambiguous_hint_flags_type_and_operator(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The ambiguous-candidates listing carries the same hint as the MCP
+    `_resolve`: the type itself and the conversion-operator lookalike are
+    called out, none is picked."""
+    foo = "cxx . . $ mongo/Foo#"
+    bar = "cxx . . $ mongo/Foo#bar(a0)."
+    conv = "cxx . . $ mongo/OtherClass#operator Foo()(a0)."
+    graph = Graph()
+    graph.nodes[foo] = Node(symbol=foo, file="foo.h", line=1)
+    graph.nodes[bar] = Node(symbol=bar, file="foo.h", line=2)
+    graph.nodes[conv] = Node(symbol=conv, file="other.h", line=3)
+    path = tmp_path / "lookalike.db"
+    write_sqlite(graph, path)
+    with pytest.raises(SystemExit):
+        main(["class-members", "--graph", str(path), "Foo"])
+    err = capsys.readouterr().err
+    assert "type itself" in err
+    assert "operator" in err
+
+
+def test_class_members_ambiguous_hint_plural_when_several_types_match(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """With 2+ type-shaped candidates matching, the hint says several types
+    share the name — no "use that one" (a single-type claim)."""
+    foo1 = "cxx . . $ ns1/Foo#"
+    foo2 = "cxx . . $ ns2/Foo#"
+    bar = "cxx . . $ ns1/Foo#bar(a0)."
+    graph = Graph()
+    graph.nodes[foo1] = Node(symbol=foo1, file="a.h", line=1)
+    graph.nodes[foo2] = Node(symbol=foo2, file="b.h", line=2)
+    graph.nodes[bar] = Node(symbol=bar, file="a.h", line=3)
+    path = tmp_path / "two_types.db"
+    write_sqlite(graph, path)
+    with pytest.raises(SystemExit):
+        main(["class-members", "--graph", str(path), "Foo"])
+    err = capsys.readouterr().err
+    assert "types themselves" in err
+    assert "ns1/Foo#" in err and "ns2/Foo#" in err
+    assert "that one" not in err
+
+
 def test_class_members_non_type_symbol_errors(container_graph: Path) -> None:
     """A known non-type symbol is bad input: parser.error, not an empty list."""
     with pytest.raises(SystemExit):
