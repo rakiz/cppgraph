@@ -161,9 +161,7 @@ _FILE_LINE_RE = re.compile(r"^(.+):([1-9][0-9]*)$")
 # text from a signature-emitting binary, ungated like `documentation`) and
 # `symbols.is_out_of_project` (the `Index.external_symbols` classification —
 # external vs project-native vs phantom, gated by the `has_external_symbols`
-# meta flag) — the first schema changes since v0.2.0's release; all still
-# unreleased as of this comment, so they amend the same pending version
-# number (see the policy above) rather than incrementing it.
+# meta flag). Released in v0.3.0.
 SCHEMA_VERSION = 5
 
 

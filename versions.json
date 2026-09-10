@@ -7,7 +7,7 @@
     "rebuild": "reindex",
     "patchset_version": 6
   },
-  "latest": "0.2.0",
+  "latest": "0.3.0",
   "releases": [
     {
       "version": "0.1.0",
@@ -20,6 +20,12 @@
       "rebuild": "store",
       "notes": "Store schema v4 across the release (`symbols.end_line` at v3 for `line_span`, `symbols.documentation` at v4 for `explain` doc comments), plus a dozen new read-only query commands (ranking/stats, `outline`/`class_members`, architecture facts like `boundary_violations`/`api_surface`/`dependency_cost`, `file:line` symbol resolution) and a generated CLI reference doc. v2/v3 stores keep working — the migration is store-level, no re-index: rebuild from the existing .scip (`cppgraph build`) to get the new columns; `update` migrates only files it actually touches, and `enrich-refs` migrates the schema shape without backfilling `end_line`/`documentation`.",
       "url": "https://github.com/rakiz/cppgraph/releases/tag/v0.2.0"
+    },
+    {
+      "version": "0.3.0",
+      "rebuild": "store",
+      "notes": "Store schema v5 (`refs.roles`, `symbols.scip_kind`, `symbols.signature_documentation`, `symbols.is_out_of_project`) plus five new scip-clang syntactic-classifier patches on top of #504 (patchset 1→6): ForwardDefinition (fixes the declaration-site phantom-caller bug on stock-shaped graphs too), ReadAccess/WriteAccess (`--access {read,write}` on `references`/`find_references`), `SymbolInformation.kind` (`scip_kind` field), `signature_documentation` (signatures without a source read), and `Relationship.is_type_definition` (new `typed-by` edge kind: field/variable → its declared type, on `impact`/`reachable-from`/`boundary-violations`). Also consumes stock scip-clang's `Index.external_symbols` (`Node.is_out_of_project`, no patch needed — always-on, +~21% node count). v2–v4 stores keep working — store-level migration only, no re-index: rebuild from the existing `.scip` (`cppgraph build`) to get the new columns; `update`/`enrich-refs` migrate the schema shape without backfilling the new columns' data. Full detail in `CHANGELOG.md`.",
+      "url": "https://github.com/rakiz/cppgraph/releases/tag/v0.3.0"
     }
   ]
 }

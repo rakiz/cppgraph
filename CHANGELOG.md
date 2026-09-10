@@ -6,6 +6,8 @@ on-disk store also carries its own `schema_version` for forward-compatibility.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-10
+
 Store schema v4 → v5 (`refs.roles`); five new scip-clang patches and a rename
 of the binary "variant" concept.
 
