@@ -1,0 +1,262 @@
+# Relationship.is_type_definition — fills SCIP's "go to type definition"
+# relationship (Relationship.is_type_definition, field 4), which upstream
+# leaves unset on 100% of relationships. A syntactic type resolver
+# (`tryResolveDeclaredTypeDecl` in indexer/Indexer.cc, same style as the kind
+# patch's `classifySymbolKind`) records, for a field / variable, a
+# {symbol: <type>, is_type_definition: true} entry on the field's / variable's
+# OWN SymbolInformation — the source of the edge is the field/variable itself
+# and the destination is its declared type (what builder-style consumers read
+# out of `sym_info.relationships`). The resolution policy is the exact one
+# already established by trySaveTypeReference: a typedef/alias type resolves
+# to the typedef declaration, a tag type to the tag declaration, and a
+# template specialization to the primary templated declaration (so a field of
+# std::vector<Foo> gets a single edge to std::vector; template arguments are
+# not followed). Pointer, reference and cv-qualifier wrappers are stripped
+# first (e.g. `const Foo&` resolves to Foo). Builtin types, `auto` without a
+# resolvable named declaration, dependent types, and any other shape without
+# a compiler-resolved SCIP symbol emit no relationship at all — never a
+# partial or guessed one (same "only exact, compiler-traced facts" philosophy
+# as the other patches). `declaredType` can be a null QualType on malformed /
+# error-recovery AST nodes (e.g. broken templates); tryResolveDeclaredTypeDecl
+# guards for that before dereferencing it.
+#
+# Scope (accepted v1 limitation, mirroring the kind patch's): only
+# declarations which get a SymbolInformation emitted today — fields
+# (saveFieldDecl) and file-scope variables / static data members (saveVarDecl's
+# SymbolInformation branch). Local variables and parameters get
+# saveDefinition(std::nullopt, ...) and have nowhere to attach a relationship;
+# this patch deliberately does NOT extend SymbolInformation emission to them.
+#
+# Mechanism note (why the relationship is not attached directly to the
+# symbolInfo local in saveFieldDecl/saveVarDecl): those functions' bodies are
+# bracketed by lines other patches in this directory create or rewrite — the
+# saveDefinition(...) calls following the insertion point are rewritten by
+# enclosing_range (upstream's one-line call becomes a two-line one), so a
+# hunk anchored there would only apply in orderings where enclosing_range ran
+# first. Instead the relationship is recorded as a standalone
+# SymbolInformation in a new PartialDocument::extraSymbolInfos list — kept out
+# of the per-symbol map so it can never displace the declaration's primary
+# SymbolInformation. TuIndexer::emitDocumentOccurrencesAndSymbols folds each
+# extra's relationships into the matching primary SymbolInformation (looked up
+# in doc.symbolInfos by symbol name) *before* draining that map, and emits
+# only the (now relationship-bearing) primary — never the extra as a second,
+# separate SymbolInformation; an extra with no matching primary (not expected
+# to happen: the field/var's own saveFieldDecl/saveVarDecl call always
+# populates doc.symbolInfos before this method runs) is emitted standalone as
+# a fallback rather than silently dropped. This union has to happen directly
+# in that method: DocumentBuilder::merge (upstream's cross-TU dedup pass)
+# only runs for documents indexed from more than one TU — the vast majority
+# of documents (every single-TU .cpp file, and any header included from just
+# one TU) never reach it, so relying on it to fold the extra into the primary
+# would leave those documents with two separate SymbolInformation entries for
+# the same symbol: a real duplicate-record bug in the emitted SCIP, not just
+# a downstream-tolerant quirk. No ScipExtras changes are needed: upstream's
+# RelationshipExt hash already combines is_type_definition. NOT (yet) an
+# upstream PR.
+#
+# Applicability: generated with minimal diff context (`-U1`) so it applies
+# cleanly in any order relative to the other five patches in this directory
+# (or completely alone) — every hunk is anchored on lines no other patch
+# creates or rewrites. Exception: the emitDocumentOccurrencesAndSymbols hunk
+# that appends the (unmerged-fallback) extras after the main symbol-emission
+# loop carries -U2 context. At -U1 its context would be just `}));` + `}` —
+# that exact pair also occurs at the end of
+# MacroIndexer::emitDocumentOccurrencesAndSymbols, so git apply could match a
+# closer-but-wrong brace pair (the same failure mode the forward-definition
+# patch's header documents). The richer context anchors on the unique
+# *scipDocument.add_symbols() = std::move(symInfo); line instead. The hunk
+# that inserts the merge pass itself (right before the `extractTransform(`
+# call) needs no such widening even at -U1: its trailing context — a bare
+# `extractTransform(` with no `scip_clang::` qualifier, immediately preceded
+# by a `}` — occurs nowhere else in the file (every other call site is
+# qualified as `scip_clang::extractTransform(`). See
+# scip-clang-patches/README.md's "Independence" section.
+diff --git a/indexer/Indexer.h b/indexer/Indexer.h
+index d19b157..6c896dd 100644
+--- a/indexer/Indexer.h
++++ b/indexer/Indexer.h
+@@ -236,2 +236,12 @@
+   absl::flat_hash_map<scip::SymbolNameRef, scip::SymbolInformation> symbolInfos;
++  // SymbolInformation values emitted outside saveDefinition's map —
++  // currently the Relationship.is_type_definition entries recorded by
++  // TuIndexer::saveTypeDefinitionRelationship. Kept out of the map above
++  // so they can never displace a declaration's primary SymbolInformation;
++  // TuIndexer::emitDocumentOccurrencesAndSymbols folds each entry's
++  // relationships into the matching primary SymbolInformation in the map
++  // above before emission (DocumentBuilder::merge, which runs only for
++  // multiply-indexed documents, is not a substitute for this — the vast
++  // majority of documents are single-TU and never reach it).
++  std::vector<scip::SymbolInformation> extraSymbolInfos;
+ };
+@@ -395,2 +405,13 @@
+ 
++  /// Records a Relationship.is_type_definition ("go to type definition")
++  /// for \p decl's own SymbolInformation: source = the declaration's
++  /// symbol, destination = its declared type (see
++  /// tryResolveDeclaredTypeDecl in Indexer.cc for the resolution policy
++  /// and the silent no-edge cases). Only meaningful for declarations
++  /// which get a SymbolInformation emitted today — fields, file-scope
++  /// variables and static data members; the definition filters everything
++  /// else out.
++  void saveTypeDefinitionRelationship(const clang::NamedDecl &decl,
++                                      clang::QualType declaredType);
++
+   /// Lower-level method for only saving a Occurrence.
+diff --git a/indexer/Indexer.cc b/indexer/Indexer.cc
+index 9814ea0..9d0a77e 100644
+--- a/indexer/Indexer.cc
++++ b/indexer/Indexer.cc
+@@ -698,4 +698,108 @@
+ 
++/// Resolves a field or variable's declared type to the NamedDecl that a
++/// Relationship.is_type_definition edge should point at, reusing the exact
++/// type-resolution policy of trySaveTypeReference: a typedef/alias type
++/// resolves to the typedef declaration, a tag type to the tag declaration,
++/// and a template specialization to the primary templated declaration (so a
++/// field of std::vector<Foo> gets a single edge to std::vector; template
++/// arguments are not followed). Pointer, reference and cv-qualifier wrappers
++/// are stripped first, e.g. `const Foo&` resolves to Foo.
++///
++/// Returns nullptr when there is no compiler-resolved SCIP symbol to point
++/// at — builtin types, `auto` without a resolvable named declaration,
++/// dependent types, or any other shape the policy above doesn't classify —
++/// and callers emit no relationship at all in that case (only exact,
++/// compiler-traced facts, never a guessed one).
++static const clang::NamedDecl *
++tryResolveDeclaredTypeDecl(clang::QualType declaredType) {
++  if (declaredType.isNull()) {
++    return nullptr;
++  }
++  while (declaredType->isPointerType() || declaredType->isReferenceType()) {
++    declaredType = declaredType->getPointeeType();
++  }
++  declaredType = declaredType.getUnqualifiedType();
++  const clang::Type *type = declaredType.getTypePtr();
++  if (auto *typedefType = llvm::dyn_cast<clang::TypedefType>(type)) {
++    return typedefType->getDecl();
++  }
++  if (auto *tagDecl = type->getAsTagDecl()) {
++    return tagDecl;
++  }
++  if (auto *templateSpecializationType =
++          llvm::dyn_cast<clang::TemplateSpecializationType>(type)) {
++    if (auto *templateDecl =
++            templateSpecializationType->getTemplateName().getAsTemplateDecl()) {
++      return templateDecl->getTemplatedDecl();
++    }
++  }
++  return nullptr;
++}
++
++void TuIndexer::saveTypeDefinitionRelationship(
++    const clang::NamedDecl &decl, clang::QualType declaredType) {
++  // Relationship.is_type_definition ("go to type definition") — see
++  // tryResolveDeclaredTypeDecl above for the resolution policy and the
++  // cases which silently emit no relationship.
++  //
++  // Scope (accepted v1 limitation, mirroring the kind patch's): only
++  // declarations which get a SymbolInformation emitted today — fields
++  // (saveFieldDecl) and file-scope variables / static data members
++  // (saveVarDecl's SymbolInformation branch). Local variables, parameters
++  // and local extern declarations take the saveDefinition(std::nullopt,
++  // ...) or saveReference-only paths and have no SymbolInformation to
++  // attach a relationship to; this deliberately does NOT extend
++  // SymbolInformation emission to them.
++  if (auto *varDecl = llvm::dyn_cast<clang::VarDecl>(&decl)) {
++    if (varDecl->isLocalVarDeclOrParm() || varDecl->isLocalExternDecl()
++        || !(varDecl->isStaticDataMember() || varDecl->isFileVarDecl())) {
++      return;
++    }
++  }
++  auto optDeclSymbol = this->symbolFormatter.getNamedDeclSymbol(decl);
++  if (!optDeclSymbol.has_value()) {
++    return;
++  }
++  auto *typeDecl = tryResolveDeclaredTypeDecl(declaredType);
++  if (!typeDecl) {
++    return;
++  }
++  auto optTypeSymbol = this->symbolFormatter.getNamedDeclSymbol(*typeDecl);
++  if (!optTypeSymbol.has_value()) {
++    return;
++  }
++  // Same file guards as saveDefinition: the relationship rides along with
++  // the declaration's own SymbolInformation, which is only emitted for
++  // in-project files.
++  auto expansionLoc = this->sourceManager.getExpansionLoc(decl.getLocation());
++  auto fileId = this->sourceManager.getFileID(expansionLoc);
++  if (!this->fileIdsToBeIndexed.contains({fileId})) {
++    return;
++  }
++  auto optStableFileId = this->fileMetadataMap.getStableFileId(fileId);
++  if (!optStableFileId.has_value() || !optStableFileId->isInProject) {
++    return;
++  }
++  // Emitted as a standalone SymbolInformation, kept out of the per-symbol
++  // map in PartialDocument so it can never displace the declaration's
++  // primary SymbolInformation. TuIndexer::emitDocumentOccurrencesAndSymbols
++  // later folds this relationship into the matching primary
++  // SymbolInformation (looked up by symbol name) before either is emitted,
++  // so the final index has the relationship on the field's / variable's
++  // own SymbolInformation, not on a separate duplicate entry.
++  auto &doc = this->documentMap[{fileId}];
++  scip::SymbolInformation symbolInfo{};
++  auto declSymbol = optDeclSymbol->value;
++  symbolInfo.set_symbol(declSymbol.data(), declSymbol.size());
++  scip::Relationship rel{};
++  auto typeSymbol = optTypeSymbol->value;
++  rel.set_symbol(typeSymbol.data(), typeSymbol.size());
++  rel.set_is_type_definition(true);
++  *symbolInfo.add_relationships() = std::move(rel);
++  doc.extraSymbolInfos.push_back(std::move(symbolInfo));
++}
++
+ void TuIndexer::saveFieldDecl(const clang::FieldDecl &fieldDecl) {
+   auto optSymbol = this->symbolFormatter.getFieldSymbol(fieldDecl);
++  this->saveTypeDefinitionRelationship(fieldDecl, fieldDecl.getType());
+   if (!optSymbol.has_value()) {
+@@ -1172,2 +1276,3 @@
+   auto loc = varDecl.getLocation();
++  this->saveTypeDefinitionRelationship(varDecl, varDecl.getType());
+   if (varDecl.isLocalExternDecl()) {
+@@ -1342,2 +1447,32 @@
+   }
++  // Fold each extra (Relationship.is_type_definition-only) SymbolInformation
++  // into its matching primary entry in doc.symbolInfos before that map is
++  // drained below: DocumentBuilder::merge (which the extras were designed
++  // to rely on for this union) only runs for multiply-indexed documents, so
++  // for a single-TU document the union has to happen here instead, or the
++  // extra would survive into scipDocument as a second, duplicate
++  // SymbolInformation for the same symbol.
++  std::vector<scip::SymbolInformation> unmergedExtraSymInfos;
++  for (auto &extraSymInfo : doc.extraSymbolInfos) {
++    auto primaryIt =
++        doc.symbolInfos.find(SymbolNameRef{extraSymInfo.symbol()});
++    if (primaryIt == doc.symbolInfos.end()) {
++      // Shouldn't happen: this method only runs after the whole TU has
++      // been visited, so the field/var's own saveFieldDecl/saveVarDecl
++      // call — which inserts its primary SymbolInformation into
++      // doc.symbolInfos — has always already run by now, regardless of
++      // its order relative to saveTypeDefinitionRelationship within that
++      // call. Emit standalone rather than silently dropping the
++      // relationship.
++      spdlog::warn("no primary SymbolInformation found for extra "
++                   "is_type_definition relationship on symbol '{}'; "
++                   "emitting it as a standalone SymbolInformation",
++                   extraSymInfo.symbol());
++      unmergedExtraSymInfos.push_back(std::move(extraSymInfo));
++      continue;
++    }
++    for (auto &rel : *extraSymInfo.mutable_relationships()) {
++      *primaryIt->second.add_relationships() = std::move(rel);
++    }
++  }
+   extractTransform(
+@@ -1348,4 +1483,7 @@
+             *scipDocument.add_symbols() = std::move(symInfo);
+           }));
++  for (auto &extraSymInfo : unmergedExtraSymInfos) {
++    *scipDocument.add_symbols() = std::move(extraSymInfo);
++  }
+ }
+ 

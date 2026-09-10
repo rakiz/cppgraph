@@ -6,7 +6,166 @@ on-disk store also carries its own `schema_version` for forward-compatibility.
 
 ## [Unreleased]
 
-_Nothing yet._
+## [0.3.0] - 2026-09-10
+
+Store schema v4 → v5 (`refs.roles`); five new scip-clang patches and a rename
+of the binary "variant" concept.
+
+### Added
+
+- **`Index.external_symbols` consumption** — external-package symbol identity
+  (`Node.is_out_of_project`): scip-clang already emits `Index.external_symbols`
+  (a repeated `SymbolInformation` listing symbols referenced from the project
+  but defined in an un-indexed external package — boost/absl/stdlib/…;
+  174,436 entries measured on the mongo corpus), and no scip-clang patch is
+  involved: this is pure cppgraph-side consumption of a stock field. The
+  builder now processes that list before `index.documents`, creating nodes for
+  symbols that previously had either a file-less phantom node (referenced
+  somewhere) or no node row at all (`find`/`explain` returned "unknown
+  symbol"), with the same first-real-wins metadata merge as `Document.symbols`
+  entries (display name, genuine doc text, fine-grained kind, recorded
+  signature). Classification is three-valued: `True` = defined in an external
+  package, `False` = project-native (a `Document.symbols`
+  `SymbolInformation` — this write is unconditional so project evidence always
+  wins, in either pass order, including the incremental-update collision
+  path), `None` = a pure phantom (no `SymbolInformation` from either source).
+  Node identity/metadata only — no edges are created from external
+  relationships (`Graph.add_edge` needs a real project document as
+  provenance). Consumed by cppgraph: `symbols.is_out_of_project` (store schema
+  amends the pending v5, + the `has_external_symbols` meta flag — set by a
+  FULL build only, never by `apply_update`/`enrich_references`, which cannot
+  classify a whole store from a partial index), surfaced as an
+  `is_out_of_project` field (true/false/null) on `explain_symbol` and on every
+  `find` result — grouped overload arms agreeing on the top-level value, null
+  when they disagree — a `out of project: yes/no/unknown` line on CLI
+  `explain`, and an `[out-of-project]` marker on CLI `find` results (external
+  only), plus a `has_external_symbols` capability line in `status`, on the CLI
+  and as MCP tools alike; the key/line/marker is omitted entirely on graphs
+  built before this feature. Degrades cleanly (never a crash) on older stores.
+  **Cost caveat:** this is always-on at build time, not opt-in — on the mongo
+  corpus the 174,436 external symbols grow the node count by ~21% (each
+  carrying the metadata above), and nodes for symbols that were previously
+  absent entirely.
+- **`ForwardDefinition` bit fix** (`scip-clang-patches/forward-definition-on-v0.4.0.patch`):
+  fixes the declaration-site phantom-caller bug on STOCK-shaped graphs too (not
+  just #504 graphs, which were already protected) — a bodyless declaration
+  occurrence is now tagged at the source instead of landing as an
+  indistinguishable role-0 site. Verified end-to-end (stock official binary
+  fabricates the phantom caller on a fixture; our patched binary doesn't). No
+  cppgraph-side change needed — `build_graph` already filtered on
+  `DEFINITION | FORWARD_DEFINITION` in anticipation.
+- **`ReadAccess`/`WriteAccess` syntactic classifier** (`scip-clang-patches/read-write-access-on-v0.4.0.patch`):
+  a scip-clang patch tagging reference occurrences as reads/writes based on
+  their syntactic AST parent (assignment, compound assignment, `++`/`--`,
+  overloaded-operator forms; constructor-initializer field references are
+  unconditional writes). Syntactic only, no dataflow.
+  Consumed by cppgraph: `Reference.roles` (store schema v5, `refs.roles` +
+  `has_access_roles` meta flag), surfaced as `(write)`/`(read+write)`
+  annotations and a new `--access {read,write}` filter on `cppgraph references`
+  / MCP `find_references`. Degrades cleanly (no annotation, filter refused with
+  a clear reason) on a graph built without this patch.
+- **`SymbolInformation.kind` syntactic classifier** (`scip-clang-patches/kind-on-v0.4.0.patch`):
+  a scip-clang patch filling SCIP's `SymbolInformation.kind`, which upstream
+  leaves at `UnspecifiedKind` on 100% of symbols: `classifySymbolKind` in
+  `Indexer.cc` maps the `clang::Decl` at each `SymbolInformation`-creating
+  site to its kind (Class/Struct/Union/Enum, EnumMember, Field,
+  Function/Method/StaticMethod/PureVirtualMethod/Constructor,
+  Variable/StaticDataMember, Namespace, TypeAlias; macros and the synthetic
+  file symbol get Macro/File), carried through the TU-merge pipeline by a new
+  `SymbolInformationBuilder::kind` field. Syntactic classification only, no
+  semantic analysis — local variables and parameters get no
+  `SymbolInformation` emitted today, and destructors classify as Method (SCIP
+  has no Destructor kind). Fourth patch in the bundle (`patchset_version` 3 →
+  4 in `versions.json`), order-independent with the other three.
+  Consumed by cppgraph: `symbols.scip_kind` (store schema v5, +
+  `has_symbol_kind` meta flag), surfaced as a `scip_kind` field on
+  `explain_symbol`/`find` and a `has_symbol_kind` capability line in `status`,
+  on the CLI and as MCP tools alike. Degrades cleanly (field absent, never a
+  crash) on a graph built without this patch or an older store.
+- **`SymbolInformation.signature_documentation` syntactic printer**
+  (`scip-clang-patches/signature-documentation-on-v0.4.0.patch`): a scip-clang
+  patch filling SCIP's `SymbolInformation.signature_documentation`, which
+  upstream never sets (`set_signature_documentation` appears nowhere in the
+  indexer — measured 0/810,919 on the corpus): `declToSignatureText` in
+  `Indexer.cc` pretty-prints the declaration of function/method decls only
+  (clang `PrintingPolicy` with `TerseOutput` — no body, default arguments
+  preserved) at `saveFunctionDecl` sites, carried through the TU-merge
+  pipeline (`SymbolInformationBuilder`/`DocumentBuilder::merge`,
+  first-non-empty-wins semantics) exactly like the `kind` patch. Scope/limit:
+  only defined or pure-virtual function/method declarations get a signature —
+  bodyless in-class declarations (routed through `saveForwardDeclaration`, no
+  `SymbolInformation` emitted) do not, in v1. Fifth patch in the bundle
+  (`patchset_version` 4 → 5 in `versions.json`), order-independent with the
+  other four. Verified end-to-end with a real compiled build against a
+  fixture (`int add(int a, int b = 2)` → `sig_doc.text == "int add(int a, int
+  b = 2)"`). Consumed by cppgraph: `Node.signature_documentation` (store
+  schema amends the pending v5 — ungated, a plain nullable column like
+  `documentation`, not a `has_*`-gated one like `scip_kind`), surfaced as a
+  `signature_documentation` field on `explain_symbol` and a
+  `signature (stored):` line on CLI `explain`, distinct from the
+  source-derived `--root` `signature:` line, on the CLI and as MCP tools
+  alike. Degrades cleanly (field absent, never a crash) on a graph built
+  without this patch or an older store. No proto changes needed — the field
+  already exists in the vendored `scip.proto`.
+- **`Relationship.is_type_definition` emitter (`typed-by` edges)**
+  (`scip-clang-patches/typed-by-on-v0.4.0.patch`): a scip-clang patch filling
+  SCIP's `Relationship.is_type_definition` ("go to type definition"), which
+  upstream never sets (measured 0/260,223 relationships on the corpus): a
+  syntactic type resolver (`tryResolveDeclaredTypeDecl` in `Indexer.cc`)
+  attaches, to a field's / variable's own `SymbolInformation.relationships`, a
+  `{symbol: <type>, is_type_definition: true}` entry — source = the
+  field/variable, destination = its declared type — reusing
+  `trySaveTypeReference`'s exact type-resolution policy (typedef/alias → the
+  typedef declaration; tag type → the tag declaration; template
+  specialization → the primary templated declaration, so `std::vector<Foo>`
+  gets a single edge to `std::vector`; template arguments are not followed),
+  after stripping pointer/reference/cv-qualifier wrappers (`const Foo&` →
+  `Foo`). Builtins, unresolvable `auto`, dependent types — anything without a
+  compiler-resolved SCIP symbol — silently emit no relationship (only exact,
+  compiler-traced facts). Scope/limit (v1): only declarations which get a
+  `SymbolInformation` today — fields (`saveFieldDecl`), file-scope variables
+  and static data members (`saveVarDecl`'s `SymbolInformation` branch); local
+  variables and parameters (`saveDefinition(std::nullopt, ...)`) are
+  untouched. Sixth patch in the bundle (`patchset_version` 5 → 6 in
+  `versions.json`), order-independent with the other five — its
+  `saveFieldDecl`/`saveVarDecl` insertions are anchored on lines no other
+  patch touches, and the `emitDocumentOccurrencesAndSymbols` hunk carries
+  `-U2` context (its `-U1` context also closes `MacroIndexer`'s sibling
+  function — same failure mode the `forward-definition` exception covers).
+  Consumed by cppgraph as a new `typed-by` edge kind (field/variable → its
+  declared type): `impact` on a type returns the fields/variables typed as it
+  ("are typed as" in the output), `reachable-from` from a field/variable
+  returns its type, `boundary-violations` accepts it as an explicit
+  `--kind`/`edge_kinds` (opt-in — the default kinds stay `calls,inherits`).
+  Degrades cleanly (no `typed-by` edges, never a crash) on a graph built
+  without this patch or an older store.
+- **Dual versioning for the scip-clang patch bundle**: `versions.json`'s
+  `scip_clang.patchset_version` now tracks our own patch bundle independently
+  of the upstream `version` pin (history: 1 = #504 `enclosing_range` only; 2 =
+  + `ForwardDefinition`; 3 = + `ReadAccess`/`WriteAccess`; 4 = +
+  `SymbolInformation.kind`; 5 = + `SymbolInformation.signature_documentation`;
+  6 = + `Relationship.is_type_definition`).
+  `cppgraph status`
+  advises when an installed patched binary's patchset predates the pin.
+- All six scip-clang patches (`enclosing_range`, `forward-definition`,
+  `read-write-access`, `kind`, `signature-documentation`, `typed-by`) verified
+  mutually **order-independent** — any of the 720 possible application orders
+  produces byte-identical final files, and each applies standalone. Matters
+  for a future independent upstream PR per patch.
+
+### Changed
+
+- Binary "variant" renamed `"504"` → `"patched"` throughout (sidecar JSON,
+  release tag/asset names — `scip-clang-patched-v<version>-p<patchset>` — CLI
+  wizard labels, scripts). Old `"504"`/`"enclosing_range-504"` sidecars are
+  still recognized (`PATCHED_VARIANTS`) for backward compatibility.
+- `docker/build-scip-clang` → `docker/build-scip-clang-patched-linux`,
+  `scripts/build-scip-clang-macos.sh` → `build-scip-clang-patched-macos.sh`,
+  `scripts/publish-scip-clang-504.sh` → `publish-scip-clang-patched.sh` — all
+  three renamed for clarity (explicit about platform/variant, no longer
+  accurate to say just "504" now that the bundle carries three patches).
+  Patch files moved to a shared top-level `scip-clang-patches/` (used by both
+  the Docker build and the macOS native build script).
 
 ## [0.2.0] - 2026-09-08
 

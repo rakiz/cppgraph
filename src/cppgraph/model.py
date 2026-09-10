@@ -28,11 +28,39 @@ class Node:
     # filtered out — see `builder.real_documentation`); None when there is
     # none. Surfaced by `explain` without a source read.
     documentation: str | None = None
+    # The symbol's fine-grained SCIP `SymbolInformation.kind` enum name (e.g.
+    # "StaticMethod", "Enum"), emitted only by a kind-patched binary (patchset
+    # 4); None when there is none (stock binary, or a Decl the patch leaves
+    # unclassified — proto3's 0/UnspecifiedKind reads as "no info", never an
+    # error). Additive info on top of the descriptor-suffix classification
+    # (`builder.is_callable_symbol`/`is_type_symbol`/`is_term_symbol`), which
+    # stays the source of truth for edge typing; surfaced by `explain`/`find`
+    # and flagged `has_symbol_kind` in meta.
+    scip_kind: str | None = None
+    # The symbol's signature as recorded by a signature-emitting scip-clang in
+    # `SymbolInformation.signature_documentation.text` (a `Signature` message
+    # mirroring `Document`'s shape), or None when there is none — a stock
+    # binary never sets the field, and empty text reads as None (no placeholder
+    # exists for signatures, unlike `documentation`). Surfaced by `explain`
+    # without a source read; distinct from the source-derived `signature`
+    # extraction (`--root`), which also captures defaulted parameters the
+    # recorded text may lack.
+    signature_documentation: str | None = None
+    # Whether the symbol is defined in an un-indexed external package
+    # (`Index.external_symbols` — boost/absl/stdlib/…, a field stock
+    # scip-clang already emits): True = external, False = project-native (a
+    # `SymbolInformation` in some `Document.symbols` — project evidence always
+    # wins over the external classification), None = no `SymbolInformation`
+    # from either source (a pure phantom node, only ever an edge/reference
+    # endpoint). Gated by the `has_external_symbols` meta flag — a graph built
+    # before this feature carries neither the flag nor the column, and the
+    # field reads None like any other no-data column.
+    is_out_of_project: bool | None = None
 
 
 @dataclass(slots=True)
 class Edge:
-    kind: str  # "calls" | "implements" | "inherits"
+    kind: str  # "calls" | "implements" | "inherits" | "typed-by"
     src: str
     dst: str
     file: str
@@ -55,6 +83,10 @@ class Reference:
     file: str
     line: int | None = None
     enclosing_symbol: str | None = None
+    # ReadAccess/WriteAccess bits from `Occurrence.symbol_roles` (masked to just
+    # those two) — 0 when the graph doesn't carry this data (stock binary, or a
+    # store built before this column existed). 0x4 = write, 0x8 = read.
+    roles: int = 0
 
 
 @dataclass
@@ -64,6 +96,17 @@ class Graph:
     references: list[Reference] = field(default_factory=list)
     _edge_keys: set[tuple] = field(default_factory=set, repr=False)
     _ref_keys: set[tuple] = field(default_factory=set, repr=False)
+    # Set by `build_graph` (always — the builder classifies
+    # `Index.external_symbols` into `Node.is_out_of_project`, even when that
+    # index listed none): "this graph was produced by a builder that carries
+    # the external-symbol feature", not "at least one external symbol was
+    # found". `write_sqlite` turns it into the `has_external_symbols` meta
+    # flag on a FULL build; the incremental paths (`apply_update`,
+    # `enrich_references`) also build partial graphs via `build_graph` but
+    # never consult it — a partial index covers only changed TUs and cannot
+    # classify the whole pre-existing store, so it must never claim
+    # capability-completeness.
+    has_external_symbols: bool = False
 
     def add_node(self, symbol: str, *, display_name: str = "") -> Node:
         node = self.nodes.get(symbol)
@@ -89,6 +132,7 @@ class Graph:
         file: str,
         line: int | None = None,
         enclosing_symbol: str | None = None,
+        roles: int = 0,
     ) -> None:
         """Record a use of `symbol` at `file:line`, deduped by (symbol, file,
         line) — a header included by N TUs surfaces the same occurrence N times.
@@ -96,7 +140,8 @@ class Graph:
         The referenced symbol becomes a node so it is interned and findable even
         if it is defined outside the indexed set (e.g. a `std::` type used here).
         `enclosing_symbol` (when known, from an enclosing_range-emitting binary)
-        is the definition that contains the use site.
+        is the definition that contains the use site. `roles` carries the
+        ReadAccess/WriteAccess bits (0 when the binary doesn't tag them).
         """
         self.add_node(symbol)
         key = (symbol, file, line)
@@ -104,7 +149,9 @@ class Graph:
             return
         self._ref_keys.add(key)
         self.references.append(
-            Reference(symbol=symbol, file=file, line=line, enclosing_symbol=enclosing_symbol)
+            Reference(
+                symbol=symbol, file=file, line=line, enclosing_symbol=enclosing_symbol, roles=roles
+            )
         )
 
     def references_of(self, symbol: str) -> list[Reference]:
@@ -201,6 +248,9 @@ class Graph:
                     "line": n.line,
                     "end_line": n.end_line,
                     "documentation": n.documentation,
+                    "scip_kind": n.scip_kind,
+                    "signature_documentation": n.signature_documentation,
+                    "is_out_of_project": n.is_out_of_project,
                 }
                 for n in self.nodes.values()
             ],

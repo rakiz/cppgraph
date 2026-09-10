@@ -16,7 +16,9 @@ from cppgraph.export import (
     to_symbol_usage_graph,
 )
 from cppgraph.filters import (
+    access_tag,
     drop_test_edges,
+    filter_by_access,
     filter_by_path,
     is_trivial_callee,
     matches_path_prefix,
@@ -60,12 +62,19 @@ SOURCE_EXTS = (
 )
 
 
-def _print_node(node: Node, *, full_symbols: bool = True) -> None:
+def _print_node(node: Node, *, full_symbols: bool = True, external: bool = False) -> None:
     loc = f"{node.file}:{node.line + 1}" if node.file is not None and node.line is not None else "?"
+    # Fine-grained SCIP kind (kind-patched binary only); nodes from queries
+    # that don't select the column simply carry None and print unchanged.
+    kind = f"  [{node.scip_kind}]" if node.scip_kind else ""
+    # Out-of-project marker, only for a concrete external symbol, only when
+    # the caller gated on the capability (`has_external_symbols`) — native
+    # (False) and unknown (None) results stay unmarked.
+    marker = "  [out-of-project]" if external else ""
     if full_symbols:
-        print(f"  {node.symbol}  ({node.display_name or '?'} @ {loc})")
+        print(f"  {node.symbol}  ({node.display_name or '?'} @ {loc}){kind}{marker}")
     else:
-        print(f"  {node.display_name or short_label(node.symbol)}  ({loc})")
+        print(f"  {node.display_name or short_label(node.symbol)}  ({loc}){kind}{marker}")
 
 
 def read_source_snippet(
@@ -99,8 +108,10 @@ def extract_signature(root: str | None, file: str | None, line0: int | None) -> 
     definition site.
 
     `scip-clang` disambiguates overloads by an opaque hash, not by argument
-    types, so grouped overloads (`find`) are otherwise indistinguishable, and
-    the graph itself never carries a parsed signature (`explain`/`explain_symbol`).
+    types, so grouped overloads (`find`) are otherwise indistinguishable. A
+    patched scip-clang can carry a stored `signature_documentation` on the
+    graph itself (`explain`/`explain_symbol`'s "signature (stored):"), but it
+    is a pretty-printed declaration, not this verbatim-source extraction.
     Since cppgraph has the checkout (`root`), it reads the def line and captures
     the text from the first `(` to its matching `)` verbatim — so a defaulted
     parameter (`bool useNullIfMissing = false`) is visible without opening the
@@ -330,7 +341,7 @@ def main(argv: list[str] | None = None) -> int:
         "--scip-variant",
         default=None,
         help="the scip-clang variant that produced this index (e.g. 'stock' or "
-        "'enclosing_range-504'); recorded as provenance so `cppgraph status` can "
+        "'patched'); recorded as provenance so `cppgraph status` can "
         "flag the graph as stale when the pinned indexer changes. the index wizard "
         "passes it from the binary's provenance sidecar.",
     )
@@ -462,7 +473,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     p_setup.add_argument(
         "--scip-source",
-        choices=["download-504", "download", "build", "emulate"],
+        choices=["download-patched", "download", "build", "emulate"],
         default=None,
         help="how to obtain scip-clang (skips the menu; required when non-interactive)",
     )
@@ -625,6 +636,16 @@ def main(argv: list[str] | None = None) -> int:
     p_refs.add_argument(
         "--limit", type=int, default=50, help="max use sites to print (default: 50)"
     )
+    p_refs.add_argument(
+        "--access",
+        choices=["read", "write"],
+        default=None,
+        help="filter by the indexer's read/write analysis: 'write' keeps only sites "
+        "tagged WriteAccess, 'read' only sites known NOT to be a write (plain reads). "
+        "Needs a graph built with a scip-clang binary carrying the "
+        "ReadAccess/WriteAccess patch — on a graph without that data this reports "
+        "and shows nothing rather than guessing",
+    )
     _add_path_filters(p_refs)
 
     p_path = sub.add_parser("path", help="shortest call chain from one symbol to another")
@@ -661,10 +682,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     p_impact.add_argument(
         "--kind",
-        choices=("calls", "inherits"),
+        choices=("calls", "inherits", "typed-by"),
         default="calls",
         help="edge kind to walk: 'calls' = call blast-radius (default); "
-        "'inherits' = all transitive subclasses of a base type",
+        "'inherits' = all transitive subclasses of a base type; "
+        "'typed-by' = reverse impact on a type returns the fields/variables "
+        "typed as that type",
     )
     _add_query_filters(p_impact)
 
@@ -687,11 +710,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     p_reachable.add_argument(
         "--kind",
-        choices=("calls", "inherits"),
+        choices=("calls", "inherits", "typed-by"),
         default="calls",
         help="edge kind to walk: 'calls' = forward call reachability from an entry "
         "point (default); 'inherits' = the transitive base hierarchy above a "
-        "derived type",
+        "derived type; 'typed-by' = forward reachability from a field/variable "
+        "returns its declared type",
     )
     _add_query_filters(p_reachable)
 
@@ -882,9 +906,12 @@ def main(argv: list[str] | None = None) -> int:
     p_boundary.add_argument(
         "--kind",
         action="append",
-        choices=("calls", "inherits", "implements"),
+        choices=("calls", "inherits", "implements", "typed-by"),
         default=None,
-        help="edge kind to check (repeatable; default: calls and inherits)",
+        help="edge kind to check (repeatable; default: calls and inherits; "
+        "'implements' and 'typed-by' are opt-in — 'typed-by' checks "
+        "type-usage crossing the boundary: a field/variable typed as a type "
+        "on the other side)",
     )
     p_boundary.add_argument("--limit", type=int, default=40, help="max rows to show (default: 40)")
     p_boundary.add_argument(
@@ -1344,8 +1371,9 @@ def main(argv: list[str] | None = None) -> int:
         if not matches:
             print(f"[cppgraph] no symbol matching {args.query!r}")
             return 1
+        show_external = store.meta().get("has_external_symbols") == "true"
         for node in matches:
-            _print_node(node)
+            _print_node(node, external=show_external and node.is_out_of_project is True)
         return 0
 
     if args.command == "callers":
@@ -1434,6 +1462,15 @@ def main(argv: list[str] | None = None) -> int:
                     r.file, include=args.include_paths, exclude=args.exclude_paths
                 )
             ]
+        if args.access:
+            if store.meta().get("has_access_roles") != "true":
+                print(
+                    "[cppgraph] this graph carries no read/write access data — rebuild "
+                    "with a scip-clang binary carrying the ReadAccess/WriteAccess patch "
+                    "(--access would otherwise guess)"
+                )
+                return 1
+            refs = filter_by_access(refs, args.access)
         print(f"[cppgraph] {len(refs)} use site(s) of {args.symbol}")
         for ref in refs[: args.limit]:
             line = ref.line + 1 if ref.line is not None else "?"
@@ -1441,7 +1478,8 @@ def main(argv: list[str] | None = None) -> int:
             used_by = (
                 f"  (used by {short_label(ref.enclosing_symbol)})" if ref.enclosing_symbol else ""
             )
-            print(f"  {ref.file}:{line}{used_by}")
+            # With access-role data, tag writes; a plain read stays untagged.
+            print(f"  {ref.file}:{line}{used_by}{access_tag(ref.roles)}")
             if args.root is not None and ref.file is not None and ref.line is not None:
                 snippet = read_source_snippet(args.root, ref.file, ref.line, context=args.context)
                 if snippet is None:
@@ -1500,7 +1538,11 @@ def main(argv: list[str] | None = None) -> int:
                     exclude=args.exclude_paths,
                 )
             ]
-        verb = "transitively call" if args.kind == "calls" else "transitively inherit from"
+        verb = {
+            "calls": "transitively call",
+            "inherits": "transitively inherit from",
+            "typed-by": "are typed as",
+        }[args.kind]
         tests_note = " (excluding tests)" if args.exclude_tests else ""
         print(f"[cppgraph] {len(nodes)} symbol(s) {verb} {args.symbol}{tests_note}")
         shown = nodes[: args.limit] if args.limit is not None else nodes
@@ -1941,6 +1983,34 @@ def main(argv: list[str] | None = None) -> int:
                             break_on_hyphens=False,
                         )
                     )
+            if m.get("has_access_roles") == "true":
+                print("  access roles:  read/write tags present on reference sites")
+            else:
+                print("  access roles:  none (references carry no read/write tags)")
+                print(
+                    "                 -> to tag writes ('who mutates this global/field?'), "
+                    "index with a scip-clang binary"
+                )
+                print("                    carrying the ReadAccess/WriteAccess patch, then rebuild")
+        if m.get("has_symbol_kind") == "true":
+            print("  symbol kinds:  fine-grained SCIP kinds present (Class/Method/Enum/...)")
+        else:
+            print("  symbol kinds:  none (symbols carry no SCIP kind data)")
+            print(
+                "                 -> to get them (Class vs Struct, Method vs StaticMethod, …), "
+                "index with a scip-clang"
+            )
+            print(
+                "                    binary carrying the SymbolInformation.kind patch, then rebuild"
+            )
+        if m.get("has_external_symbols") == "true":
+            print("  external symbols: external-package symbol metadata present")
+        else:
+            print("  external symbols: none (no external-package symbol metadata)")
+            print(
+                "                 -> rebuilt graphs carry it (boost/absl/stdlib symbols "
+                "classified in explain/find); no special binary needed"
+            )
         print(
             f"  format:        schema v{m.get('schema_version', '0 (legacy)')}"
             f", cppgraph {m.get('cppgraph_version', '?')}"
@@ -1957,6 +2027,8 @@ def main(argv: list[str] | None = None) -> int:
             print(line)
             if scip.get("binary_status") in ("stale", "unknown"):
                 print(f"    ! {scip['binary_message']}")
+            if scip.get("patchset_status") == "stale":
+                print(f"    ! {scip['patchset_message']}")
             if scip.get("reindex_recommended"):
                 print(f"    ! {scip['reindex_message']}")
         tool = update_advice(m.get("cppgraph_version"))
@@ -2030,6 +2102,21 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[cppgraph] {node.symbol}")
         print(f"  name:       {node.display_name or '?'}")
         print(f"  defined at: {loc}")
+        if node.scip_kind is not None:
+            # Fine-grained SCIP kind from a kind-patched binary
+            # (`has_symbol_kind`); additive to the descriptor-suffix
+            # classification, absent on stock graphs — never an empty value.
+            print(f"  kind:       {node.scip_kind}")
+        if store.meta().get("has_external_symbols") == "true":
+            # External-package classification (`Index.external_symbols`):
+            # printed only when the graph carries the capability — omitted
+            # entirely on older graphs (absent, not "unknown").
+            if node.is_out_of_project is True:
+                print("  out of project: yes")
+            elif node.is_out_of_project is False:
+                print("  out of project: no")
+            else:
+                print("  out of project: unknown")
         if node.documentation:
             # Genuine doc comment from the graph (extracted at index time) —
             # no --root needed, unlike the signature below.
@@ -2037,6 +2124,16 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  documentation: {doc_lines[0]}")
             for doc_line in doc_lines[1:]:
                 print(f"    {doc_line}")
+        if node.signature_documentation:
+            # Signature recorded in the graph at index time (signature-emitting
+            # binary): printed with no --root, like documentation. Labelled
+            # apart from the source-derived `signature:` below so the two are
+            # never conflated (the source read also captures defaulted
+            # parameters the recorded text may lack).
+            sig_lines = node.signature_documentation.splitlines()
+            print(f"  signature (stored): {sig_lines[0]}")
+            for sig_line in sig_lines[1:]:
+                print(f"    {sig_line}")
         if args.root is not None:
             sig = extract_signature(args.root, node.file, node.line)
             if sig is not None:

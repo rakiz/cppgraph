@@ -1,0 +1,177 @@
+# SymbolInformation.kind — fills SCIP's SymbolInformation::Kind (field 5),
+# which upstream leaves at UnspecifiedKind on 100% of symbols. A syntactic
+# classifier (`classifySymbolKind` in indexer/Indexer.cc, same style as
+# read-write-access's `classifyAccessRoles`) maps the clang::Decl at each
+# SymbolInformation-creating site to its SCIP kind: Class/Struct/Union/Enum
+# (via TagDecl::getTagKind), EnumMember, Field, Function / Method /
+# StaticMethod / PureVirtualMethod / Constructor (FunctionDecl shape),
+# Variable / StaticDataMember (VarDecl), Namespace, TypeAlias; macros get
+# Macro and synthetic file symbols get File. The kind is carried through
+# the TU-merge pipeline: SymbolInformationBuilder gains a `kind` field
+# (captured from the raw per-TU SymbolInformation at merge time, defaulted
+# to UnspecifiedKind) and re-emits it in finish(). Symbols which get no
+# SymbolInformation today (local variables, parameters, template type
+# parameters) are unaffected — see the classifier's doc comment for scope
+# and limits. NOT (yet) an upstream PR.
+#
+# Applicability: generated with minimal diff context (`-U1`) so it applies
+# cleanly in any order relative to the other three patches in this directory
+# (or completely alone) — verified empirically: all 24 orderings of the four
+# patches applied to a clean v0.4.0 checkout produce byte-identical final
+# files. See scip-clang-patches/README.md's "Independence" section.
+diff --git a/indexer/Indexer.cc b/indexer/Indexer.cc
+index 79560fb..033760b 100644
+--- a/indexer/Indexer.cc
++++ b/indexer/Indexer.cc
+@@ -109,2 +109,72 @@ void FileLocalMacroOccurrence::emitOccurrence(SymbolFormatter &symbolFormatter,
+ 
++/// Classifies a declaration into SCIP's SymbolInformation::Kind (0 =
++/// UnspecifiedKind when no SCIP kind fits well), based on the shape of
++/// the declaration alone.
++///
++/// Scope and limits (syntactic classification only — no semantic
++/// analysis):
++/// - Only declarations which get a SymbolInformation emitted for them
++///   today are classified at the call sites; the arms for local
++///   variables and parameters exist for completeness, since those are
++///   currently emitted without a SymbolInformation.
++/// - Using-shadow declarations, template type parameters and concepts
++///   are left unclassified (UnspecifiedKind).
++/// - Destructors classify as Method (SCIP has no Destructor kind), and
++///   a C++ record declared with the `class` keyword as Class regardless
++///   of access defaults; `__interface` classifies as Interface.
++static scip::SymbolInformation::Kind
++classifySymbolKind(const clang::Decl &decl) {
++  if (auto *functionDecl = llvm::dyn_cast<clang::FunctionDecl>(&decl)) {
++    if (llvm::isa<clang::CXXConstructorDecl>(functionDecl)) {
++      return scip::SymbolInformation::Constructor;
++    }
++    if (functionDecl->isPureVirtual()) {
++      return scip::SymbolInformation::PureVirtualMethod;
++    }
++    if (auto *methodDecl = llvm::dyn_cast<clang::CXXMethodDecl>(functionDecl)) {
++      return methodDecl->isStatic()
++                 ? scip::SymbolInformation::StaticMethod
++                 : scip::SymbolInformation::Method;
++    }
++    return scip::SymbolInformation::Function;
++  }
++  if (auto *varDecl = llvm::dyn_cast<clang::VarDecl>(&decl)) {
++    if (llvm::isa<clang::ParmVarDecl>(varDecl)) {
++      return scip::SymbolInformation::Parameter;
++    }
++    if (varDecl->isStaticDataMember()) {
++      return scip::SymbolInformation::StaticDataMember;
++    }
++    return scip::SymbolInformation::Variable;
++  }
++  if (auto *tagDecl = llvm::dyn_cast<clang::TagDecl>(&decl)) {
++    switch (tagDecl->getTagKind()) {
++      case clang::TagTypeKind::Class:
++        return scip::SymbolInformation::Class;
++      case clang::TagTypeKind::Enum:
++        return scip::SymbolInformation::Enum;
++      case clang::TagTypeKind::Interface:
++        return scip::SymbolInformation::Interface;
++      case clang::TagTypeKind::Struct:
++        return scip::SymbolInformation::Struct;
++      case clang::TagTypeKind::Union:
++        return scip::SymbolInformation::Union;
++    }
++    return scip::SymbolInformation::UnspecifiedKind;
++  }
++  if (llvm::isa<clang::EnumConstantDecl>(&decl)) {
++    return scip::SymbolInformation::EnumMember;
++  }
++  if (llvm::isa<clang::FieldDecl>(&decl)) {
++    return scip::SymbolInformation::Field;
++  }
++  if (llvm::isa<clang::NamespaceDecl>(&decl)) {
++    return scip::SymbolInformation::Namespace;
++  }
++  if (llvm::isa<clang::TypedefNameDecl>(&decl)) {
++    return scip::SymbolInformation::TypeAlias;
++  }
++  return scip::SymbolInformation::UnspecifiedKind;
++}
++
+ void FileLocalMacroOccurrence::emitSymbolInformation(
+@@ -112,2 +182,3 @@ void FileLocalMacroOccurrence::emitSymbolInformation(
+   symbolInfo.set_symbol(name);
++  symbolInfo.set_kind(scip::SymbolInformation::Macro);
+   // TODO: Set documentation
+@@ -129,2 +200,3 @@ void NonFileBasedMacro::emitSymbolInformation(
+   symbolInfo.set_symbol(name.data(), name.size());
++  symbolInfo.set_kind(scip::SymbolInformation::Macro);
+ }
+@@ -415,2 +487,3 @@ void TuIndexer::saveSyntheticFileDefinition(clang::FileID fileId,
+     scip::SymbolInformation symbolInfo;
++    symbolInfo.set_kind(scip::SymbolInformation::File);
+     std::string docComment;
+@@ -474,2 +547,3 @@ void TuIndexer::saveEnumConstantDecl(
+   scip::SymbolInformation symbolInfo{};
++  symbolInfo.set_kind(classifySymbolKind(enumConstantDecl));
+   this->getDocComment(enumConstantDecl).addTo(symbolInfo);
+@@ -514,2 +588,3 @@ void TuIndexer::saveFieldDecl(const clang::FieldDecl &fieldDecl) {
+   scip::SymbolInformation symbolInfo{};
++  symbolInfo.set_kind(classifySymbolKind(fieldDecl));
+   this->getDocComment(fieldDecl).addTo(symbolInfo);
+@@ -535,2 +610,3 @@ void TuIndexer::saveFunctionDecl(const clang::FunctionDecl &functionDecl) {
+     scip::SymbolInformation symbolInfo{};
++    symbolInfo.set_kind(classifySymbolKind(functionDecl));
+     this->getDocComment(functionDecl).addTo(symbolInfo);
+@@ -607,2 +683,3 @@ void TuIndexer::saveNamespaceDecl(const clang::NamespaceDecl &namespaceDecl) {
+   scip::SymbolInformation symbolInfo;
++  symbolInfo.set_kind(classifySymbolKind(namespaceDecl));
+   *symbolInfo.add_documentation() =
+@@ -703,2 +780,3 @@ void TuIndexer::saveTagDecl(const clang::TagDecl &tagDecl) {
+   scip::SymbolInformation symbolInfo{};
++  symbolInfo.set_kind(classifySymbolKind(tagDecl));
+   this->getDocComment(tagDecl).addTo(symbolInfo);
+@@ -892,2 +970,3 @@ void TuIndexer::saveTypedefNameDecl(
+   scip::SymbolInformation symbolInfo{};
++  symbolInfo.set_kind(classifySymbolKind(typedefNameDecl));
+   this->getDocComment(typedefNameDecl).addTo(symbolInfo);
+@@ -946,2 +1025,3 @@ void TuIndexer::saveVarDecl(const clang::VarDecl &varDecl) {
+     scip::SymbolInformation symbolInfo{};
++    symbolInfo.set_kind(classifySymbolKind(varDecl));
+     this->getDocComment(varDecl).addTo(symbolInfo);
+diff --git a/indexer/ScipExtras.cc b/indexer/ScipExtras.cc
+index db5f8be..72b5fba 100644
+--- a/indexer/ScipExtras.cc
++++ b/indexer/ScipExtras.cc
+@@ -103,2 +103,6 @@ void SymbolInformationBuilder::finish(bool deterministic,
+ 
++  if (this->kind != scip::SymbolInformation::UnspecifiedKind) {
++    out.set_kind(this->kind);
++  }
++
+   out.mutable_documentation()->Reserve(this->documentation.size());
+@@ -189,3 +193,4 @@ void DocumentBuilder::merge(scip::Document &&doc) {
+           name, std::move(*symbolInfo.mutable_documentation()),
+-          std::move(*symbolInfo.mutable_relationships())};
++          std::move(*symbolInfo.mutable_relationships()),
++          /*kind=*/symbolInfo.kind()};
+       this->symbolInfos.emplace(name, std::move(builder));
+@@ -286,3 +291,3 @@ void IndexBuilder::addExternalSymbolUnchecked(
+   auto builder = std::make_unique<SymbolInformationBuilder>(
+-      name, std::move(docs), std::move(rels));
++      name, std::move(docs), std::move(rels), /*kind=*/extSym.kind());
+   this->externalSymbols.emplace(name, std::move(builder));
+diff --git a/indexer/ScipExtras.h b/indexer/ScipExtras.h
+index 7250a22..5ec4c9c 100644
+--- a/indexer/ScipExtras.h
++++ b/indexer/ScipExtras.h
+@@ -91,2 +91,3 @@ class SymbolInformationBuilder final {
+   absl::flat_hash_set<RelationshipExt> relationships;
++  scip::SymbolInformation::Kind kind;
+   scip_clang::Bomb _bomb;
+@@ -97,4 +98,6 @@ public:
+   template <typename C1, typename C2>
+-  SymbolInformationBuilder(SymbolNameRef name, C1 &&docs, C2 &&rels)
+-      : documentation(), relationships(),
++  SymbolInformationBuilder(SymbolNameRef name, C1 &&docs, C2 &&rels,
++                           scip::SymbolInformation::Kind kind =
++                               scip::SymbolInformation::UnspecifiedKind)
++      : documentation(), relationships(), kind(kind),
+         _bomb(BOMB_INIT(

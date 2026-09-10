@@ -13,11 +13,11 @@ Z"), in a handful of commands.
   - macOS Apple Silicon (arm64) ✅
   - Linux x86_64 ✅
   - **ARM-Linux (aarch64, e.g. Ubuntu arm64)** ✅ — natively, via this project's
-    prebuilt **#504** binary (the setup wizard's `download-504`, ~1 min, no
+    prebuilt **patched** binary (the setup wizard's `download-patched`, ~1 min, no
     Docker). Alternatives: **build** scip-clang locally (~25–60 min, Docker), or
     run the x86_64 binary via a container (emulated, slow — for a subsystem
     only). See [INSTALL.md](INSTALL.md) → "Intel Mac / Windows: index via a
-    container" and `docker/build-scip-clang/`.
+    container" and `docker/build-scip-clang-patched-linux/`.
   - **Windows** → run everything inside **WSL2 (Ubuntu)**; it behaves as Linux x86_64.
   - **Intel Mac** → no native `scip-clang` binary — **only emulate** (index via
     an x86 container, slower). You can still *use* a graph someone else built —
@@ -39,7 +39,7 @@ git clone https://github.com/rakiz/cppgraph "${XDG_DATA_HOME:-$HOME/.local/share
 ```
 
 `setup.sh` (needs [`uv`](https://docs.astral.sh/uv/)) asks how to obtain scip-clang
-from a menu — **download-504**, this project's prebuilt #504 binary (~1 min,
+from a menu — **download-patched**, this project's prebuilt patched binary (~1 min,
 native, no Docker; macOS arm64 + Linux aarch64), **download** the stock prebuilt
 (~1 min; macOS arm64 / Linux x86_64), **build** it locally with PR #504 (~25–60
 min, Docker, Linux only), or **emulate** via an x86 container — with an "abort"

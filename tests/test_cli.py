@@ -79,6 +79,85 @@ def test_callees_lists_callee(graph_path: Path, capsys: pytest.CaptureFixture[st
     assert "makeResumeToken(a1)." in out
 
 
+def test_references_access_flag_filters_and_annotates(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    typ = "cxx . . $ mongo/Widget#"
+    graph = Graph()
+    graph.add_reference(typ, "a.cpp", 10, roles=scip_pb2.SymbolRole.WriteAccess)
+    graph.add_reference(
+        typ,
+        "a.cpp",
+        12,
+        roles=scip_pb2.SymbolRole.ReadAccess | scip_pb2.SymbolRole.WriteAccess,
+    )
+    graph.add_reference(typ, "b.cpp", 41)  # plain read
+    path = tmp_path / "acc.db"
+    write_sqlite(graph, path)
+
+    # unfiltered: every site, writes tagged, plain reads silent
+    assert main(["references", "--graph", str(path), typ]) == 0
+    out = capsys.readouterr().out
+    assert "3 use site(s)" in out
+    assert "a.cpp:11 (write)" in out
+    assert "a.cpp:13 (read+write)" in out
+    assert "b.cpp:42\n" in out
+
+    # --access write: only WriteAccess-tagged sites
+    assert main(["references", "--graph", str(path), typ, "--access", "write"]) == 0
+    out = capsys.readouterr().out
+    assert "2 use site(s)" in out
+    assert "a.cpp:11 (write)" in out and "a.cpp:13 (read+write)" in out
+    assert "b.cpp:42" not in out
+
+    # --access read: only sites known NOT to be a write
+    assert main(["references", "--graph", str(path), typ, "--access", "read"]) == 0
+    out = capsys.readouterr().out
+    assert "1 use site(s)" in out
+    assert "b.cpp:42" in out and "a.cpp:" not in out
+
+
+def test_references_enclosing_symbol_and_access_annotate_together(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A binary with both patches (#504 + read-write-access) emits both facts on
+    # one reference: the used-by annotation and the write tag must land in their
+    # own slots of the same output line, neither clobbering the other.
+    typ = "cxx . . $ mongo/Widget#"
+    graph = Graph()
+    graph.add_node("cxx . . $ mongo/render(r1).")
+    graph.add_reference(
+        typ,
+        "a.cpp",
+        10,
+        enclosing_symbol="cxx . . $ mongo/render(r1).",
+        roles=scip_pb2.SymbolRole.WriteAccess,
+    )
+    path = tmp_path / "both.db"
+    write_sqlite(graph, path)
+
+    assert main(["references", "--graph", str(path), typ]) == 0
+    out = capsys.readouterr().out
+    assert "1 use site(s)" in out
+    assert "  a.cpp:11  (used by mongo/render(r1).) (write)\n" in out
+
+
+def test_references_access_flag_without_role_data_reports(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # references present but no role data (stock build): the filter must report
+    # and show nothing rather than pretend every site is a read.
+    typ = "cxx . . $ mongo/Widget#"
+    graph = Graph()
+    graph.add_reference(typ, "a.cpp", 10)
+    path = tmp_path / "stock.db"
+    write_sqlite(graph, path)
+
+    assert main(["references", "--graph", str(path), typ, "--access", "write"]) == 1
+    out = capsys.readouterr().out
+    assert "no read/write access data" in out
+
+
 def test_callers_unknown_symbol_errors(graph_path: Path) -> None:
     with pytest.raises(SystemExit):
         main(["callers", "--graph", str(graph_path), "nonexistent"])
@@ -362,6 +441,32 @@ def test_status_upgrade_hint_omits_estimate_without_ref_count(
     flat = " ".join(capsys.readouterr().out.split())
     assert "enrich-refs" in flat
     assert "extrapolated" not in flat
+
+
+@pytest.mark.parametrize(
+    "meta",
+    [{"has_symbol_kind": "true"}, {}],
+    ids=["kind-patched", "stock-binary"],
+)
+def test_status_reports_symbol_kind_line(
+    tmp_path: Path, meta: dict[str, str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The `has_symbol_kind` flag drives the `symbol kinds:` line of the CLI
+    status block, the same way `has_access_roles` drives `access roles:` —
+    present when the graph carries kinds, `none` + the upgrade hint when it
+    doesn't."""
+    graph = Graph()
+    graph.add_node("cxx . . $ mongo/Foo#makeResumeToken(a1).", display_name="x")
+    path = tmp_path / "g.db"
+    write_sqlite(graph, path, meta=meta)
+    assert main(["status", "--graph", str(path)]) == 0
+    status = capsys.readouterr().out
+    if meta.get("has_symbol_kind") == "true":
+        assert "fine-grained SCIP kinds present" in status
+        assert "-> to get them" not in status  # nothing to upgrade to
+    else:
+        assert "symbols carry no SCIP kind data" in status
+        assert "SymbolInformation.kind patch" in status  # the upgrade path is surfaced
 
 
 def test_enrich_refs_upgrades_existing_store(
@@ -778,6 +883,230 @@ def test_explain_no_documentation_line_when_absent(
     out = capsys.readouterr().out
     assert exit_code == 0
     assert "documentation" not in out
+
+
+def test_explain_prints_scip_kind_without_root(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The fine-grained SCIP kind comes from the graph itself (kind-patched
+    # binary): printed with no --root, like documentation.
+    graph = Graph()
+    node = graph.add_node("cxx . . $ mongo/Foo#bar(a1).", display_name="bar")
+    node.file = "src/x.cpp"
+    node.line = 2
+    node.scip_kind = "StaticMethod"
+    path = tmp_path / "graph.db"
+    write_sqlite(graph, path)
+    exit_code = main(["explain", "--graph", str(path), "cxx . . $ mongo/Foo#bar(a1)."])
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "kind:       StaticMethod" in out
+
+
+def test_explain_no_kind_line_when_absent(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Stock-binary graph: no kind line at all — absent, not an empty value.
+    graph = Graph()
+    node = graph.add_node("cxx . . $ mongo/Foo#nokind(n1).", display_name="nokind")
+    node.file = "src/x.cpp"
+    node.line = 2
+    path = tmp_path / "graph.db"
+    write_sqlite(graph, path)
+    exit_code = main(["explain", "--graph", str(path), "cxx . . $ mongo/Foo#nokind(n1)."])
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "kind:" not in out
+
+
+def _graph_with_stored_signature(tmp_path: Path) -> Path:
+    graph = Graph()
+    node = graph.add_node("cxx . . $ mongo/Foo#bar(a1).", display_name="bar")
+    node.file = "src/x.cpp"
+    node.line = 2
+    node.signature_documentation = "void bar(int a, int b)"
+    path = tmp_path / "graph.db"
+    write_sqlite(graph, path)
+    return path
+
+
+def test_explain_prints_stored_signature_without_root(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The signature comes from the graph itself (signature-emitting binary):
+    # printed with no --root, like documentation. Labelled apart from the
+    # source-derived `signature:` line so the two are never conflated.
+    path = _graph_with_stored_signature(tmp_path)
+    exit_code = main(["explain", "--graph", str(path), "cxx . . $ mongo/Foo#bar(a1)."])
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "signature (stored): void bar(int a, int b)" in out
+
+
+def test_explain_no_stored_signature_line_when_absent(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    graph = Graph()
+    node = graph.add_node("cxx . . $ mongo/Foo#nosig(n1).", display_name="nosig")
+    node.file = "src/x.cpp"
+    node.line = 2
+    path = tmp_path / "graph.db"
+    write_sqlite(graph, path)
+    exit_code = main(["explain", "--graph", str(path), "cxx . . $ mongo/Foo#nosig(n1)."])
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "signature (stored)" not in out
+
+
+def test_explain_stored_and_source_signatures_coexist(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # With --root, both the graph-stored and the source-derived signature can
+    # appear — distinctly labelled, never one clobbering the other.
+    path = _graph_with_stored_signature(tmp_path)
+    root = tmp_path / "checkout"
+    src = root / "src"
+    src.mkdir(parents=True)
+    (src / "x.cpp").write_text(
+        "line0\nline1\nvoid bar(int a, bool useNullIfMissing = false) {\n}\n"
+    )
+    exit_code = main(
+        ["explain", "--graph", str(path), "cxx . . $ mongo/Foo#bar(a1).", "--root", str(root)]
+    )
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "signature (stored): void bar(int a, int b)" in out
+    assert "signature:  (int a, bool useNullIfMissing = false)" in out
+
+
+def test_find_shows_scip_kind_when_present(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    graph = Graph()
+    node = graph.add_node("cxx . . $ mongo/Foo#bar(a1).", display_name="bar")
+    node.file = "src/x.cpp"
+    node.line = 2
+    node.scip_kind = "StaticMethod"
+    path = tmp_path / "graph.db"
+    write_sqlite(graph, path)
+    exit_code = main(["find", "--graph", str(path), "bar"])
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "[StaticMethod]" in out
+
+
+# --- is_out_of_project / has_external_symbols ---------------------------------
+
+
+@pytest.mark.parametrize(
+    ("classified", "line"),
+    [
+        (True, "out of project: yes"),
+        (False, "out of project: no"),
+        (None, "out of project: unknown"),
+    ],
+    ids=["external", "native", "phantom"],
+)
+def test_explain_prints_out_of_project_line(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    classified: bool | None,
+    line: str,
+) -> None:
+    """A graph carrying the external-symbol capability classifies every
+    explained symbol: yes/no/unknown — unknown meaning "no SymbolInformation
+    from either source" (a phantom), distinct from the capability being absent."""
+    graph = Graph()
+    node = graph.add_node("cxx . . $ mongo/Foo#bar(a1).", display_name="bar")
+    node.file = "src/x.cpp"
+    node.line = 2
+    node.is_out_of_project = classified
+    path = tmp_path / "graph.db"
+    write_sqlite(graph, path, meta={"has_external_symbols": "true"})
+    exit_code = main(["explain", "--graph", str(path), "cxx . . $ mongo/Foo#bar(a1)."])
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert line in out
+
+
+def test_explain_omits_out_of_project_line_when_capability_absent(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A pre-feature graph: no line at all — omitted, not "unknown" (the flag
+    gates the line's presence so older stores print exactly as before)."""
+    graph = Graph()
+    node = graph.add_node("cxx . . $ mongo/Foo#bar(a1).", display_name="bar")
+    node.file = "src/x.cpp"
+    node.line = 2
+    node.is_out_of_project = True  # data present, but the capability isn't claimed
+    path = tmp_path / "graph.db"
+    write_sqlite(graph, path)
+    exit_code = main(["explain", "--graph", str(path), "cxx . . $ mongo/Foo#bar(a1)."])
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "out of project" not in out
+
+
+def test_find_marks_only_external_results(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The `[out-of-project]` marker tags a concrete external (True) result
+    only; project-native (False) and unknown (None) results stay unmarked."""
+    graph = Graph()
+    ext = graph.add_node("cxx . . $ boost/Foo#bar(a1).", display_name="bar")
+    ext.file = None
+    native = graph.add_node("cxx . . $ mongo/Foo#bar(a1).", display_name="bar")
+    native.file = "src/x.cpp"
+    native.line = 2
+    phantom = graph.add_node("cxx . . $ mongo/phantom(p1).", display_name="phantom")
+    phantom.is_out_of_project = None
+    ext.is_out_of_project = True
+    native.is_out_of_project = False
+    path = tmp_path / "graph.db"
+    write_sqlite(graph, path, meta={"has_external_symbols": "true"})
+
+    assert main(["find", "--graph", str(path), "bar"]) == 0
+    out = capsys.readouterr().out
+    assert out.count("[out-of-project]") == 1  # only the boost one
+
+    assert main(["find", "--graph", str(path), "phantom"]) == 0
+    assert "[out-of-project]" not in capsys.readouterr().out
+
+
+def test_find_no_marker_when_capability_absent(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A pre-feature graph (or one whose incremental update wrote values
+    without claiming the capability): no markers, output unchanged."""
+    graph = Graph()
+    node = graph.add_node("cxx . . $ boost/Foo#bar(a1).", display_name="bar")
+    node.is_out_of_project = True
+    path = tmp_path / "graph.db"
+    write_sqlite(graph, path)
+    assert main(["find", "--graph", str(path), "bar"]) == 0
+    assert "[out-of-project]" not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "meta",
+    [{"has_external_symbols": "true"}, {}],
+    ids=["with-feature", "pre-feature"],
+)
+def test_status_reports_external_symbols_line(
+    tmp_path: Path, meta: dict[str, str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The `has_external_symbols` flag drives an informational capability line
+    in the CLI status block, mirroring the `symbol kinds:` line's shape."""
+    graph = Graph()
+    graph.add_node("cxx . . $ mongo/Foo#makeResumeToken(a1).", display_name="x")
+    path = tmp_path / "g.db"
+    write_sqlite(graph, path, meta=meta)
+    assert main(["status", "--graph", str(path)]) == 0
+    status = capsys.readouterr().out
+    if meta.get("has_external_symbols") == "true":
+        assert "external-package symbol metadata present" in status
+    else:
+        assert "no external-package symbol metadata" in status
 
 
 def test_explain_zero_callers_note_on_stock_graph(
@@ -1934,6 +2263,96 @@ def test_reachable_from_kind_inherits_walks_ancestry(
     assert "2 symbol(s) transitively reached from" in out
     assert "mongo/Derived#" in out
     assert "mongo/Base#" in out
+
+
+@pytest.fixture
+def typed_by_graph(tmp_path: Path) -> Path:
+    graph = Graph()
+    graph.add_edge(
+        "typed-by",
+        "cxx . . $ mongo/Outer#f.",
+        "cxx . . $ mongo/Value#",
+        file="outer.h",
+        line=4,
+    )
+    graph.add_edge(
+        "typed-by",
+        "cxx . . $ mongo/g.",
+        "cxx . . $ mongo/Value#",
+        file="globals.cpp",
+        line=9,
+    )
+    path = tmp_path / "typed_by.db"
+    write_sqlite(graph, path)
+    return path
+
+
+def test_impact_kind_typed_by_verb_output(
+    typed_by_graph: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`impact --kind typed-by` on a type lists the fields/variables typed as
+    it, with the dedicated "are typed as" verb."""
+    exit_code = main(
+        ["impact", "--graph", str(typed_by_graph), "--kind", "typed-by", "cxx . . $ mongo/Value#"]
+    )
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "2 symbol(s) are typed as" in out
+    assert "mongo/Outer#f." in out
+    assert "mongo/g." in out
+
+
+def test_reachable_from_kind_typed_by_returns_declared_type(
+    typed_by_graph: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    exit_code = main(
+        [
+            "reachable-from",
+            "--graph",
+            str(typed_by_graph),
+            "--kind",
+            "typed-by",
+            "cxx . . $ mongo/Outer#f.",
+        ]
+    )
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "1 symbol(s) transitively reached from" in out
+    assert "mongo/Value#" in out
+
+
+def test_boundary_violations_kind_typed_by_opt_in(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`--kind typed-by` checks type-usage crossing the boundary; the default
+    kinds stay calls+inherits (a typed-by edge alone is 0 violations there)."""
+    graph = Graph()
+    graph.add_edge("typed-by", "common_widget", "platform_value", file="common/widget.h", line=7)
+    graph.nodes["common_widget"].file = "common/widget.h"
+    graph.nodes["platform_value"].file = "platform/value.h"
+    path = tmp_path / "tbb.db"
+    write_sqlite(graph, path)
+    # default kinds: no violation
+    exit_code = main(["boundary-violations", "--graph", str(path), "--rule", "common/:platform/"])
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "0 of 0 violation(s)" in out
+    # explicit --kind typed-by: the crossing type usage fires
+    exit_code = main(
+        [
+            "boundary-violations",
+            "--graph",
+            str(path),
+            "--rule",
+            "common/:platform/",
+            "--kind",
+            "typed-by",
+        ]
+    )
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "1 of 1 violation(s)" in out
+    assert "typed-by  common_widget -> platform_value" in out
 
 
 def test_reachable_from_on_type_prints_notice(

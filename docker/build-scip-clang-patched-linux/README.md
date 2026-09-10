@@ -1,8 +1,33 @@
-# build-scip-clang — compile scip-clang natively, with `enclosing_range` (#504)
+# build-scip-clang-patched-linux — compile scip-clang natively, with our patches on top of v0.4.0
 
 Builds a `scip-clang` binary **from source, for the host's own CPU architecture**,
-carrying the `enclosing_range` feature ([PR #504](https://github.com/sourcegraph/scip-clang/pull/504))
-on top of the `v0.4.0` tag.
+carrying six patches stacked on the `v0.4.0` tag:
+
+1. `enclosing_range` ([PR #504](https://github.com/sourcegraph/scip-clang/pull/504))
+2. the `ForwardDefinition` bit on bodyless-declaration occurrences (our own fix,
+   not yet upstreamed — see `forward-definition-on-v0.4.0.patch` and `TODO.md`'s
+   scip-clang section). Fixes the declaration-site phantom-caller bug on
+   **stock-shaped** graphs too (doesn't need #504's intervals for that fix).
+3. the `ReadAccess`/`WriteAccess` syntactic classifier (our own fix, not yet
+   upstreamed — see `read-write-access-on-v0.4.0.patch`). Tags `symbol_roles`
+   with `WriteAccess` (and `ReadAccess` on read-modify-write sites) from the
+   syntactic AST parent alone; plain reads stay untagged.
+4. the `SymbolInformation.kind` syntactic classifier (our own fix, not yet
+   upstreamed — see `kind-on-v0.4.0.patch`). Fills SCIP's
+   `SymbolInformation.kind`, which upstream leaves at `UnspecifiedKind` on 100%
+   of symbols, by mapping the `clang::Decl` at each `SymbolInformation`-creating
+   site to its kind.
+5. the `SymbolInformation.signature_documentation` syntactic printer (our own
+   fix, not yet upstreamed — see `signature-documentation-on-v0.4.0.patch`).
+   Emits a pretty-printed declaration (no body, default arguments preserved)
+   for defined/pure-virtual function/method declarations.
+6. the `Relationship.is_type_definition` syntactic classifier (our own fix,
+   not yet upstreamed — see `typed-by-on-v0.4.0.patch`). Tags a field/variable's
+   own `SymbolInformation` with a relationship to its declared type, powering
+   cppgraph's `typed-by` edge kind.
+
+All six patches are bundled into one binary deliberately — there's no un-patched
+variant shipped, so every consumer of the patched binary gets all six fixes.
 
 ## Why this exists
 
@@ -20,7 +45,7 @@ that lacks a prebuilt binary builds its own once.
 ## Use
 
 ```sh
-./build.sh [output_dir]        # default output_dir: ./out
+./build.sh [output_dir]        # default: CPPGRAPH_BIN_DIR (see below)
 ```
 
 The build compiles LLVM/Clang from source — **CPU-, RAM- *and* disk-heavy**
@@ -47,6 +72,11 @@ Graviton `m6g.2xlarge` (Neoverse-N1, 8 vCPU, 30 GiB, ARM64). Where it goes:
 | bazelisk download                      | <1 s        |
 | `git clone` scip-clang v0.4.0          | <1 s        |
 | apply PR #504 patch                    | <1 s        |
+| apply ForwardDefinition patch           | <1 s        |
+| apply ReadAccess/WriteAccess patch      | <1 s        |
+| apply SymbolInformation.kind patch      | <1 s        |
+| apply signature_documentation patch    | <1 s        |
+| apply typed-by patch                   | <1 s        |
 | **Bazel compile (LLVM+Clang) + LTO link** | **~31 min** |
 
 So **~99 % is the Bazel compile** — scip-clang embeds Clang as a library, so it
@@ -79,21 +109,32 @@ cleaner:
 - `Dockerfile` — multi-stage: a `builder` stage (Bazelisk → `.bazelversion`'s
   Bazel → `bazel build //indexer:scip-clang --config=release-linux`), then a
   `scratch` `export` stage carrying only the binary.
-- `build.sh` — host-side driver (self-contained: its own dir is the build
-  context).
-- `enclosing_range-on-v0.4.0.patch` — the #504 change **rebased onto the
-  `v0.4.0` tag**, so it applies cleanly, **plus a hardening fix over the raw PR**:
-  the PR passes the enclosing range to `FileLocalSourceRange::fromNonEmpty`
-  without checking both endpoints are in the same file, so a range that spans a
-  macro expansion / `#include` boundary trips that function's `ENFORCE`
-  (`getFileID(end) == getFileID(start)`) and **crashes the worker**. On a large
-  codebase (e.g. MongoDB) this fires on a big fraction of TUs, and the dead
-  workers hang the whole index. Our patch adds a same-file guard before the call,
-  so such a range is simply skipped (no `enclosing_range` emitted for that
-  occurrence — graceful, since the reader treats it as optional). The Dockerfile
-  fails fast as a guard (`git apply --verbose`, then `grep -q enclosingRange
-  indexer/Indexer.cc`); if a future tag bump breaks it, rebase and re-apply the
-  same-file guard.
+- `build.sh` — host-side driver. Build context is the **repo root** (not this
+  dir), so the Dockerfile can `COPY` the shared `../../scip-clang-patches/`
+  patch files (see that directory's own README) — not self-contained anymore
+  since those patches also serve `scripts/build-scip-clang-patched-macos.sh`.
+- `enclosing_range-on-v0.4.0.patch`, `forward-definition-on-v0.4.0.patch`,
+  `read-write-access-on-v0.4.0.patch`, `kind-on-v0.4.0.patch` —
+  live in `../../scip-clang-patches/` (shared with the macOS build script), not
+  in this directory. See that directory's own README for what each patch does,
+  the build's apply order (not actually required — see that README's
+  "Independence" section), and why `forward-definition-on-v0.4.0.patch` is
+  ready for a standalone upstream PR despite being applied stacked here.
+
+## Not yet upstreamed
+
+Only `enclosing_range` (#504) is an upstream PR in progress. The
+`ForwardDefinition` fix (`../../scip-clang-patches/forward-definition-on-v0.4.0.patch`),
+the `ReadAccess`/`WriteAccess` classifier
+(`../../scip-clang-patches/read-write-access-on-v0.4.0.patch`), and the
+`SymbolInformation.kind` classifier
+(`../../scip-clang-patches/kind-on-v0.4.0.patch`) live only as our
+patches for now, but each already applies to a clean `v0.4.0` on its own
+(reduced diff context — see each patch's own header), so proposing either
+upstream (independent of whether #504 or the other lands) needs no rework of
+the patch itself, just the PR write-up. See `TODO.md`'s scip-clang section for
+the planned path (validate end-to-end in cppgraph, publish our own binaries,
+*then* propose upstream).
 
 ## Pins
 

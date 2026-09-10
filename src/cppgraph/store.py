@@ -59,6 +59,25 @@ CREATE TABLE files (
 -- (`SymbolInformation.documentation`, placeholder/auto-generated text filtered
 -- at build time — see `builder.real_documentation`); NULL when there is none.
 -- Powers `explain`'s documentation field, no source read needed.
+-- `scip_kind` = the symbol's fine-grained SCIP `SymbolInformation.kind` enum
+-- name ("StaticMethod", "Enum", …), emitted only by a kind-patched binary
+-- (patchset 4); NULL = no data (stock binary, or a Decl the patch leaves
+-- unclassified) — never an error. Additive to the descriptor-suffix
+-- classification; powers `explain`/`find`'s `scip_kind` field, flagged
+-- `has_symbol_kind` in meta.
+-- `signature_documentation` = the symbol's signature as recorded by a
+-- signature-emitting binary (`SymbolInformation.signature_documentation.text`,
+-- a `Signature` message); NULL when there is none (stock binary, or empty
+-- text — no placeholder exists for signatures). Powers `explain`'s stored
+-- signature, no source read needed; ungated (no meta flag), like
+-- `documentation`.
+-- `is_out_of_project` = whether the symbol is defined in an un-indexed
+-- external package (from `Index.external_symbols`, which the stock binary
+-- already emits): 1 = external, 0 = project-native (a `Document.symbols`
+-- `SymbolInformation` — project evidence always wins), NULL = no
+-- `SymbolInformation` from either source (a pure phantom node). Gated by the
+-- `has_external_symbols` meta flag (set on a full build only); powers
+-- `explain`/`find`'s `is_out_of_project` field.
 CREATE TABLE symbols (
     id            INTEGER PRIMARY KEY,
     symbol        TEXT NOT NULL,
@@ -66,7 +85,10 @@ CREATE TABLE symbols (
     file_id       INTEGER,
     line          INTEGER,
     end_line      INTEGER,
-    documentation TEXT
+    documentation TEXT,
+    scip_kind     TEXT,
+    signature_documentation TEXT,
+    is_out_of_project INTEGER
 );
 CREATE TABLE edges (
     kind    TEXT NOT NULL,
@@ -80,12 +102,15 @@ CREATE TABLE edges (
 -- definition symbol that contains the use site (opt-in `--attributed-refs`,
 -- needs an enclosing_range-emitting binary), or NULL when unattributed — then
 -- the reference is a pure location (file granularity). See DESIGN.md § Graph
--- model. Empty unless the graph was built with references.
+-- model. Empty unless the graph was built with references. `roles` carries the
+-- scip-clang ReadAccess(0x8)/WriteAccess(0x4) bits (patched binary only; 0 = a
+-- plain read or "this graph carries no access data").
 CREATE TABLE refs (
     symbol_id    INTEGER NOT NULL,
     file_id      INTEGER,
     line         INTEGER,
-    enclosing_id INTEGER
+    enclosing_id INTEGER,
+    roles        INTEGER NOT NULL DEFAULT 0
 );
 -- Provenance: what was indexed. `source_commit` is the anchor for an
 -- incremental `cppgraph update` (git-diff the stored commit against HEAD to
@@ -123,10 +148,21 @@ _FILE_LINE_RE = re.compile(r"^(.+):([1-9][0-9]*)$")
 # `schema_version` predates versioning (treated as the oldest, still readable).
 # `GraphStore` refuses to open a store whose version is *newer* than this — an
 # old binary must not silently misread a format it doesn't understand.
+# Policy: only bump past the last actually-RELEASED version (see versions.json
+# `releases` / CHANGELOG.md) — a schema change made on an unreleased branch
+# amends that same pending version number instead of incrementing further,
+# since no store in the wild can have seen a number nobody has shipped yet.
 # v3: `symbols.end_line` (definition body extents, #504 binaries only).
 # v4: `symbols.documentation` (genuine doc-comment text; placeholder and
-# auto-generated namespace/File text filtered at build time).
-SCHEMA_VERSION = 4
+# auto-generated namespace/File text filtered at build time). Released in v0.2.0.
+# v5: `refs.roles` (ReadAccess/WriteAccess bits, patched binaries only),
+# `symbols.scip_kind` (fine-grained `SymbolInformation.kind` enum names,
+# kind-patched binaries only), `symbols.signature_documentation` (signature
+# text from a signature-emitting binary, ungated like `documentation`) and
+# `symbols.is_out_of_project` (the `Index.external_symbols` classification —
+# external vs project-native vs phantom, gated by the `has_external_symbols`
+# meta flag). Released in v0.3.0.
+SCHEMA_VERSION = 5
 
 
 class IncompatibleStoreError(RuntimeError):
@@ -371,7 +407,7 @@ def build_provenance(
     if md.tool_info.version:
         meta["index_tool_version"] = md.tool_info.version
     # The SCIP metadata carries the tool's *version* but not which patch variant
-    # it was — "stock" vs a patched build (e.g. enclosing_range-504) emit
+    # it was — "stock" vs a patched build ("patched") emit
     # different indexes, so the caller stamps it (from the binary's provenance
     # sidecar). Lets `cppgraph status` tell when a graph is stale for the pin.
     if scip_variant:
@@ -456,6 +492,9 @@ def write_sqlite(graph: Graph, path: str | Path, *, meta: dict[str, str] | None 
                     node.line,
                     node.end_line,
                     node.documentation,
+                    node.scip_kind,
+                    node.signature_documentation,
+                    node.is_out_of_project,
                 )
             )
 
@@ -471,6 +510,7 @@ def write_sqlite(graph: Graph, path: str | Path, *, meta: dict[str, str] | None 
                 file_id(r.file),
                 r.line,
                 sym_ids.get(r.enclosing_symbol) if r.enclosing_symbol else None,
+                r.roles,
             )
             for r in graph.references
         ]
@@ -485,19 +525,39 @@ def write_sqlite(graph: Graph, path: str | Path, *, meta: dict[str, str] | None 
         # mirroring `has_references`/`has_attributed_refs` (absent on stock).
         if any(n.end_line is not None for n in graph.nodes.values()):
             all_meta.setdefault("has_enclosing_ranges", "true")
+        # Fine-grained SCIP kinds present on at least one symbol => the binary
+        # carried the kind patch. The data-driven gate for `explain`/`find`'s
+        # `scip_kind` field, mirroring `has_access_roles` (absent on stock).
+        if any(n.scip_kind for n in graph.nodes.values()):
+            all_meta.setdefault("has_symbol_kind", "true")
+        # External-package symbol metadata (`Index.external_symbols`
+        # classification): set by the BUILDER (`graph.has_external_symbols`) on
+        # any graph it produces, so a FULL build claims the capability
+        # unconditionally — even when this particular index listed no external
+        # symbols ("built with this feature", not "found some"). The
+        # incremental paths never write this flag: `apply_update` and
+        # `enrich_references` see partial indexes that cannot classify the
+        # whole pre-existing store, and neither consults the graph marker.
+        if graph.has_external_symbols:
+            all_meta.setdefault("has_external_symbols", "true")
         if graph.references:
             all_meta.setdefault("has_references", "true")
             all_meta.setdefault("ref_count", str(len(graph.references)))
             if attributed_refs:
                 all_meta.setdefault("has_attributed_refs", "true")
                 all_meta.setdefault("attributed_ref_count", str(attributed_refs))
+            # Any non-zero role => the binary tagged accesses (ReadAccess/
+            # WriteAccess patch). The data-driven gate for `--access` filtering
+            # and `(write)` annotations; absent on a stock binary.
+            if any(r.roles for r in graph.references):
+                all_meta.setdefault("has_access_roles", "true")
 
         con.executemany(
             "INSERT INTO files VALUES (?, ?)", [(fid, p) for p, fid in file_ids.items()]
         )
-        con.executemany("INSERT INTO symbols VALUES (?, ?, ?, ?, ?, ?, ?)", sym_rows)
+        con.executemany("INSERT INTO symbols VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", sym_rows)
         con.executemany("INSERT INTO edges VALUES (?, ?, ?, ?, ?)", edge_rows)
-        con.executemany("INSERT INTO refs VALUES (?, ?, ?, ?)", ref_rows)
+        con.executemany("INSERT INTO refs VALUES (?, ?, ?, ?, ?)", ref_rows)
         con.executemany("INSERT INTO meta VALUES (?, ?)", all_meta.items())
         con.executescript(_INDEXES)
         con.commit()
@@ -587,6 +647,10 @@ def enrich_references(path: str | Path, index: scip_pb2.Index) -> tuple[int, int
         cols = {row[1] for row in con.execute("PRAGMA table_info(refs)")}
         if "enclosing_id" not in cols:
             con.execute("ALTER TABLE refs ADD COLUMN enclosing_id INTEGER")
+        # Old (v4) stores lack `roles` too; add it so access-role backfill can
+        # write. NOT NULL DEFAULT 0 backfills existing rows with "no data".
+        if "roles" not in cols:
+            con.execute("ALTER TABLE refs ADD COLUMN roles INTEGER NOT NULL DEFAULT 0")
         # Old (v2) stores lack `symbols.end_line` too. This function stamps
         # the current schema_version below, so a store it touches must
         # actually be that shape — otherwise a later `line_span` query ("no
@@ -595,11 +659,32 @@ def enrich_references(path: str | Path, index: scip_pb2.Index) -> tuple[int, int
         sym_cols = {row[1] for row in con.execute("PRAGMA table_info(symbols)")}
         if "end_line" not in sym_cols:
             con.execute("ALTER TABLE symbols ADD COLUMN end_line INTEGER")
-        # Same for `symbols.documentation` (v3 stores): the stamped schema
-        # version says v4, so the store must be v4-shaped — `get_node`'s full
-        # SELECT and `apply_update`'s re-insert both read the column.
+        # Same for `symbols.documentation` (added at schema v4): the stamped
+        # `schema_version` below (SCHEMA_VERSION) always reflects the CURRENT
+        # constant, so any store this function touches must end up shaped to
+        # match it — `get_node`'s full SELECT and `apply_update`'s re-insert
+        # both read the column.
         if "documentation" not in sym_cols:
             con.execute("ALTER TABLE symbols ADD COLUMN documentation TEXT")
+        # Same for `symbols.scip_kind` (schema v5): fine-grained
+        # `SymbolInformation.kind` names from a kind-patched binary.
+        if "scip_kind" not in sym_cols:
+            con.execute("ALTER TABLE symbols ADD COLUMN scip_kind TEXT")
+        # Same for `symbols.signature_documentation` (schema v5): add
+        # the column only — enrich-refs never backfills signature text (that's
+        # `cppgraph build`'s job; unlike roles/kinds, no ride-along) — but the
+        # stamped `schema_version` below must end up shaped to match what
+        # `get_node`'s full SELECT and `apply_update`'s re-insert read.
+        if "signature_documentation" not in sym_cols:
+            con.execute("ALTER TABLE symbols ADD COLUMN signature_documentation TEXT")
+        # Same for `symbols.is_out_of_project` (schema v5): add the
+        # column only — enrich-refs never backfills the classification (that's
+        # `cppgraph build`'s job over a COMPLETE index; this .scip may be
+        # partial, and a whole-store classification is never this function's
+        # to claim) — and the `has_external_symbols` meta flag is untouched
+        # either way.
+        if "is_out_of_project" not in sym_cols:
+            con.execute("ALTER TABLE symbols ADD COLUMN is_out_of_project INTEGER")
 
         sym_ids = dict(con.execute("SELECT symbol, id FROM symbols"))
         file_ids = dict(con.execute("SELECT path, id FROM files"))
@@ -612,6 +697,33 @@ def enrich_references(path: str | Path, index: scip_pb2.Index) -> tuple[int, int
             if sid is None or eid is None:
                 continue
             updates.append((eid, sid, file_ids.get(r.file) if r.file else None, r.line))
+
+        # Backfill access roles too — decided: yes. A .scip from a patched
+        # binary carries ReadAccess/WriteAccess and `enrich-refs` is the
+        # no-rebuild path, so roles must ride along with attribution. A .scip
+        # without per-occurrence roles (older/stock indexer) yields no updates
+        # here: nothing written, nothing fabricated, and `has_access_roles`
+        # below stays off.
+        role_updates = []
+        for r in graph.references:
+            if not r.roles:
+                continue
+            sid = sym_ids.get(r.symbol)
+            if sid is None:
+                continue
+            role_updates.append((r.roles, sid, file_ids.get(r.file) if r.file else None, r.line))
+
+        # Backfill fine-grained symbol kinds too — same decision as roles: a
+        # kind-patched .scip carries `SymbolInformation.kind` and `enrich-refs`
+        # is the no-rebuild path, so kinds must ride along with attribution. A
+        # .scip without per-symbol kinds (older/stock indexer) yields no updates
+        # here: nothing written, nothing fabricated, and `has_symbol_kind`
+        # below stays off.
+        kind_updates = [
+            (n.scip_kind, sid)
+            for n in graph.nodes.values()
+            if n.scip_kind and (sid := sym_ids.get(n.symbol)) is not None
+        ]
 
         # Without a composite index the UPDATE below can only seek on symbol_id
         # (the sole index, ix_refs), then scans every row of that symbol to match
@@ -630,6 +742,15 @@ def enrich_references(path: str | Path, index: scip_pb2.Index) -> tuple[int, int
                 updates,
             )
             attributed = con.total_changes - before
+            before = con.total_changes
+            con.executemany(
+                "UPDATE refs SET roles = ? WHERE symbol_id = ? AND file_id IS ? AND line IS ?",
+                role_updates,
+            )
+            roles_set = con.total_changes - before
+            before = con.total_changes
+            con.executemany("UPDATE symbols SET scip_kind = ? WHERE id = ?", kind_updates)
+            kinds_set = con.total_changes - before
         finally:
             con.execute("DROP INDEX IF EXISTS ix_refs_enrich")
 
@@ -640,6 +761,8 @@ def enrich_references(path: str | Path, index: scip_pb2.Index) -> tuple[int, int
         for key, value in (
             ("has_attributed_refs", "true" if attributed else "false"),
             ("attributed_ref_count", str(attributed)),
+            ("has_access_roles", "true" if roles_set else "false"),
+            ("has_symbol_kind", "true" if kinds_set else "false"),
             ("schema_version", str(SCHEMA_VERSION)),
         ):
             con.execute(
@@ -812,42 +935,133 @@ class GraphStore:
         try:
             row = self._con.execute(
                 """
-                SELECT s.symbol, s.display_name, f.path, s.line, s.end_line, s.documentation
+                SELECT s.symbol, s.display_name, f.path, s.line, s.end_line, s.documentation,
+                       s.scip_kind, s.signature_documentation, s.is_out_of_project
                 FROM symbols s LEFT JOIN files f ON f.id = s.file_id
                 WHERE s.symbol = ?
                 """,
                 (symbol,),
             ).fetchone()
         except sqlite3.OperationalError:
-            # Store predates `symbols.documentation` (schema v3, never migrated
-            # by apply_update/enrich_references) — degrade to the v3 shape
-            # rather than crash a plain read-only query.
+            # Store predates `symbols.is_out_of_project` (schema v5 as first
+            # drafted, before this amendment) — degrade to that shape rather
+            # than crash a plain read-only query, keeping every datum the
+            # amended shape already carries.
+            return self._get_node_pre_is_out_of_project(symbol)
+        if row is None:
+            return None
+        return Node(
+            symbol=row[0],
+            display_name=row[1] or "",
+            file=row[2],
+            line=row[3],
+            end_line=row[4],
+            documentation=row[5],
+            scip_kind=row[6],
+            signature_documentation=row[7],
+            is_out_of_project=None if row[8] is None else bool(row[8]),
+        )
+
+    def _get_node_pre_is_out_of_project(self, symbol: str) -> Node | None:
+        """The `get_node` fallback cascade as it was before the
+        `symbols.is_out_of_project` amendment — one degrade level per column a
+        store may predate (same pattern, continued in a helper rather than a
+        sixth nesting level). Nodes read back with `is_out_of_project=None`
+        (the "no data" default), never an error."""
+        try:
+            row = self._con.execute(
+                """
+                SELECT s.symbol, s.display_name, f.path, s.line, s.end_line, s.documentation,
+                       s.scip_kind, s.signature_documentation
+                FROM symbols s LEFT JOIN files f ON f.id = s.file_id
+                WHERE s.symbol = ?
+                """,
+                (symbol,),
+            ).fetchone()
+        except sqlite3.OperationalError:
+            # Store predates `symbols.signature_documentation` (schema v5 as
+            # first drafted, before this amendment) — degrade to that shape
+            # rather than crash a plain read-only query, keeping every datum
+            # the amended shape already carries.
             try:
                 row = self._con.execute(
                     """
-                    SELECT s.symbol, s.display_name, f.path, s.line, s.end_line
+                    SELECT s.symbol, s.display_name, f.path, s.line, s.end_line, s.documentation,
+                           s.scip_kind
                     FROM symbols s LEFT JOIN files f ON f.id = s.file_id
                     WHERE s.symbol = ?
                     """,
                     (symbol,),
                 ).fetchone()
             except sqlite3.OperationalError:
-                # Nor even `end_line` (schema v2) — the original fallback.
-                row = self._con.execute(
-                    """
-                    SELECT s.symbol, s.display_name, f.path, s.line
-                    FROM symbols s LEFT JOIN files f ON f.id = s.file_id
-                    WHERE s.symbol = ?
-                    """,
-                    (symbol,),
-                ).fetchone()
+                # Store predates `symbols.scip_kind` (schema v4, never migrated
+                # by apply_update/enrich_references) — degrade to the v4 shape
+                # rather than crash a plain read-only query (and keep `documentation`,
+                # which the released shape already carries).
+                try:
+                    row = self._con.execute(
+                        """
+                        SELECT s.symbol, s.display_name, f.path, s.line, s.end_line, s.documentation
+                        FROM symbols s LEFT JOIN files f ON f.id = s.file_id
+                        WHERE s.symbol = ?
+                        """,
+                        (symbol,),
+                    ).fetchone()
+                except sqlite3.OperationalError:
+                    # Nor even `documentation` (schema v3) — degrade again.
+                    try:
+                        row = self._con.execute(
+                            """
+                            SELECT s.symbol, s.display_name, f.path, s.line, s.end_line
+                            FROM symbols s LEFT JOIN files f ON f.id = s.file_id
+                            WHERE s.symbol = ?
+                            """,
+                            (symbol,),
+                        ).fetchone()
+                    except sqlite3.OperationalError:
+                        # Nor even `end_line` (schema v2) — the original fallback.
+                        row = self._con.execute(
+                            """
+                            SELECT s.symbol, s.display_name, f.path, s.line
+                            FROM symbols s LEFT JOIN files f ON f.id = s.file_id
+                            WHERE s.symbol = ?
+                            """,
+                            (symbol,),
+                        ).fetchone()
+                        if row is None:
+                            return None
+                        return Node(
+                            symbol=row[0], display_name=row[1] or "", file=row[2], line=row[3]
+                        )
+                    if row is None:
+                        return None
+                    return Node(
+                        symbol=row[0],
+                        display_name=row[1] or "",
+                        file=row[2],
+                        line=row[3],
+                        end_line=row[4],
+                    )
                 if row is None:
                     return None
-                return Node(symbol=row[0], display_name=row[1] or "", file=row[2], line=row[3])
+                return Node(
+                    symbol=row[0],
+                    display_name=row[1] or "",
+                    file=row[2],
+                    line=row[3],
+                    end_line=row[4],
+                    documentation=row[5],
+                )
             if row is None:
                 return None
             return Node(
-                symbol=row[0], display_name=row[1] or "", file=row[2], line=row[3], end_line=row[4]
+                symbol=row[0],
+                display_name=row[1] or "",
+                file=row[2],
+                line=row[3],
+                end_line=row[4],
+                documentation=row[5],
+                scip_kind=row[6],
             )
         if row is None:
             return None
@@ -858,6 +1072,8 @@ class GraphStore:
             line=row[3],
             end_line=row[4],
             documentation=row[5],
+            scip_kind=row[6],
+            signature_documentation=row[7],
         )
 
     def find(self, query: str, fuzzy: bool = False) -> list[Node]:
@@ -906,15 +1122,59 @@ class GraphStore:
             params = []
             for t in tokens:
                 params.extend((t, t))
-        rows = self._con.execute(
-            f"""
-            SELECT s.symbol, s.display_name, f.path, s.line
-            FROM symbols s LEFT JOIN files f ON f.id = s.file_id
-            WHERE {clause}
-            """,
-            params,
-        ).fetchall()
-        return [Node(symbol=r[0], display_name=r[1] or "", file=r[2], line=r[3]) for r in rows]
+        try:
+            rows = self._con.execute(
+                f"""
+                SELECT s.symbol, s.display_name, f.path, s.line, s.scip_kind,
+                       s.is_out_of_project
+                FROM symbols s LEFT JOIN files f ON f.id = s.file_id
+                WHERE {clause}
+                """,
+                params,
+            ).fetchall()
+            return [
+                Node(
+                    symbol=r[0],
+                    display_name=r[1] or "",
+                    file=r[2],
+                    line=r[3],
+                    scip_kind=r[4],
+                    is_out_of_project=None if r[5] is None else bool(r[5]),
+                )
+                for r in rows
+            ]
+        except sqlite3.OperationalError:
+            # Store predates `symbols.is_out_of_project` (schema v5 as first
+            # drafted, before this amendment) — degrade to that shape rather
+            # than crash a read-only query.
+            try:
+                rows = self._con.execute(
+                    f"""
+                    SELECT s.symbol, s.display_name, f.path, s.line, s.scip_kind
+                    FROM symbols s LEFT JOIN files f ON f.id = s.file_id
+                    WHERE {clause}
+                    """,
+                    params,
+                ).fetchall()
+                return [
+                    Node(symbol=r[0], display_name=r[1] or "", file=r[2], line=r[3], scip_kind=r[4])
+                    for r in rows
+                ]
+            except sqlite3.OperationalError:
+                # Store predates `symbols.scip_kind` (schema v4, never
+                # migrated) — degrade to the released shape rather than crash
+                # a read-only query.
+                rows = self._con.execute(
+                    f"""
+                    SELECT s.symbol, s.display_name, f.path, s.line
+                    FROM symbols s LEFT JOIN files f ON f.id = s.file_id
+                    WHERE {clause}
+                    """,
+                    params,
+                ).fetchall()
+                return [
+                    Node(symbol=r[0], display_name=r[1] or "", file=r[2], line=r[3]) for r in rows
+                ]
 
     def resolve(self, query: str) -> tuple[str | None, list[Node]]:
         """Resolve a caller-supplied `query` to one exact symbol — the shared
@@ -1106,7 +1366,7 @@ class GraphStore:
         try:
             rows = self._con.execute(
                 """
-                SELECT f.path, r.line, e.symbol
+                SELECT f.path, r.line, e.symbol, r.roles
                 FROM refs r
                 LEFT JOIN files f ON f.id = r.file_id
                 LEFT JOIN symbols e ON e.id = r.enclosing_id
@@ -1116,15 +1376,18 @@ class GraphStore:
                 (sym_id,),
             ).fetchall()
         except sqlite3.OperationalError:
-            # Store predates the `enclosing_id` column (schema v1) or the refs
-            # table entirely; retry without the enclosing join, else give up.
+            # Store predates the `roles` column (schema v4): retry without it —
+            # the graph carries no access data, so roles degrade to 0 (never
+            # fabricated).
             try:
                 rows = [
-                    (r[0], r[1], None)
+                    (r[0], r[1], r[2], 0)
                     for r in self._con.execute(
                         """
-                        SELECT f.path, r.line
-                        FROM refs r LEFT JOIN files f ON f.id = r.file_id
+                        SELECT f.path, r.line, e.symbol
+                        FROM refs r
+                        LEFT JOIN files f ON f.id = r.file_id
+                        LEFT JOIN symbols e ON e.id = r.enclosing_id
                         WHERE r.symbol_id = ?
                         ORDER BY f.path, r.line
                         """,
@@ -1132,8 +1395,28 @@ class GraphStore:
                     ).fetchall()
                 ]
             except sqlite3.OperationalError:
-                return []
-        return [Reference(symbol=symbol, file=r[0], line=r[1], enclosing_symbol=r[2]) for r in rows]
+                # Store predates the `enclosing_id` column (schema v1) or the
+                # refs table entirely; retry without the enclosing join, else
+                # give up.
+                try:
+                    rows = [
+                        (r[0], r[1], None, 0)
+                        for r in self._con.execute(
+                            """
+                            SELECT f.path, r.line
+                            FROM refs r LEFT JOIN files f ON f.id = r.file_id
+                            WHERE r.symbol_id = ?
+                            ORDER BY f.path, r.line
+                            """,
+                            (sym_id,),
+                        ).fetchall()
+                    ]
+                except sqlite3.OperationalError:
+                    return []
+        return [
+            Reference(symbol=symbol, file=r[0], line=r[1], enclosing_symbol=r[2], roles=r[3])
+            for r in rows
+        ]
 
     # --- traversals (indexed neighbour lookups, never a full load) ---------
 
@@ -1182,8 +1465,11 @@ class GraphStore:
         Reverse BFS over `ix_dst`; `max_depth` bounds the backward hops
         (`None` = unbounded). `kind="calls"` is the call blast-radius (who
         transitively calls it); `kind="inherits"` is the type hierarchy below a
-        base (all transitive subclasses). Walks in id-space, resolving to symbol
-        strings only for the final result set.
+        base (all transitive subclasses); `kind="typed-by"` is the fields and
+        variables typed as that type (reverse impact on a type returns the
+        fields/variables typed as it — needs the `typed-by` patch's edges).
+        Walks in id-space, resolving to symbol strings only for the final
+        result set.
         """
         start_id = self._symbol_id(symbol)
         if start_id is None:
@@ -1217,7 +1503,9 @@ class GraphStore:
         backward over `ix_dst`; `max_depth` bounds the forward hops (`None` =
         unbounded). `kind="calls"` is forward call reachability (what an entry
         point can reach); `kind="inherits"` walks a derived type up its base
-        hierarchy (all transitive ancestors). Walks in id-space, resolving to
+        hierarchy (all transitive ancestors); `kind="typed-by"` from a
+        field/variable returns its declared type (forward reachability from a
+        field/variable returns the type). Walks in id-space, resolving to
         symbol strings only for the final result set.
         """
         start_id = self._symbol_id(symbol)
@@ -1673,7 +1961,7 @@ class GraphStore:
         edge_kinds: tuple[str, ...] = ("calls", "inherits"),
         limit: int = 40,
     ) -> tuple[list[dict[str, str | int | None]], int]:
-        """`calls`/`inherits` edges that cross a caller-declared layering rule.
+        """Edges of the requested kinds that cross a caller-declared layering rule.
 
         A rule is `(from_prefix, forbidden_prefix)`: "no edge whose *source*
         symbol is defined under `from_prefix` may point at a symbol defined
@@ -1686,6 +1974,14 @@ class GraphStore:
         crosses the rules (runtime dispatch — virtual calls, function
         pointers — can cross a boundary with no static edge), never a proof of
         conformance.
+
+        `edge_kinds` selects which edges are checked — a subset of `calls`
+        (a call crosses the boundary), `inherits` (a subclass derives across
+        it), `implements` (an override crosses it), and `typed-by` (a
+        field/variable typed as a type across the boundary — a type-usage
+        layering check; needs the `typed-by` patch's edges). The default is
+        `("calls", "inherits")` — `implements` and `typed-by` are opt-in via
+        an explicit `edge_kinds`.
 
         Directory membership is the endpoint's own definition file, matched on
         a path-segment boundary via `cppgraph.filters.matches_path_prefix`
@@ -1718,7 +2014,7 @@ class GraphStore:
             raise ValueError(f"limit must be >= 0, got {limit}")
         if not edge_kinds:
             raise ValueError("edge_kinds must not be empty (it would match nothing)")
-        unknown = sorted(set(edge_kinds) - {"calls", "inherits", "implements"})
+        unknown = sorted(set(edge_kinds) - {"calls", "inherits", "implements", "typed-by"})
         if unknown:
             raise ValueError(f"unknown edge kind(s): {', '.join(unknown)}")
 
@@ -2195,11 +2491,15 @@ class GraphStore:
         con = self._con
         changed_files = list(changed_files)
         with con:  # atomic: commit on success, rollback on error
-            # (0) an older store may lack `end_line` (v2) or `documentation`
-            # (v3); add them on demand — the same ALTER pattern
+            # (0) an older store may lack `end_line` (introduced in schema v3),
+            # `documentation` (v4), or `refs.roles` / `symbols.scip_kind` /
+            # `symbols.signature_documentation` / `symbols.is_out_of_project`
+            # (all v5); add them on demand — the same ALTER pattern
             # `enrich_references` uses for `refs.enclosing_id` — so the
-            # re-insert below can write body extents and doc text. The store
-            # is now v4-shaped, so stamp it.
+            # re-insert below can write body extents, doc text, access roles,
+            # fine-grained kinds, recorded signatures and the external-symbol
+            # classification.
+            # The store is now v5-shaped, so stamp it.
             cols = {row[1] for row in con.execute("PRAGMA table_info(symbols)")}
             stale_shape = False
             if "end_line" not in cols:
@@ -2207,6 +2507,19 @@ class GraphStore:
                 stale_shape = True
             if "documentation" not in cols:
                 con.execute("ALTER TABLE symbols ADD COLUMN documentation TEXT")
+                stale_shape = True
+            if "scip_kind" not in cols:
+                con.execute("ALTER TABLE symbols ADD COLUMN scip_kind TEXT")
+                stale_shape = True
+            if "signature_documentation" not in cols:
+                con.execute("ALTER TABLE symbols ADD COLUMN signature_documentation TEXT")
+                stale_shape = True
+            if "is_out_of_project" not in cols:
+                con.execute("ALTER TABLE symbols ADD COLUMN is_out_of_project INTEGER")
+                stale_shape = True
+            ref_cols = {row[1] for row in con.execute("PRAGMA table_info(refs)")}
+            if "roles" not in ref_cols:
+                con.execute("ALTER TABLE refs ADD COLUMN roles INTEGER NOT NULL DEFAULT 0")
                 stale_shape = True
             if stale_shape:
                 con.execute(
@@ -2241,7 +2554,9 @@ class GraphStore:
                 con.execute(f"DELETE FROM refs WHERE file_id IN ({ph})", chunk)
                 con.execute(
                     f"UPDATE symbols SET file_id = NULL, line = NULL, end_line = NULL, "
-                    f"documentation = NULL WHERE file_id IN ({ph})",
+                    f"documentation = NULL, scip_kind = NULL, signature_documentation = NULL, "
+                    f"is_out_of_project = NULL "
+                    f"WHERE file_id IN ({ph})",
                     chunk,
                 )
 
@@ -2272,7 +2587,35 @@ class GraphStore:
                 # site replaces the doc text too — even with NULL (comment
                 # deleted since, or never real) — instead of leaking text
                 # captured at the previous site; no fresh site keeps it.
-                "documentation = CASE WHEN ? IS NOT NULL THEN ? ELSE documentation END "
+                "documentation = CASE WHEN ? IS NOT NULL THEN ? ELSE documentation END, "
+                # `scip_kind` travels with the fresh definition site exactly
+                # like documentation: a kind-carrying partial replaces it (even
+                # with NULL — a kindless partial downgrades the changed files'
+                # kinds, the accepted stock-update degradation), no fresh site
+                # keeps the old value.
+                "scip_kind = CASE WHEN ? IS NOT NULL THEN ? ELSE scip_kind END, "
+                # `signature_documentation` travels with the fresh definition
+                # site exactly like documentation: a signature-carrying partial
+                # replaces it (even with NULL — a signature-less partial
+                # downgrades the changed files' recorded signatures, the
+                # accepted stock-update degradation), no fresh site keeps the
+                # old value.
+                "signature_documentation = CASE WHEN ? IS NOT NULL THEN ? "
+                "ELSE signature_documentation END, "
+                # `is_out_of_project` does NOT travel with the fresh definition
+                # site — its evidence is `SymbolInformation` presence in the
+                # partial (from either `Document.symbols` or
+                # `Index.external_symbols`), not the site, so a declaration-only
+                # partial still classifies. Project-native evidence (0/False)
+                # always wins: it flips even a stored True (a symbol previously
+                # only seen in `Index.external_symbols` that a later update now
+                # defines in the project). An external True only fills no-data
+                # or True — never over a stored False. A partial that carries no
+                # classification for the symbol (a pure phantom here) keeps the
+                # stored value.
+                "is_out_of_project = CASE WHEN ? IS NULL THEN is_out_of_project "
+                "WHEN ? = 0 THEN 0 "
+                "ELSE COALESCE(is_out_of_project, 1) END "
                 "WHERE id = ?",
                 [
                     (
@@ -2283,6 +2626,12 @@ class GraphStore:
                         n.end_line,
                         file_id.get(n.file) if n.file else None,
                         n.documentation,
+                        file_id.get(n.file) if n.file else None,
+                        n.scip_kind,
+                        file_id.get(n.file) if n.file else None,
+                        n.signature_documentation,
+                        n.is_out_of_project,
+                        n.is_out_of_project,
                         sym_id[n.symbol],
                     )
                     for n in partial.nodes.values()
@@ -2302,13 +2651,15 @@ class GraphStore:
                 ],
             )
             con.executemany(
-                "INSERT INTO refs(symbol_id, file_id, line, enclosing_id) VALUES (?, ?, ?, ?)",
+                "INSERT INTO refs(symbol_id, file_id, line, enclosing_id, roles) "
+                "VALUES (?, ?, ?, ?, ?)",
                 [
                     (
                         sym_id[r.symbol],
                         file_id.get(r.file) if r.file else None,
                         r.line,
                         sym_id.get(r.enclosing_symbol) if r.enclosing_symbol else None,
+                        r.roles,
                     )
                     for r in partial.references
                 ],
@@ -2335,7 +2686,14 @@ class GraphStore:
 
             # (5) refresh meta: provided provenance + recomputed counts. A
             # partial carrying body extents (#504 re-index) flips the
-            # enclosing-range gate on; nothing ever flips it off.
+            # enclosing-range gate on; a partial carrying access roles (patched
+            # binary) flips the access-roles gate on; a partial carrying
+            # fine-grained kinds (kind-patched binary) flips the kind gate on;
+            # nothing ever flips any of them off. `has_external_symbols` is
+            # deliberately absent from this block — a partial index covers only
+            # the changed TUs and cannot classify the whole pre-existing store,
+            # so an incremental update must never claim capability-completeness
+            # (only a full build's `write_sqlite` sets it).
             node_count = con.execute("SELECT COUNT(*) FROM symbols").fetchone()[0]
             edge_count = con.execute("SELECT COUNT(*) FROM edges").fetchone()[0]
             ref_count = con.execute("SELECT COUNT(*) FROM refs").fetchone()[0]
@@ -2344,6 +2702,10 @@ class GraphStore:
             all_meta["edge_count"] = str(edge_count)
             if any(n.end_line is not None for n in partial.nodes.values()):
                 all_meta.setdefault("has_enclosing_ranges", "true")
+            if any(n.scip_kind for n in partial.nodes.values()):
+                all_meta.setdefault("has_symbol_kind", "true")
+            if any(r.roles for r in partial.references):
+                all_meta.setdefault("has_access_roles", "true")
             if ref_count:
                 all_meta["ref_count"] = str(ref_count)
             con.executemany("INSERT OR REPLACE INTO meta VALUES (?, ?)", all_meta.items())

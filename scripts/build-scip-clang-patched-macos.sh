@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# Build scip-clang (v0.4.0 + enclosing_range / PR #504) NATIVELY on macOS, for
-# THIS Mac's CPU architecture. Mirrors docker/build-scip-clang/build.sh's role
+# Build scip-clang (v0.4.0 + this repo's full patch bundle from
+# scip-clang-patches/ — see scip-clang-patches/README.md for the current
+# list) NATIVELY on macOS, for
+# THIS Mac's CPU architecture. Mirrors docker/build-scip-clang-patched-linux/build.sh's role
 # but skips Docker entirely — a Linux container on a Mac can only ever produce
 # a Linux binary, so getting a native macOS binary means building on the host.
 #
@@ -8,7 +10,7 @@
 # Python code. Compiles LLVM/Clang from source via Bazel — expect ~30-60 min
 # and ~30-40 GB of disk.
 #
-#   scripts/build-scip-clang-macos.sh [output_dir]   # default: CPPGRAPH_BIN_DIR
+#   scripts/build-scip-clang-patched-macos.sh [output_dir]   # default: CPPGRAPH_BIN_DIR
 #
 # Requires: macOS, Xcode Command Line Tools, git, python3, and Bazel or
 # Bazelisk (auto-downloaded into a local dir if neither is found).
@@ -20,7 +22,7 @@ die() { echo "error: $*" >&2; exit 1; }
 # --- host checks -----------------------------------------------------------
 [ "$(uname -s)" = "Darwin" ] || die \
   "this script is macOS-only. On Linux (or to cross-build a Linux binary via" \
-  $'\n'"Docker, even from a Mac), use docker/build-scip-clang/build.sh instead."
+  $'\n'"Docker, even from a Mac), use docker/build-scip-clang-patched-linux/build.sh instead."
 HOST_ARCH="$(uname -m)"
 echo "==> Host: Darwin $HOST_ARCH"
 [ "$HOST_ARCH" = "arm64" ] || echo "  note: expected arm64 (Apple Silicon); continuing on $HOST_ARCH."
@@ -82,9 +84,14 @@ if [ "$MIN_GB" -gt 0 ] 2>/dev/null; then
   fi
 fi
 
-# --- pinned version (same read pattern as publish-scip-clang-504.sh) --------
+# --- pinned version (same read pattern as publish-scip-clang-patched.sh) -------
 SCIP_CLANG_TAG="v$(python3 -c 'import json; print(json.load(open("versions.json"))["scip_clang"]["version"])')" \
   || die "could not read the scip-clang version pin from versions.json"
+# Same pin, patch bundle version: a local build always bakes in the CURRENT
+# patchset, so the sidecar must be stamped with it — without the stamp
+# `cppgraph status` assumes p1 and nags "stale" forever (rebuilding repeats it).
+PATCHSET_VERSION="$(python3 -c 'import json; print(json.load(open("versions.json"))["scip_clang"].get("patchset_version", 1))' 2>/dev/null)" \
+  || die "could not read versions.json (missing/malformed file) — patchset_version itself defaults to 1 when absent"
 
 # --- clone + patch, reused across runs --------------------------------------
 echo "==> Source: $BUILD_ROOT (pinned $SCIP_CLANG_TAG)"
@@ -106,7 +113,7 @@ if [ ! -d "$BUILD_ROOT/.git" ]; then
     https://github.com/sourcegraph/scip-clang.git "$BUILD_ROOT"
 fi
 
-PATCH="$(pwd)/docker/build-scip-clang/enclosing_range-on-v0.4.0.patch"
+PATCH="$(pwd)/scip-clang-patches/enclosing_range-on-v0.4.0.patch"
 [ -f "$PATCH" ] || die "patch not found at $PATCH"
 if grep -q 'enclosingRange' "$BUILD_ROOT/indexer/Indexer.cc" 2>/dev/null; then
   echo "  already patched (enclosingRange present) — skipping git apply"
@@ -115,6 +122,91 @@ else
   git -C "$BUILD_ROOT" apply --verbose "$PATCH"
   grep -q 'enclosingRange' "$BUILD_ROOT/indexer/Indexer.cc" \
     || die "patch applied but grep for 'enclosingRange' still failed — patch may be a no-op"
+fi
+
+# Apply the ForwardDefinition bit fix (applied here after enclosing_range
+# purely for build consistency — all six patches are actually order-independent,
+# see scip-clang-patches/README.md).
+FWD_PATCH="$(pwd)/scip-clang-patches/forward-definition-on-v0.4.0.patch"
+[ -f "$FWD_PATCH" ] || die "patch not found at $FWD_PATCH"
+if grep -q 'is_declaration_site' "$BUILD_ROOT/proto/fwd_decls.proto" 2>/dev/null; then
+  echo "  already patched (is_declaration_site present) — skipping git apply"
+else
+  echo "==> Applying ForwardDefinition bit patch"
+  git -C "$BUILD_ROOT" apply --verbose "$FWD_PATCH"
+  grep -q 'is_declaration_site' "$BUILD_ROOT/proto/fwd_decls.proto" \
+    || die "patch applied but grep for 'is_declaration_site' still failed — patch may be a no-op"
+fi
+
+# Apply the ReadAccess/WriteAccess syntactic classifier (applied here after
+# the three patches above purely for build consistency — all six patches are
+# actually order-independent, see scip-clang-patches/README.md). Tags
+# symbol_roles with WriteAccess (ReadAccess alongside it on read-modify-write
+# sites) based on the syntactic AST parent of the reference site.
+RW_PATCH="$(pwd)/scip-clang-patches/read-write-access-on-v0.4.0.patch"
+[ -f "$RW_PATCH" ] || die "patch not found at $RW_PATCH"
+if grep -q 'classifyAccessRoles' "$BUILD_ROOT/indexer/Indexer.cc" 2>/dev/null; then
+  echo "  already patched (classifyAccessRoles present) — skipping git apply"
+else
+  echo "==> Applying ReadAccess/WriteAccess classifier patch"
+  git -C "$BUILD_ROOT" apply --verbose "$RW_PATCH"
+  grep -q 'classifyAccessRoles' "$BUILD_ROOT/indexer/Indexer.cc" \
+    || die "patch applied but grep for 'classifyAccessRoles' still failed — patch may be a no-op"
+fi
+
+# Apply the SymbolInformation.kind syntactic classifier (applied here after
+# the three patches above purely for build consistency — all six patches are
+# actually order-independent, see scip-clang-patches/README.md). Fills SCIP's
+# SymbolInformation.kind (upstream leaves it at UnspecifiedKind on 100% of
+# symbols) by mapping the clang::Decl at each SymbolInformation-creating site
+# to its kind; the kind survives the TU-merge pipeline via
+# SymbolInformationBuilder::kind.
+KIND_PATCH="$(pwd)/scip-clang-patches/kind-on-v0.4.0.patch"
+[ -f "$KIND_PATCH" ] || die "patch not found at $KIND_PATCH"
+if grep -q 'classifySymbolKind' "$BUILD_ROOT/indexer/Indexer.cc" 2>/dev/null; then
+  echo "  already patched (classifySymbolKind present) — skipping git apply"
+else
+  echo "==> Applying SymbolInformation.kind classifier patch"
+  git -C "$BUILD_ROOT" apply --verbose "$KIND_PATCH"
+  grep -q 'classifySymbolKind' "$BUILD_ROOT/indexer/Indexer.cc" \
+    || die "patch applied but grep for 'classifySymbolKind' still failed — patch may be a no-op"
+fi
+
+# Apply the SymbolInformation.signature_documentation emitter (applied here
+# after the five patches above purely for build consistency — all six
+# patches are actually order-independent, see scip-clang-patches/README.md).
+# Fills SCIP's SymbolInformation.signature_documentation (upstream leaves it
+# unset on 100% of symbols) with the printed declaration (no body, default
+# args kept) for every defined/pure-virtual function & method; the text
+# survives the TU-merge pipeline via
+# SymbolInformationBuilder::signatureDocumentation.
+SIGDOC_PATCH="$(pwd)/scip-clang-patches/signature-documentation-on-v0.4.0.patch"
+[ -f "$SIGDOC_PATCH" ] || die "patch not found at $SIGDOC_PATCH"
+if grep -q 'declToSignatureText' "$BUILD_ROOT/indexer/Indexer.cc" 2>/dev/null; then
+  echo "  already patched (declToSignatureText present) — skipping git apply"
+else
+  echo "==> Applying SymbolInformation.signature_documentation patch"
+  git -C "$BUILD_ROOT" apply --verbose "$SIGDOC_PATCH"
+  grep -q 'declToSignatureText' "$BUILD_ROOT/indexer/Indexer.cc" \
+    || die "patch applied but grep for 'declToSignatureText' still failed — patch may be a no-op"
+fi
+
+# Apply the Relationship.is_type_definition emitter (applied here after the
+# five patches above purely for build consistency — all six patches are
+# actually order-independent, see scip-clang-patches/README.md). Fills SCIP's
+# Relationship.is_type_definition ("go to type definition", upstream never
+# sets it): a syntactic type resolver attaches a {symbol: <type>,
+# is_type_definition: true} relationship to a field's / variable's own
+# SymbolInformation, reusing trySaveTypeReference's type-resolution policy.
+TYPEDBY_PATCH="$(pwd)/scip-clang-patches/typed-by-on-v0.4.0.patch"
+[ -f "$TYPEDBY_PATCH" ] || die "patch not found at $TYPEDBY_PATCH"
+if grep -q 'saveTypeDefinitionRelationship' "$BUILD_ROOT/indexer/Indexer.cc" 2>/dev/null; then
+  echo "  already patched (saveTypeDefinitionRelationship present) — skipping git apply"
+else
+  echo "==> Applying Relationship.is_type_definition (typed-by) patch"
+  git -C "$BUILD_ROOT" apply --verbose "$TYPEDBY_PATCH"
+  grep -q 'saveTypeDefinitionRelationship' "$BUILD_ROOT/indexer/Indexer.cc" \
+    || die "patch applied but grep for 'saveTypeDefinitionRelationship' still failed — patch may be a no-op"
 fi
 
 # scip-clang v0.4.0 hardcodes a full-Xcode.app SDK path in setup_llvm.bzl, which
@@ -171,7 +263,7 @@ echo "$ver_out" | grep -q "scip-clang" || die "unexpected --version output: $ver
 # --- provenance sidecar (identical shape to build.sh's / setup_cmd.py's) -----
 ver="$(echo "$ver_out" | awk '/scip-clang/{print $2; exit}')"
 cat > "${OUT_DIR}/scip-clang.json" <<EOF
-{"version": "${ver:-0.4.0}", "variant": "enclosing_range-504", "source": "build", "installed_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"}
+{"version": "${ver:-0.4.0}", "variant": "patched", "patchset_version": ${PATCHSET_VERSION}, "source": "build", "installed_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"}
 EOF
 
 # --- summary -------------------------------------------------------------------
@@ -181,10 +273,10 @@ file "$BIN" 2>/dev/null || true
 echo "$ver_out"
 case "$HOST_ARCH" in
   arm64)
-    echo "==> Next: publish it with: scripts/publish-scip-clang-504.sh ${OUT_DIR} arm64-darwin"
+    echo "==> Next: publish it with: scripts/publish-scip-clang-patched.sh ${OUT_DIR} arm64-darwin"
     ;;
   *)
-    echo "==> Next: publish-scip-clang-504.sh's platform allowlist has no 'x86_64-darwin' label"
+    echo "==> Next: publish-scip-clang-patched.sh's platform allowlist has no 'x86_64-darwin' label"
     echo "    today — do not publish this as arm64-darwin. Add the label there first."
     ;;
 esac

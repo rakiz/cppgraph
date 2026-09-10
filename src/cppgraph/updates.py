@@ -39,6 +39,8 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+from cppgraph.init import PATCHED_VARIANTS
+
 DEFAULT_VERSIONS_URL = "https://raw.githubusercontent.com/rakiz/cppgraph/main/versions.json"
 _CACHE_TTL_SECONDS = 24 * 60 * 60
 _FETCH_TIMEOUT_SECONDS = 2.0
@@ -46,20 +48,39 @@ _ENV_DISABLE = "CPPGRAPH_NO_UPDATE_CHECK"
 _ENV_URL = "CPPGRAPH_VERSIONS_URL"
 
 
-def _git_describe() -> str | None:
-    """`git describe --tags` of the checkout this package lives in, or None.
+def _git_describe(pkg_dir: Path | None = None) -> str | None:
+    """`git describe --tags --match 'v[0-9]*'` of the checkout this package
+    lives in, or None.
 
     cppgraph is pure Python installed editable from a git checkout, so a version
     *is* a tag: describing the working tree reports the truth live, without a
     build step or a hand-maintained version constant — checkout a different tag
     and the reported version follows, no reinstall. None when there are no tags
-    yet (fresh clone), or the source isn't a git checkout (tarball install)."""
+    yet (fresh clone), or the source isn't a git checkout (tarball install).
+
+    The `--match 'v[0-9]*'` restriction is required, not cosmetic: this repo's
+    tag namespace also carries `scip-clang-patched-vX.Y.Z-pN` and
+    `scip-clang-504-vX.Y.Z` tags (from `scripts/publish-scip-clang-patched.sh`,
+    published on this same repo for asset hosting) alongside cppgraph's own
+    `vX.Y.Z` release tags. An unfiltered `git describe --tags` picks whichever
+    tag is nearest in the commit graph — which can be one of those scip-clang
+    binary tags instead of a real cppgraph version, silently reporting
+    "scip-clang-patched-v0.4.0-p6-9-g<sha>" as cppgraph's own current_version
+    (observed in practice: it broke the `status` update-advice comparison
+    against `versions.json`'s `latest`, since that string doesn't parse as a
+    cppgraph version at all).
+
+    `pkg_dir` is a test-only override (defaults to this file's own directory,
+    i.e. the real checkout) so a test can point this at a throwaway git repo
+    with a synthetic tag collision instead of depending on this repo's actual
+    tag history."""
     import subprocess
 
-    pkg_dir = Path(__file__).resolve().parent
+    if pkg_dir is None:
+        pkg_dir = Path(__file__).resolve().parent
     try:
         out = subprocess.run(
-            ["git", "-C", str(pkg_dir), "describe", "--tags", "--dirty"],
+            ["git", "-C", str(pkg_dir), "describe", "--tags", "--dirty", "--match", "v[0-9]*"],
             capture_output=True,
             text=True,
             timeout=1.5,
@@ -151,7 +172,7 @@ def _max_level(releases: list[dict[str, Any]]) -> str:
 # ---- scip-clang dependency pin ---------------------------------------------
 # The indexer is a versioned dependency with an identity of (version, variant):
 # "stock" is the unpatched upstream release binary; a non-stock variant (e.g.
-# "enclosing_range-504") is built from source with a patch. The two emit
+# "patched") is built from source with this repo's patch bundle. The two emit
 # different `.scip`, so both the installed binary and each graph are compared
 # against the pin in versions.json (`scip_clang`). See DESIGN.md § Source of truth.
 
@@ -196,13 +217,15 @@ def compute_scip_advice(
 ) -> dict[str, Any]:
     """Pure advice about the scip-clang dependency. No I/O — unit-tested.
 
-    Staleness is judged on **version only**. The *variant* (stock vs
-    `enclosing_range-504`) is deliberately **not** pinned: stock and #504 are two
-    valid capability levels, not a right/wrong pair, and a graph's variant is
-    independent of the locally installed binary (a #504-indexed graph can be
-    copied to a machine that only has the stock binary). So variant is reported
-    for information — never as a "stale, rebuild it" nag. What a *graph* actually
-    carries (file vs symbol granularity) is surfaced separately via
+    Staleness is judged on **version** (and, for a patched-family binary —
+    "patched" or a pre-rename spelling, see PATCHED_VARIANTS — on
+    the `patchset_version` of our patch bundle). The *variant* (stock vs
+    `patched`) itself is deliberately **not** pinned as a requirement: stock and
+    patched are two valid capability levels, not a right/wrong pair, and a graph's
+    variant is independent of the locally installed binary (a patched-indexed graph
+    can be copied to a machine that only has the stock binary). So variant is
+    reported for information — never as a "stale, rebuild it" nag. What a *graph*
+    actually carries (file vs symbol granularity) is surfaced separately via
     `has_attributed_refs` (see the `usage_view` in `status`)."""
     if not pin or not pin.get("version"):
         return {"checked": False}
@@ -229,6 +252,24 @@ def compute_scip_advice(
         advice["binary_status"] = "ok"
     if have is not None:
         advice["installed_variant"] = have[1]  # informational
+        # Patchset staleness, for any patched-family binary (current "patched" or a
+        # pre-rename "enclosing_range-504"/"504" sidecar — see PATCHED_VARIANTS): a
+        # sidecar predating the field (or missing it) counts as patchset 1 — the
+        # initial bundle. Advisory like the version advice, never a hard verdict.
+        pin_ps = pin.get("patchset_version")
+        if have[0] == want_ver and have[1] in PATCHED_VARIANTS and isinstance(pin_ps, int):
+            try:
+                have_ps = int((installed or {}).get("patchset_version", 1))
+            except (TypeError, ValueError):
+                have_ps = 1
+            if have_ps < pin_ps:
+                advice["patchset_status"] = "stale"
+                advice["patchset_message"] = (
+                    f"the installed patched binary is patchset p{have_ps} but the "
+                    f"pinned patchset is p{pin_ps} — re-run scripts/setup.sh "
+                    "(download-patched), or rebuild it locally, to pick up the "
+                    "newer patches."
+                )
 
     g = _scip_identity(graph_scip)
     if g is not None:

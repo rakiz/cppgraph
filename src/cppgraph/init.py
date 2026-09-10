@@ -73,14 +73,21 @@ def scip_clang_bin_dir() -> Path:
     return Path(data_home) / "cppgraph" / "bin"
 
 
+# Sidecar variant values a patched (non-stock) build may carry: the current name
+# plus the pre-rename spellings already installed on machines ("504" = the old
+# download-path value, "enclosing_range-504" = the old local-build value).
+PATCHED_VARIANTS = frozenset({"patched", "enclosing_range-504", "504"})
+
+
 def scip_clang_info(bin_dir: Path | None = None) -> tuple[bool, str | None]:
     """`(binary_present, variant)` for the local scip-clang.
 
     `variant` comes from the `scip-clang.json` provenance sidecar next to the
-    binary — `"stock"`, `"enclosing_range-504"`,
-    or None when there is no sidecar. Only `enclosing_range-504` can produce the
-    `enclosing_range` that `--attributed-refs` needs, so the wizard gates that
-    question on it.
+    binary — `"stock"`, `"patched"`,
+    or None when there is no sidecar (older installs may spell the patched
+    variant `"enclosing_range-504"`/`"504"`; see PATCHED_VARIANTS). Only a
+    patched build can produce the `enclosing_range` that `--attributed-refs`
+    needs, so the wizard gates that question on it.
     """
     bin_dir = bin_dir or scip_clang_bin_dir()
     binary = bin_dir / "scip-clang"
@@ -243,7 +250,7 @@ def onboarding_plan(
     get the exact command deterministically."""
     summary = summarize_compdb(entries)
     present, variant = scip_clang_info()
-    supports_attribution = variant == "enclosing_range-504"
+    supports_attribution = variant in PATCHED_VARIANTS
     out_dir = out_dir_for(project_root_path)
     status = artifact_status(out_dir, graph_name)
     existing = existing_artifacts(out_dir, graph_name)
@@ -338,7 +345,7 @@ def onboarding_plan(
                     "'where is this type used?' answers with the functions that use it, not "
                     "just the files. Larger store (~+23%)."
                     if supports_attribution
-                    else "Unavailable: needs a #504-built scip-clang; the local binary is "
+                    else "Unavailable: needs a patched scip-clang build; the local binary is "
                     "stock or absent."
                 ),
             },
@@ -347,16 +354,16 @@ def onboarding_plan(
 
 
 def _gate_attribution(requested: bool, print_fn) -> bool:
-    """Attribution needs a #504 binary; if requested without one, warn and drop it
-    . Used by the non-interactive path."""
+    """Attribution needs a patched binary; if requested without one, warn and drop
+    it. Used by the non-interactive path."""
     if not requested:
         return False
     _present, variant = scip_clang_info()
-    if variant == "enclosing_range-504":
+    if variant in PATCHED_VARIANTS:
         return True
     print_fn(
         "warning: --attributed-refs requested, but the local scip-clang is not a "
-        "#504 build — producing file-granularity usage instead."
+        "patched build — producing file-granularity usage instead."
     )
     return False
 
@@ -555,9 +562,9 @@ def _ask_attributed(p: Prompter) -> bool:
     it (#504); otherwise explain why it's unavailable and skip."""
     present, variant = scip_clang_info()
     p.note("")
-    if variant == "enclosing_range-504":
+    if variant in PATCHED_VARIANTS:
         p.note(
-            "Your scip-clang is a #504 build, so symbol-granularity usage is "
+            "Your scip-clang is a patched build, so symbol-granularity usage is "
             "available (--attributed-refs): 'where is this type used?' answers with "
             "the functions that use it, not just the files. Larger store (~+23%)."
         )
@@ -565,11 +572,11 @@ def _ask_attributed(p: Prompter) -> bool:
     if not present:
         p.note(
             "Note: no native scip-clang here — an existing .scip is reused if present. "
-            "Symbol-granularity attribution needs a #504 build."
+            "Symbol-granularity attribution needs a patched build."
         )
     else:
         p.note(
-            "Your scip-clang is stock (not #504), so symbol-granularity attribution "
+            "Your scip-clang is stock (unpatched), so symbol-granularity attribution "
             "is unavailable; the graph will use exact file-granularity usage."
         )
     return False

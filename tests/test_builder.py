@@ -9,14 +9,20 @@ from __future__ import annotations
 
 from cppgraph.builder import (
     _is_direct_member,
+    _merge_external_symbol,
     build_graph,
     is_callable_symbol,
     is_term_symbol,
     real_documentation,
+    signature_documentation_text,
 )
+from cppgraph.model import Graph
 from cppgraph.proto import scip_pb2
 
 DEFINITION = scip_pb2.SymbolRole.Definition
+FORWARD_DEFINITION = scip_pb2.SymbolRole.ForwardDefinition
+READ_ACCESS = scip_pb2.SymbolRole.ReadAccess
+WRITE_ACCESS = scip_pb2.SymbolRole.WriteAccess
 
 
 def _occurrence(symbol: str, line: int, *, roles: int = 0) -> scip_pb2.Occurrence:
@@ -204,6 +210,37 @@ def test_calls_fall_back_to_nearest_preceding_without_enclosing_range() -> None:
     graph = build_graph(scip_pb2.Index(documents=[doc]))
 
     assert [e.src for e in graph.callers_of(helper)] == [nested]
+
+
+def test_forward_definition_bit_drops_declaration_site_on_stock_binary() -> None:
+    """The scip-clang `ForwardDefinition` fix (TODO.md scip-clang section):
+    a bodyless declaration occurrence (in-class method decl, header prototype)
+    now carries `ForwardDefinition` instead of landing as plain role-0. This
+    doc has NO `enclosing_range` at all (a genuinely stock-shaped graph, where
+    the nearest-preceding fallback is the only attribution path) — without the
+    bit, `declaredElsewhere`'s declaration site at line 15 would misattribute
+    to `nested` as its "caller" via nearest-preceding, exactly the phantom-caller
+    bug. With the bit, the declaration occurrence is filtered out before it ever
+    becomes a `call_sites` candidate, so no phantom edge is created; a real call
+    is still attributed normally."""
+    outer = "cxx . . $ pkg/Outer#run(o1)."
+    nested = "cxx . . $ pkg/Outer#run/lambda#operator()(l1)."
+    helper = "cxx . . $ pkg/helper(h1)."
+    declared_elsewhere = "cxx . . $ pkg/Foo#declaredElsewhere(d1)."
+
+    doc = scip_pb2.Document(relative_path="outer.cpp")
+    doc.occurrences.extend(
+        [
+            _occurrence(outer, line=5, roles=DEFINITION),  # no enclosing_range
+            _occurrence(nested, line=10, roles=DEFINITION),
+            _occurrence(declared_elsewhere, line=15, roles=FORWARD_DEFINITION),
+            _occurrence(helper, line=20),
+        ]
+    )
+    graph = build_graph(scip_pb2.Index(documents=[doc]))
+
+    assert [e.src for e in graph.callers_of(helper)] == [nested]
+    assert graph.callers_of(declared_elsewhere) == []
 
 
 def test_declaration_only_occurrence_is_not_attributed_as_a_phantom_call() -> None:
@@ -518,6 +555,21 @@ def test_references_exclude_definitions_and_locals() -> None:
     assert graph.references_of(local) == []
 
 
+def test_references_exclude_forward_definitions() -> None:
+    """The ForwardDefinition bit drops a bodyless declaration from the reference
+    index too — the same exclusion the calls loop applies (a decl site is
+    neither a call nor a use, on either surface)."""
+    sym = "cxx . . $ mongo/Foo#"
+    doc = scip_pb2.Document(relative_path="f.cpp")
+    doc.occurrences.append(_occurrence(sym, 5, roles=DEFINITION))  # def, not a ref
+    doc.occurrences.append(_occurrence(sym, 15, roles=FORWARD_DEFINITION))  # decl, not a ref
+    doc.occurrences.append(_occurrence(sym, 9))  # a real ref
+    index = scip_pb2.Index(documents=[doc])
+
+    graph = build_graph(index, include_references=True)
+    assert {r.line for r in graph.references_of(sym)} == {9}
+
+
 def test_references_deduped_across_header_includes() -> None:
     sym = "cxx . . $ mongo/Foo#"
     # same occurrence surfacing from two TUs after scip-clang merges indexes
@@ -527,6 +579,31 @@ def test_references_deduped_across_header_includes() -> None:
     index = scip_pb2.Index(documents=docs)
     graph = build_graph(index, include_references=True)
     assert len(graph.references_of(sym)) == 1
+
+
+def test_reference_carries_write_access_role() -> None:
+    # a scip-clang read-write-access-patch binary tags `g = 5;` with WriteAccess;
+    # the builder must mask it through to the stored Reference.
+    typ = "cxx . . $ mongo/Counter#"
+    doc = scip_pb2.Document(relative_path="use.cpp")
+    doc.occurrences.append(_occurrence(typ, 7, roles=WRITE_ACCESS))
+    index = scip_pb2.Index(documents=[doc])
+
+    graph = build_graph(index, include_references=True)
+    (ref,) = graph.references_of(typ)
+    assert ref.roles == WRITE_ACCESS
+
+
+def test_plain_and_read_only_references_carry_no_write_bit() -> None:
+    typ = "cxx . . $ mongo/Counter#"
+    doc = scip_pb2.Document(relative_path="use.cpp")
+    doc.occurrences.append(_occurrence(typ, 7))  # role 0: plain read / no data
+    doc.occurrences.append(_occurrence(typ, 9, roles=READ_ACCESS))
+    index = scip_pb2.Index(documents=[doc])
+
+    graph = build_graph(index, include_references=True)
+    assert {r.roles for r in graph.references_of(typ)} == {0, READ_ACCESS}
+    assert not any(r.roles & WRITE_ACCESS for r in graph.references_of(typ))
 
 
 def test_type_definition_site_is_recorded() -> None:
@@ -567,6 +644,77 @@ def test_class_inheritance_becomes_inherits_edge() -> None:
     assert inherits[0].dst == base
     # class inheritance is `inherits`, never `implements`
     assert not [e for e in graph.edges if e.kind == "implements"]
+
+
+# --- Relationship.is_type_definition (typed-by edges) ------------------------
+
+
+def test_typed_by_relationship_becomes_an_edge() -> None:
+    # scip-clang-patches/typed-by-on-v0.4.0.patch: a field's own
+    # SymbolInformation carries {symbol: <type>, is_type_definition: true}.
+    # src = the field, dst = the declared type.
+    field = "cxx . . $ mongo/ResumeTokenData#bucketSize."
+    typ = "cxx . . $ mongo/Duration#"
+
+    doc = scip_pb2.Document(relative_path="resume_token_data.h")
+    sym_info = scip_pb2.SymbolInformation(symbol=field)
+    sym_info.relationships.add(symbol=typ, is_type_definition=True)
+    doc.symbols.append(sym_info)
+    index = scip_pb2.Index(documents=[doc])
+
+    graph = build_graph(index)
+
+    typed_by = [e for e in graph.edges if e.kind == "typed-by"]
+    assert len(typed_by) == 1
+    assert typed_by[0].src == field
+    assert typed_by[0].dst == typ
+
+
+def test_typed_by_covers_field_variable_and_static_member_shapes() -> None:
+    """The patch's three emitting sites — a field (saveFieldDecl), a static
+    data member and a file-scope variable (saveVarDecl's SymbolInformation
+    branch) — all land as `typed-by` with the same direction (src = the
+    field/variable, dst = its declared type)."""
+    field = "cxx . . $ mongo/Outer#f."
+    static_member = "cxx . . $ mongo/Outer#s."
+    global_var = "cxx . . $ mongo/g."
+    typ = "cxx . . $ mongo/Value#"
+
+    doc = scip_pb2.Document(relative_path="outer.h")
+    for sym in (field, static_member, global_var):
+        sym_info = scip_pb2.SymbolInformation(symbol=sym)
+        sym_info.relationships.add(symbol=typ, is_type_definition=True)
+        doc.symbols.append(sym_info)
+    index = scip_pb2.Index(documents=[doc])
+
+    graph = build_graph(index)
+
+    typed_by = [e for e in graph.edges if e.kind == "typed-by"]
+    assert {e.src for e in typed_by} == {field, static_member, global_var}
+    assert all(e.dst == typ for e in typed_by)
+
+
+def test_typed_by_and_implementation_flags_are_independent() -> None:
+    """The proto's is_implementation and is_type_definition are independent
+    boolean flags on the same Relationship message (not enum variants), so the
+    builder must use a separate `if`, not elif — one relationship carrying
+    both flags yields BOTH edges."""
+    derived = "cxx . . $ mongo/Dog#"
+    base = "cxx . . $ mongo/Animal#"
+
+    doc = scip_pb2.Document(relative_path="dog.h")
+    sym_info = scip_pb2.SymbolInformation(symbol=derived)
+    sym_info.relationships.add(symbol=base, is_implementation=True, is_type_definition=True)
+    doc.symbols.append(sym_info)
+    index = scip_pb2.Index(documents=[doc])
+
+    graph = build_graph(index)
+
+    kinds = {(e.kind, e.src, e.dst) for e in graph.edges}
+    assert ("inherits", derived, base) in kinds  # type -> type splits to inherits
+    assert ("typed-by", derived, base) in kinds
+    # and neither flag was dropped in favor of the other
+    assert len([e for e in graph.edges if e.kind in ("inherits", "implements", "typed-by")]) == 2
 
 
 # --- SymbolInformation.documentation ----------------------------------------
@@ -650,3 +798,246 @@ def test_build_graph_first_real_documentation_wins_across_documents() -> None:
     graph = build_graph(scip_pb2.Index(documents=[first, second, third]))
 
     assert graph.nodes[fn].documentation == "/** The real comment. */"
+
+
+# --- SymbolInformation.kind (kind-patched binaries only) ---------------------
+
+
+def test_build_graph_captures_symbol_kind_on_node() -> None:
+    """A kind-patched binary (patchset 4) fills `SymbolInformation.kind`: the
+    builder carries the enum NAME on the node — additive info on top of the
+    descriptor-suffix classification (`is_callable_symbol`/`is_type_symbol`/
+    `is_term_symbol`), which stays the source of truth for edge typing."""
+    sym = "cxx . . $ mongo/Counter#increment(a1)."
+    doc = scip_pb2.Document(relative_path="counter.cpp")
+    doc.symbols.add(symbol=sym, kind=scip_pb2.SymbolInformation.StaticMethod)
+    doc.occurrences.append(_occurrence(sym, 1, roles=DEFINITION))
+    graph = build_graph(scip_pb2.Index(documents=[doc]))
+
+    assert graph.nodes[sym].scip_kind == "StaticMethod"
+
+
+def test_build_graph_stock_scip_yields_no_kind() -> None:
+    """A stock binary never sets `kind` — proto3 reads it back as 0
+    (UnspecifiedKind). That is "no info", never an error: nodes keep
+    `scip_kind=None` and the graph builds exactly as before this feature."""
+    doc = scip_pb2.Document(relative_path="plain.cpp")
+    doc.symbols.add(symbol="cxx . . $ mongo/Widget#")  # field absent
+    doc.symbols.add(symbol="cxx . . $ mongo/step(d1).", kind=0)  # explicit default
+    doc.occurrences.append(_occurrence("cxx . . $ mongo/Widget#", 3, roles=DEFINITION))
+    graph = build_graph(scip_pb2.Index(documents=[doc]))
+
+    assert all(n.scip_kind is None for n in graph.nodes.values())
+
+
+def test_build_graph_unknown_kind_value_degrades_to_none() -> None:
+    """A Kind enum value newer than the vendored proto must degrade to no-data,
+    not crash — the same read-defensively rule as any other optional field
+    (a partially-patched or future binary must never take the tool down)."""
+    sym = "cxx . . $ mongo/Future(f1)."
+    doc = scip_pb2.Document(relative_path="future.cpp")
+    si = doc.symbols.add(symbol=sym)
+    si.kind = 9999  # not in this vendored proto's Kind enum
+    graph = build_graph(scip_pb2.Index(documents=[doc]))
+
+    assert graph.nodes[sym].scip_kind is None
+
+
+def test_build_graph_first_real_scip_kind_wins_across_documents() -> None:
+    """Same first-real-wins rule as documentation: a symbol's
+    `SymbolInformation` appears once per document (a header included by N TUs).
+    A kind-less visit must not block a later kinded one (None keeps the door
+    open), and a kind already captured must not be overwritten by a later
+    duplicate."""
+    sym = "cxx . . $ mongo/dup(d1)."
+    first = scip_pb2.Document(relative_path="a.cpp")
+    first.symbols.add(symbol=sym)  # stock binary: kind field absent
+    second = scip_pb2.Document(relative_path="b.cpp")
+    second.symbols.add(symbol=sym, kind=scip_pb2.SymbolInformation.StaticMethod)
+    third = scip_pb2.Document(relative_path="c.cpp")
+    third.symbols.add(symbol=sym, kind=0)  # explicit proto3 default = no info
+    graph = build_graph(scip_pb2.Index(documents=[first, second, third]))
+
+    assert graph.nodes[sym].scip_kind == "StaticMethod"
+
+
+# --- SymbolInformation.signature_documentation -------------------------------
+
+
+def test_signature_documentation_text_keeps_non_empty_text() -> None:
+    """A signature-emitting binary records the symbol's signature text; it is
+    kept (whitespace-stripped, like documentation's)."""
+    assert (
+        signature_documentation_text(scip_pb2.Signature(text="void add(int a, int b)"))
+        == "void add(int a, int b)"
+    )
+    assert signature_documentation_text(scip_pb2.Signature(text="  class Widget  ")) == (
+        "class Widget"
+    )
+
+
+def test_signature_documentation_text_empty_is_none() -> None:
+    """No placeholder exists for signatures (unlike `documentation`): an unset
+    field reads back as the empty default instance, and empty/whitespace text
+    is simply "no data" — None, never an error."""
+    assert signature_documentation_text(scip_pb2.Signature()) is None
+    assert signature_documentation_text(scip_pb2.Signature(text="")) is None
+    assert signature_documentation_text(scip_pb2.Signature(text="   ")) is None
+
+
+def test_build_graph_keeps_signature_documentation_on_node() -> None:
+    fn = "cxx . . $ mongo/sigged(s1)."
+    doc = scip_pb2.Document(relative_path="sig.cpp")
+    doc.occurrences.append(_occurrence(fn, 1, roles=DEFINITION))
+    doc.symbols.add(symbol=fn).signature_documentation.text = "void sigged(int a)"
+    graph = build_graph(scip_pb2.Index(documents=[doc]))
+
+    assert graph.nodes[fn].signature_documentation == "void sigged(int a)"
+
+
+def test_build_graph_signature_documentation_none_when_absent() -> None:
+    """A stock binary never sets the field: nodes keep
+    `signature_documentation=None` and the graph builds exactly as before this
+    feature."""
+    doc = scip_pb2.Document(relative_path="plain.cpp")
+    doc.symbols.add(symbol="cxx . . $ mongo/plain(p1).")
+    graph = build_graph(scip_pb2.Index(documents=[doc]))
+
+    assert graph.nodes["cxx . . $ mongo/plain(p1)."].signature_documentation is None
+
+
+def test_build_graph_first_signature_documentation_wins_across_documents() -> None:
+    """Same first-wins rule as documentation: a symbol's `SymbolInformation`
+    appears once per document (a header included by N TUs). An empty-text
+    visit must not block a later signature (None keeps the door open), and a
+    signature already captured must not be overwritten by a later duplicate."""
+    fn = "cxx . . $ mongo/dup(d1)."
+    first = scip_pb2.Document(relative_path="a.cpp")
+    first.symbols.add(symbol=fn)  # stock binary: field absent -> empty text
+    second = scip_pb2.Document(relative_path="b.cpp")
+    second.symbols.add(symbol=fn).signature_documentation.text = "void dup(int a)"
+    third = scip_pb2.Document(relative_path="c.cpp")
+    third.symbols.add(symbol=fn).signature_documentation.text = "void dup(int a, int b)"
+    graph = build_graph(scip_pb2.Index(documents=[first, second, third]))
+
+    assert graph.nodes[fn].signature_documentation == "void dup(int a)"
+
+
+# --- Index.external_symbols (Node.is_out_of_project) --------------------------
+#
+# Symbols referenced from the index but defined in an un-indexed external
+# package (boost/absl/stdlib/…) — a repeated `SymbolInformation` list the STOCK
+# scip-clang binary already emits. Consumed as node identity/metadata only:
+# classified `is_out_of_project=True` with the same metadata merge as
+# `Document.symbols` entries (which classify False), never any edges.
+
+
+def _external_info(symbol: str) -> scip_pb2.SymbolInformation:
+    """An external `SymbolInformation` with every metadata field populated."""
+    si = scip_pb2.SymbolInformation(symbol=symbol, display_name="boost::Foo::bar")
+    si.kind = scip_pb2.SymbolInformation.Method
+    si.documentation.append("/** Boost doc. */")
+    si.signature_documentation.text = "void bar(int)"
+    return si
+
+
+def test_build_graph_external_symbol_creates_classified_node() -> None:
+    """An `external_symbols` entry with no document occurrence still becomes a
+    node — classified out-of-project, its metadata populated from the external
+    `SymbolInformation` (the same merge a `Document.symbols` entry gets). No
+    definition site exists: the node's file stays None. Today such a symbol is
+    either a file-less phantom (referenced somewhere) or missing entirely."""
+    ext = "cxx . . $ boost/Foo#bar(a1)."
+    graph = build_graph(scip_pb2.Index(external_symbols=[_external_info(ext)]))
+
+    node = graph.nodes[ext]
+    assert node.is_out_of_project is True
+    assert node.display_name == "boost::Foo::bar"
+    assert node.documentation == "/** Boost doc. */"
+    assert node.scip_kind == "Method"
+    assert node.signature_documentation == "void bar(int)"
+    assert node.file is None
+    assert node.line is None
+
+
+def test_build_graph_external_symbols_create_no_edges() -> None:
+    """The audit measured 867 relationships on the corpus's external symbols;
+    none may become edges — `Graph.add_edge` needs a real project document
+    path as provenance, and an external symbol has none. Node
+    identity/metadata only."""
+    ext = "cxx . . $ boost/Foo#bar(a1)."
+    si = _external_info(ext)
+    si.relationships.add(symbol="cxx . . $ boost/Foo#", is_implementation=True)
+    graph = build_graph(scip_pb2.Index(external_symbols=[si]))
+
+    assert graph.edges == []
+    assert set(graph.nodes) == {ext}
+
+
+def test_build_graph_doc_symbols_entry_is_project_native() -> None:
+    """A `Document.symbols` entry with no external counterpart classifies the
+    node project-native (`False`) — exactly as before this feature built it,
+    plus the now-explicit classification."""
+    fn = "cxx . . $ mongo/mine(m1)."
+    doc = scip_pb2.Document(relative_path="mine.cpp")
+    doc.symbols.add(symbol=fn, display_name="mine")
+    graph = build_graph(scip_pb2.Index(documents=[doc]))
+
+    assert graph.nodes[fn].is_out_of_project is False
+
+
+def test_build_graph_pure_phantom_node_stays_unclassified() -> None:
+    """A symbol only ever interned as an edge/reference endpoint (no
+    `SymbolInformation` from either source) keeps `is_out_of_project=None` —
+    "no evidence", distinct from both classifications."""
+    caller = "cxx . . $ mongo/caller(c1)."
+    phantom_callee = "cxx . . $ mongo/phantom(p1)."
+    doc = scip_pb2.Document(relative_path="a.cpp")
+    doc.symbols.add(symbol=caller)  # the caller has SymbolInformation...
+    doc.occurrences.append(_occurrence(caller, 1, roles=DEFINITION))
+    doc.occurrences.append(_occurrence(phantom_callee, 3))  # ...the callee doesn't
+    graph = build_graph(scip_pb2.Index(documents=[doc]))
+
+    assert graph.nodes[caller].is_out_of_project is False
+    assert graph.nodes[phantom_callee].is_out_of_project is None
+
+
+def test_build_graph_project_native_wins_over_external() -> None:
+    """A symbol in BOTH `external_symbols` and some `Document.symbols` (a
+    cross-TU merge) ends up project-native — and picks up its real file/line
+    from the project definition, never the file-less external shape."""
+    sym = "cxx . . $ both(b1)."
+    doc = scip_pb2.Document(relative_path="proj.cpp")
+    doc.symbols.add(symbol=sym, display_name="both")
+    doc.occurrences.append(_occurrence(sym, 7, roles=DEFINITION))
+    graph = build_graph(scip_pb2.Index(external_symbols=[_external_info(sym)], documents=[doc]))
+
+    node = graph.nodes[sym]
+    assert node.is_out_of_project is False
+    assert node.file == "proj.cpp"
+    assert node.line == 7
+
+
+def test_external_classification_never_overwrites_project_native() -> None:
+    """The precedence rule is explicit, not an accident of pass order: the
+    external pass refuses to flip a node already carrying project-native
+    evidence, so `False` wins whichever order the passes run in."""
+    graph = Graph()
+    sym = "cxx . . $ both(b1)."
+    node = graph.add_node(sym)
+    node.is_out_of_project = False  # as a doc.symbols entry sets it
+
+    _merge_external_symbol(graph, _external_info(sym))
+
+    assert graph.nodes[sym].is_out_of_project is False
+
+
+def test_build_graph_marks_external_symbols_capable_even_when_empty() -> None:
+    """The graph-level marker means "built with this feature", not "found at
+    least one external symbol": an index whose `external_symbols` is empty
+    still produces a graph the store writes the capability flag from."""
+    doc = scip_pb2.Document(relative_path="plain.cpp")
+    doc.symbols.add(symbol="cxx . . $ mongo/plain(p1).")
+    graph = build_graph(scip_pb2.Index(documents=[doc]))
+
+    assert graph.has_external_symbols is True

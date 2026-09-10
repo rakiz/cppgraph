@@ -25,17 +25,20 @@ relationships (implementation/override, type definition). It is batch, parallel,
 and crash-isolated per translation unit — important because clangd (tried first)
 crashes on some third_party TUs.
 
-scip-clang is a dependency pinned by **version only** (`versions.json` →
-`scip_clang`); `cppgraph status` flags a stale binary / a graph needing re-index
-on a version change. Its **variant** (`stock` upstream release vs a patched build
-like `enclosing_range-504` from PR #504) is *not* pinned: the two are valid
+scip-clang is a dependency pinned by **version** (the upstream release tag) and —
+for the patched binary — by **patchset** (this repo's patch bundle, an independent
+integer) in `versions.json` → `scip_clang`; `cppgraph status` flags a stale binary
+/ a graph needing re-index on a version change, and advises (never nags) when an
+installed patched binary predates the pinned patchset. Its **variant** (`stock`
+upstream release vs `patched`, our bundle on top of PR #504) is *not* pinned as a
+requirement: the two are valid
 capability levels, not a right/wrong pair, and a graph's variant is independent
-of the locally installed binary — a #504-indexed store can be copied to a machine
+of the locally installed binary — a patched-indexed store can be copied to a machine
 that only has the stock binary. So the installed binary's sidecar and each store's
 `index_tool_variant` are reported by `status` for information, while what a graph
 actually carries (file vs symbol-granularity usage) is surfaced by
 `has_attributed_refs` / the usage view. See `updates.py` and
-`docker/build-scip-clang/`.
+`docker/build-scip-clang-patched-linux/`.
 
 ### Why SCIP is the right foundation — and where its edge is
 
@@ -43,18 +46,17 @@ SCIP is a lossy serialization of clang's AST: a deliberately minimal,
 cross-language format (Go, TS, Rust, Ruby, C++…). That loss is real but lands
 almost entirely on data *peripheral* to cppgraph's mission (reliable
 call/dependency facts for an LLM). Everything the mission needs is present and
-exact — `calls`/`inherits`/`implements`/`uses` edges, definition locations,
-references, and (with #504) exact enclosing-range attribution. The gaps we found
-auditing the schema are all off to the side: **visibility** (public/protected/
-private — no SCIP field at all; the format models privacy as *local symbols*, a
-name-scope notion that doesn't map C++'s compile-time access rule), **`kind`**
-(emitted `UnspecifiedKind`, but derivable from the descriptor suffix, which we
-already do), and signature/read-write-access (unpopulated, nice-to-have).
-`documentation` was in this gap list until the audit measured it: 99.99%
-non-empty, ~10% genuine doc-comment text once scip-clang's placeholder and
-auto-generated namespace/File text are filtered — consumed by `explain`
-since (the filter is `builder.real_documentation`, see SCIP_AUDIT.md). None
-touch the core graph.
+exact — `calls`/`inherits`/`implements`/`typed-by`/`uses` edges, definition
+locations, references, and (with #504) exact enclosing-range attribution. The
+one gap the audit found that SCIP genuinely cannot express is **visibility**
+(public/protected/private — no SCIP field at all; the format models privacy as
+*local symbols*, a name-scope notion that doesn't map C++'s compile-time access
+rule); see `TODO.md`. Every other field the audit flagged as unpopulated by the
+official binary (`kind`, `signature_documentation`, `is_type_definition`,
+`ReadAccess`/`WriteAccess`, `ForwardDefinition`) is now filled by one of our own
+syntactic-classifier patches and consumed — see `CHANGELOG.md` for each, and
+`SCIP_AUDIT.md` for the field-by-field measurement they were built against.
+None of that touches the core graph.
 
 The key point for build-vs-buy: **because we already patch scip-clang (#504),
 the SCIP *format*'s limits are not hard limits.** scip-clang is itself a clang
@@ -92,6 +94,11 @@ Edges (implemented unless marked planned):
 - `implements` override-method → overridden-method (the method→method
                `is_implementation` relationships; the class→class ones are
                `inherits`)
+- `typed-by`   field/variable → its declared type (from SCIP
+               `is_type_definition` relationships — a patched-binary-only
+               fact today, `#504`-free; queried by `impact --kind typed-by` /
+               `reachable-from --kind typed-by`, opt-in on
+               `boundary-violations` like `implements`)
 - `defines` / `contains`  file/namespace/class → member, structural (planned)
 
 References are **not** edges. They are stored as an exact **location index**
@@ -113,6 +120,14 @@ is this type/symbol used?" — a dependency the call graph can't express (e.g.
 pipeline subsystem). Measured cost is modest — on a large index: 5.3M deduped
 locations, store 323 MB → 468 MB (+45%), build ~40 s vs ~23 s — so it's on by
 default; `--no-references` gives the leaner store when the index isn't wanted.
+
+Each location can also carry the occurrence's `ReadAccess`/`WriteAccess` role
+bits (`Reference.roles`, store column `refs.roles`, gated by the
+`has_access_roles` meta flag) — set only by a scip-clang binary carrying the
+`read-write-access-on-v0.4.0` patch; a stock binary sets neither bit, and the
+query stays silent rather than guess. Where present, the `references` query
+(CLI + MCP) tags each use site `(write)`/`(read+write)` and offers an
+`--access {read,write}` filter ("who *writes* this?" vs plain reads).
 
 When scip-clang emits `enclosing_range` (a #504-built binary), each reference can
 additionally be *attributed* to the definition that contains it — exact via
@@ -224,16 +239,32 @@ fallback (`src/cppgraph/builder.py`):
    binary emits `enclosing_range`, caller attribution and (opt-in) reference
    attribution use range containment → exact, zero collateral; the over-capture
    above is the stock-binary fallback only. A #504 binary is built from source
-   via `docker/build-scip-clang/`.
+   via `docker/build-scip-clang-patched-linux/`.
 
-   On a #504 graph specifically, `build_graph` also detects the declaration case
-   above by a different signal: `callable_intervals` is populated (the binary
-   *does* emit body extents), yet a given role-`0` site still isn't contained by
-   any of them — exactly what a bodyless in-class declaration looks like once
-   real bodies are known. There it drops the edge instead of falling back to
+   On a #504 graph, `build_graph` detects the declaration case above by a
+   different signal: `callable_intervals` is populated (the binary *does* emit
+   body extents), yet a given role-`0` site still isn't contained by any of
+   them — exactly what a bodyless in-class declaration looks like once real
+   bodies are known. There it drops the edge instead of falling back to
    nearest-preceding, since that fallback is only a sound approximation when a
-   document has no interval data at all. The "keep the over-capture" call above
-   stands only for stock graphs, which have no such signal to detect the case.
+   document has no interval data at all.
+
+   A patched (non-#504) graph has an equivalent signal, from a different
+   patch: `scip-clang-patches/forward-definition-on-v0.4.0.patch` tags the
+   bodyless declaration occurrence itself with `ForwardDefinition` — an
+   existing SCIP role the official binary never sets — so a graph built from
+   a patched binary (even without #504's `enclosing_range`) excludes it via
+   the same `DEFINITION | FORWARD_DEFINITION` filter `build_graph` already
+   applies for #504 graphs, before either the call-site or reference-site
+   heuristic runs. Verified end-to-end: on an identical fixture, a stock
+   official binary fabricates the phantom caller described above; our patched
+   binary doesn't. Not yet upstreamed; see `TODO.md`'s scip-clang section.
+
+   The "keep the over-capture" call above therefore stands only for a graph
+   built from the OFFICIAL upstream binary, which has no signal to detect the
+   case — the corpus this file's measurements were taken against. Both a
+   #504 graph and a patched (forward-definition) graph have a signal and drop
+   the edge instead.
 
     This asymmetry is why `no_incoming_calls` (definitions with zero incoming
     `calls` edges) refuses to answer on a stock graph: a phantom caller from a
@@ -308,7 +339,7 @@ when index→build run back-to-back. Non-git projects simply record no commit
 (the tool stays general, `git`-optional). This commit is the **anchor for
 incremental updates** — see below.
 
-The `meta` table also carries a **`schema_version`** (currently 4): the on-disk
+The `meta` table also carries a **`schema_version`** (currently 5): the on-disk
 *format* version, distinct from `cppgraph_version` (the code that wrote it).
 It's the enabler for format migrations — a future schema change bumps it, and
 migration code can branch on the stored value. `GraphStore` refuses to open a
@@ -414,7 +445,7 @@ designing the builder so this isn't a later rewrite:
   fixed at launch (`--graph <db>`, optional `--root <checkout>`) so tools never
   take — and the LLM never has to guess or repeat — a filesystem path. Tools:
     `find`, `who_calls`, `what_it_calls`, `base_classes`, `subclasses`,
-    `find_references`, `path`, `impact_of` (`kind` = calls|inherits),
+    `find_references`, `path`, `impact_of` (`kind` = calls|inherits|typed-by),
     `reachable_from` (the forward mirror — everything an entry point
     transitively reaches, worded as a lower bound per the corollary below),
     `hotspots`

@@ -26,7 +26,7 @@ from pathlib import Path
 
 from cppgraph.builder import build_graph
 from cppgraph.export import is_test_file
-from cppgraph.init import scip_clang_bin_dir, scip_clang_info
+from cppgraph.init import PATCHED_VARIANTS, scip_clang_bin_dir, scip_clang_info
 from cppgraph.proto import scip_pb2
 from cppgraph.store import (
     GraphStore,
@@ -292,12 +292,12 @@ def full_build(
     out_graph = out_dir / f"{name}.graph.db"
 
     present, variant = scip_clang_info()
-    # Attribution needs a #504 binary that emits enclosing_range; drop it otherwise.
-    attr = bool(attributed_refs) and variant == "enclosing_range-504"
+    # Attribution needs a patched binary that emits enclosing_range; drop it otherwise.
+    attr = bool(attributed_refs) and variant in PATCHED_VARIANTS
     if attributed_refs and not attr:
         print_fn(
             "  warning: --attributed-refs requested but the local scip-clang is not a "
-            "#504 build; producing file-granularity usage instead."
+            "patched build; producing file-granularity usage instead."
         )
 
     # [1/3] filter compdb (derived + deterministic — always regenerated).

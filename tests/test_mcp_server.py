@@ -15,6 +15,7 @@ import pytest
 
 from cppgraph import mcp_server
 from cppgraph.model import Graph, Node
+from cppgraph.proto import scip_pb2
 from cppgraph.store import GraphStore, write_sqlite
 from cppgraph.updates import BYTES_PER_ATTRIBUTED_REF
 
@@ -1304,6 +1305,63 @@ def test_references_unknown_symbol_is_error(refs_store: GraphStore) -> None:
     assert "error" in mcp_server.references(refs_store, "nope")
 
 
+def test_references_access_filter_and_annotation(tmp_path: Path) -> None:
+    graph = Graph()
+    graph.add_reference(TYPE, "a.cpp", 10, roles=scip_pb2.SymbolRole.WriteAccess)
+    graph.add_reference(
+        TYPE,
+        "a.cpp",
+        12,
+        roles=scip_pb2.SymbolRole.ReadAccess | scip_pb2.SymbolRole.WriteAccess,
+    )
+    graph.add_reference(TYPE, "b.cpp", 41)  # plain read — no annotation, kept by access="read"
+    path = tmp_path / "acc.db"
+    write_sqlite(graph, path)
+    store = GraphStore(path)
+
+    all_uses = mcp_server.references(store, TYPE)
+    tags = {(u["file"], u["line"]): u.get("access") for u in all_uses["uses"]}
+    assert tags[("a.cpp", 11)] == "write"
+    assert tags[("a.cpp", 13)] == "read+write"
+    assert tags[("b.cpp", 42)] is None  # a plain read stays silent
+
+    writes = mcp_server.references(store, TYPE, access="write")
+    assert {(u["file"], u["line"]) for u in writes["uses"]} == {("a.cpp", 11), ("a.cpp", 13)}
+
+    reads = mcp_server.references(store, TYPE, access="read")
+    assert [(u["file"], u["line"]) for u in reads["uses"]] == [("b.cpp", 42)]
+
+
+def test_references_enclosing_symbol_and_access_annotate_together(tmp_path: Path) -> None:
+    # A reference can carry both #504 attribution and access roles; the returned
+    # item must expose both keys together, neither clobbering the other.
+    graph = Graph()
+    graph.add_node("cxx . . $ mongo/render(r1).")
+    graph.add_reference(
+        TYPE,
+        "a.cpp",
+        10,
+        enclosing_symbol="cxx . . $ mongo/render(r1).",
+        roles=scip_pb2.SymbolRole.WriteAccess,
+    )
+    path = tmp_path / "both.db"
+    write_sqlite(graph, path)
+    store = GraphStore(path)
+
+    result = mcp_server.references(store, TYPE)
+    (use,) = result["uses"]
+    assert use["used_by"] == "mongo/render(r1)."
+    assert use["access"] == "write"
+
+
+def test_references_access_filter_without_role_data_reports(refs_store: GraphStore) -> None:
+    # refs_store has a reference index, but no role data (stock build) — an
+    # access filter must report rather than pretend every site is a read.
+    result = mcp_server.references(refs_store, TYPE, access="write")
+    assert result["available"] is False
+    assert "read/write access data" in result["reason"]
+
+
 def test_impact_over_inherits_gives_all_descendants(hierarchy: GraphStore) -> None:
     result = mcp_server.impact(hierarchy, BASE, kind="inherits", full_symbols=True)
     assert {r["symbol"] for r in result["reached_by"]} == {DERIVED, LEAF}
@@ -1316,6 +1374,74 @@ def test_reachable_from_over_inherits_gives_transitive_ancestors(
     result = mcp_server.reachable_from_report(hierarchy, LEAF, kind="inherits", full_symbols=True)
     assert {r["symbol"] for r in result["reaches"]} == {DERIVED, BASE}
     assert result["kind"] == "inherits"
+
+
+@pytest.fixture
+def typed_by_store(tmp_path: Path) -> GraphStore:
+    graph = Graph()
+    graph.add_edge(
+        "typed-by", "cxx . . $ mongo/Outer#f.", "cxx . . $ mongo/Value#", file="outer.h", line=4
+    )
+    graph.add_edge(
+        "calls", "cxx . . $ mongo/fn(a1).", "cxx . . $ mongo/other_fn(b1).", file="f.cpp", line=1
+    )
+    path = tmp_path / "typed_by.db"
+    write_sqlite(graph, path)
+    return GraphStore(path)
+
+
+def test_impact_over_typed_by_gives_fields_typed_as_the_type(
+    typed_by_store: GraphStore,
+) -> None:
+    result = mcp_server.impact(
+        typed_by_store, "cxx . . $ mongo/Value#", kind="typed-by", full_symbols=True
+    )
+    assert result["kind"] == "typed-by"
+    assert {r["symbol"] for r in result["reached_by"]} == {"cxx . . $ mongo/Outer#f."}
+
+
+def test_reachable_from_over_typed_by_gives_the_declared_type(
+    typed_by_store: GraphStore,
+) -> None:
+    result = mcp_server.reachable_from_report(
+        typed_by_store, "cxx . . $ mongo/Outer#f.", kind="typed-by", full_symbols=True
+    )
+    assert result["kind"] == "typed-by"
+    assert {r["symbol"] for r in result["reaches"]} == {"cxx . . $ mongo/Value#"}
+
+
+def test_typed_by_isolated_from_calls_traversals(typed_by_store: GraphStore) -> None:
+    """A typed-by edge never leaks into a calls traversal (and vice versa) —
+    one edge kind per call."""
+    assert mcp_server.impact(typed_by_store, "cxx . . $ mongo/Value#")["total"] == 0
+    assert (
+        mcp_server.reachable_from_report(
+            typed_by_store, "cxx . . $ mongo/fn(a1).", kind="typed-by"
+        )["total"]
+        == 0
+    )
+
+
+def test_boundary_violation_report_typed_by_kind(
+    tmp_path: Path,
+) -> None:
+    """edge_kinds=["typed-by"] checks type-usage crossing the boundary; the
+    default kinds (calls, inherits) exclude it."""
+    graph = Graph()
+    graph.add_edge("typed-by", "common_widget", "platform_value", file="common/widget.h", line=7)
+    graph.nodes["common_widget"].file = "common/widget.h"
+    graph.nodes["platform_value"].file = "platform/value.h"
+    path = tmp_path / "tbb.db"
+    write_sqlite(graph, path)
+    store = GraphStore(path)
+    rules = [["common/", "platform/"]]
+    assert mcp_server.boundary_violation_report(store, rules)["total"] == 0
+    result = mcp_server.boundary_violation_report(store, rules, edge_kinds=["typed-by"])
+    assert result["total"] == 1
+    v = result["violations"][0]
+    assert v["kind"] == "typed-by"
+    assert v["src"] == "common_widget"
+    assert v["dst"] == "platform_value"
 
 
 def test_explain_coordinates_only_by_default(store: GraphStore) -> None:
@@ -1404,6 +1530,211 @@ def test_explain_includes_documentation_from_the_graph(tmp_path: Path) -> None:
 def test_explain_omits_documentation_when_none(store: GraphStore) -> None:
     result = mcp_server.explain(store, FOO)
     assert "documentation" not in result
+
+
+def test_explain_includes_scip_kind(tmp_path: Path) -> None:
+    """The fine-grained SCIP kind (kind-patch binary, `has_symbol_kind`):
+    present only when the node carries one — absent, never null (the same
+    presence convention as `documentation`)."""
+    path = tmp_path / "graph.db"
+    graph = Graph()
+    graph.nodes[FOO] = Node(
+        symbol=FOO,
+        display_name="makeResumeToken",
+        file="foo.cpp",
+        line=234,
+        scip_kind="StaticMethod",
+    )
+    write_sqlite(graph, path)
+    result = mcp_server.explain(GraphStore(path), FOO)
+    assert result["scip_kind"] == "StaticMethod"
+
+
+def test_explain_omits_scip_kind_when_absent(store: GraphStore) -> None:
+    """A stock-binary graph carries no kinds: the key is absent entirely (no
+    data collected), not None (data collected, negative)."""
+    result = mcp_server.explain(store, FOO)
+    assert "scip_kind" not in result
+
+
+def test_explain_includes_signature_documentation_from_the_graph(tmp_path: Path) -> None:
+    """A recorded signature is carried by the store (extracted at index time
+    from `SymbolInformation.signature_documentation`), so it needs no `root`
+    and no source read — unlike `signature`. Present only when the graph
+    carries text: absent, never null (the same presence convention as
+    `documentation`)."""
+    path = tmp_path / "graph.db"
+    graph = Graph()
+    graph.nodes[FOO] = Node(
+        symbol=FOO,
+        display_name="makeResumeToken",
+        file="foo.cpp",
+        line=234,
+        signature_documentation="void makeResumeToken(const Document& doc)",
+    )
+    write_sqlite(graph, path)
+    result = mcp_server.explain(GraphStore(path), FOO)
+    assert result["signature_documentation"] == "void makeResumeToken(const Document& doc)"
+
+
+def test_explain_omits_signature_documentation_when_none(store: GraphStore) -> None:
+    result = mcp_server.explain(store, FOO)
+    assert "signature_documentation" not in result
+
+
+def test_explain_signature_and_signature_documentation_coexist(
+    store: GraphStore, tmp_path: Path
+) -> None:
+    """The two keys are genuinely distinct and can coexist: `signature` stays
+    the source-derived extraction (root only), `signature_documentation` the
+    graph-stored one — neither shadows nor overwrites the other."""
+    root = tmp_path / "checkout"
+    root.mkdir()
+    (root / "foo.cpp").write_text(
+        "\n".join(f"line {i}" for i in range(234))
+        + "\nvoid makeResumeToken(const Document& doc, bool useNullIfMissing = false) {}\n"
+    )
+    path = tmp_path / "graph.db"
+    graph = Graph()
+    graph.nodes[FOO] = Node(
+        symbol=FOO,
+        display_name="makeResumeToken",
+        file="foo.cpp",
+        line=234,
+        signature_documentation="Signature makeResumeToken(Document)",
+    )
+    write_sqlite(graph, path)
+
+    result = mcp_server.explain(GraphStore(path), FOO, root=str(root))
+    assert result["signature_documentation"] == "Signature makeResumeToken(Document)"
+    assert result["signature"] == "(const Document& doc, bool useNullIfMissing = false)"
+
+    without_root = mcp_server.explain(GraphStore(path), FOO)
+    assert without_root["signature_documentation"] == "Signature makeResumeToken(Document)"
+    assert "signature" not in without_root  # source-derived needs a root
+
+
+def test_find_includes_scip_kind_when_graph_has_it(tmp_path: Path) -> None:
+    path = tmp_path / "graph.db"
+    graph = Graph()
+    graph.nodes[FOO] = Node(
+        symbol=FOO,
+        display_name="makeResumeToken",
+        file="foo.cpp",
+        line=234,
+        scip_kind="StaticMethod",
+    )
+    write_sqlite(graph, path)
+    result = mcp_server.find_symbols(GraphStore(path), "makeResumeToken")
+    assert result["results"][0]["scip_kind"] == "StaticMethod"
+
+
+def test_find_omits_scip_kind_when_absent(store: GraphStore) -> None:
+    result = mcp_server.find_symbols(store, "makeResumeToken")
+    assert "scip_kind" not in result["results"][0]
+
+
+# --- is_out_of_project / has_external_symbols ---------------------------------
+
+
+@pytest.mark.parametrize("classified", [True, False, None], ids=["external", "native", "phantom"])
+def test_explain_includes_is_out_of_project_when_capability_present(
+    tmp_path: Path, classified: bool | None
+) -> None:
+    """A graph with external-package symbol metadata (`has_external_symbols`)
+    classifies every resolved symbol: true (external package), false
+    (project-native) or null (phantom — no SymbolInformation from either
+    source). Null is a real VALUE here, never omitted: "classified, no
+    evidence" is an answer."""
+    path = tmp_path / "graph.db"
+    graph = Graph()
+    graph.nodes[FOO] = Node(
+        symbol=FOO,
+        display_name="makeResumeToken",
+        file="foo.cpp",
+        line=234,
+        is_out_of_project=classified,
+    )
+    write_sqlite(graph, path, meta={"has_external_symbols": "true"})
+    result = mcp_server.explain(GraphStore(path), FOO)
+    assert result["is_out_of_project"] is classified
+
+
+def test_explain_omits_is_out_of_project_when_capability_absent(store: GraphStore) -> None:
+    """A graph built before the feature carries neither the flag nor the
+    column: the key is omitted entirely — "not classified", never conflated
+    with the null "classified, no evidence"."""
+    result = mcp_server.explain(store, FOO)
+    assert "is_out_of_project" not in result
+
+
+def test_find_uniform_overloads_share_the_is_out_of_project_value(tmp_path: Path) -> None:
+    p1 = "cxx . . $ mongo/ResumeToken#parse(aaaaaa)."
+    p2 = "cxx . . $ mongo/ResumeToken#parse(bbbbbb)."
+    graph = Graph()
+    graph.nodes[p1] = Node(
+        symbol=p1, display_name="parse", file="rt.h", line=1, is_out_of_project=True
+    )
+    graph.nodes[p2] = Node(
+        symbol=p2, display_name="parse", file="rt.cpp", line=2, is_out_of_project=True
+    )
+    path = tmp_path / "ov.db"
+    write_sqlite(graph, path, meta={"has_external_symbols": "true"})
+
+    result = mcp_server.find_symbols(GraphStore(path), "parse")
+
+    entry = result["results"][0]
+    assert entry["is_out_of_project"] is True  # all arms agree -> the shared value
+    assert {s["symbol"]: s["is_out_of_project"] for s in entry["signatures"]} == {
+        p1: True,
+        p2: True,
+    }
+
+
+def test_find_mixed_overloads_get_null_is_out_of_project(tmp_path: Path) -> None:
+    """Overload arms classified differently (one external, one project-native
+    — e.g. a native symbol that also appears in `external_symbols`): the
+    top-level value is null (never one arm's value picked silently); each arm
+    keeps its own."""
+    p1 = "cxx . . $ mongo/ResumeToken#parse(aaaaaa)."
+    p2 = "cxx . . $ mongo/ResumeToken#parse(bbbbbb)."
+    graph = Graph()
+    graph.nodes[p1] = Node(
+        symbol=p1, display_name="parse", file="rt.h", line=1, is_out_of_project=True
+    )
+    graph.nodes[p2] = Node(
+        symbol=p2, display_name="parse", file="rt.cpp", line=2, is_out_of_project=False
+    )
+    path = tmp_path / "ov.db"
+    write_sqlite(graph, path, meta={"has_external_symbols": "true"})
+
+    result = mcp_server.find_symbols(GraphStore(path), "parse")
+
+    entry = result["results"][0]
+    assert entry["is_out_of_project"] is None  # disagreement -> null
+    assert {s["symbol"]: s["is_out_of_project"] for s in entry["signatures"]} == {
+        p1: True,
+        p2: False,
+    }
+
+
+@pytest.mark.parametrize(
+    "meta",
+    [{"has_external_symbols": "true"}, {}],
+    ids=["with-feature", "pre-feature"],
+)
+def test_status_reports_external_symbols_flag(tmp_path: Path, meta: dict[str, str]) -> None:
+    """`graph_meta.has_external_symbols` mirrors the meta flag as a bool, the
+    same way `has_symbol_kind` is surfaced: true only when the graph carries
+    the classification, false when it doesn't — never missing."""
+    graph = Graph()
+    graph.add_node(FOO, display_name="x")
+    path = tmp_path / "g.db"
+    write_sqlite(graph, path, meta=meta)
+    with GraphStore(path) as st:
+        result = mcp_server.status_report(st)
+    expected = meta.get("has_external_symbols") == "true"
+    assert result["graph_meta"]["has_external_symbols"] is expected
 
 
 def test_explain_limit_is_overridable(store: GraphStore) -> None:
@@ -1537,6 +1868,25 @@ def test_status_attributed_graph_gets_no_upgrade_hint(tmp_path: Path) -> None:
     assert "upgrade" not in result["usage_view"]
 
 
+@pytest.mark.parametrize(
+    "meta",
+    [{"has_symbol_kind": "true"}, {}],
+    ids=["kind-patched", "stock-binary"],
+)
+def test_status_reports_symbol_kind_flag(tmp_path: Path, meta: dict[str, str]) -> None:
+    """`graph_meta.has_symbol_kind` mirrors the meta flag as a bool, the same
+    way `has_access_roles` is surfaced: true only when the graph carries
+    kinds, false when it doesn't — never missing."""
+    graph = Graph()
+    graph.add_node(FOO, display_name="x")
+    path = tmp_path / "g.db"
+    write_sqlite(graph, path, meta=meta)
+    with GraphStore(path) as st:
+        result = mcp_server.status_report(st)
+    expected = meta.get("has_symbol_kind") == "true"
+    assert result["graph_meta"]["has_symbol_kind"] is expected
+
+
 def test_status_up_to_date_with_root(tmp_path: Path) -> None:
     root = tmp_path / "co"
     root.mkdir()
@@ -1663,8 +2013,10 @@ def test_find_groups_overloads(tmp_path: Path) -> None:
     p1 = "cxx . . $ mongo/ResumeToken#parse(aaaaaa)."
     p2 = "cxx . . $ mongo/ResumeToken#parse(bbbbbb)."
     graph = Graph()
-    graph.nodes[p1] = Node(symbol=p1, display_name="parse", file="rt.h", line=1)
-    graph.nodes[p2] = Node(symbol=p2, display_name="parse", file="rt.cpp", line=2)
+    graph.nodes[p1] = Node(symbol=p1, display_name="parse", file="rt.h", line=1, scip_kind="Method")
+    graph.nodes[p2] = Node(
+        symbol=p2, display_name="parse", file="rt.cpp", line=2, scip_kind="StaticMethod"
+    )
     path = tmp_path / "ov.db"
     write_sqlite(graph, path)
     result = mcp_server.find_symbols(GraphStore(path), "parse")
@@ -1674,6 +2026,10 @@ def test_find_groups_overloads(tmp_path: Path) -> None:
     entry = result["results"][0]
     assert entry["overloads"] == 2
     assert {s["symbol"] for s in entry["signatures"]} == {p1, p2}
+    # Each arm keeps its own fine-grained kind (kind-patched graph only) —
+    # grouping must not collapse the arms to the first one's kind.
+    kinds = {s["symbol"]: s["scip_kind"] for s in entry["signatures"]}
+    assert kinds == {p1: "Method", p2: "StaticMethod"}
 
 
 def test_impact_on_type_redirects_to_references(tmp_path: Path) -> None:

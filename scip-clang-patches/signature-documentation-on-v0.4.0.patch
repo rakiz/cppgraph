@@ -1,0 +1,167 @@
+# SymbolInformation.signature_documentation — fills SCIP's
+# SymbolInformation.signature_documentation (field 7, a Document message with
+# `language` + `text`), which upstream leaves unset on 100% of symbols. For
+# every function/method declaration that reaches saveFunctionDecl's
+# SymbolInformation branch (i.e. defined or pure-virtual — the only
+# FunctionDecls which get a SymbolInformation today), the new
+# declToSignatureText helper in indexer/Indexer.cc prints the declaration back
+# out via the AST declaration printer (clang::PrintingPolicy with TerseOutput,
+# SuppressTagKeyword, names as written): the body and constructor initializer
+# lists are suppressed, while parameter default arguments, storage-class /
+# inline / virtual / constexpr specifiers, `= 0` / `= delete` / `= default`
+# markers and written scope qualifiers are kept; no trailing semicolon is
+# printed by per-decl printing and trailing whitespace is stripped. Printed
+# from the AST rather than lexed from the source range, so the text stays
+# well-formed regardless of macro expansion or formatting.
+#
+# Scope and limits (v1): only DEFINED or pure-virtual function/method
+# declarations get a signature. Declaration-only symbols — bodyless in-class
+# declarations, which route through saveForwardDeclaration and never receive a
+# SymbolInformation — do NOT get one (accepted v1 limitation; those would
+# belong on the ForwardDecl path instead). Other SymbolInformation-creating
+# sites (types, fields, variables, namespaces, macros) are left for later.
+#
+# The text survives the TU-merge pipeline the same way `kind` does:
+# SymbolInformationBuilder gains a `signatureDocumentation` field (empty =
+# absent) plus a set-if-empty setter — the first non-empty signature wins, and
+# a later duplicate can fill an earlier empty one, mirroring how `documentation`
+# is merged; finish() re-emits it with
+# language = scip::Language_Name(scip::Language::CPP) ("CPP"), matching how
+# AstConsumer sets Document.language for documents. One deliberate deviation
+# from kind's plumbing: the setter is called after the builder is inserted
+# into its map (with a find-back, since the builder was moved) instead of via
+# an extra constructor parameter, because kind's patch modifies those exact
+# constructor call lines — extending the same calls would make the two
+# patches' hunks overlap at any context width. set-after-emplace keeps the
+# semantics identical while keeping the patches order-independent.
+#
+# NOT (yet) an upstream PR.
+#
+# Applicability: generated with minimal diff context (`-U1`) so it applies
+# cleanly in any order relative to the other four patches in this directory
+# (or completely alone) — verified empirically: all 120 orderings of the five
+# patches applied to a clean v0.4.0 checkout produce byte-identical final
+# files. This required widening ONE hunk of forward-definition-on-v0.4.0.patch
+# to -U2 context (its addTo hunk's `  }` + `}` context was generic enough to
+# mis-land once this patch's insertions shift indexer/ScipExtras.cc enough) —
+# see that patch's header. The saveFunctionDecl insertion anchors on the
+# getDocComment(...).addTo(symbolInfo) line, which no other patch touches and
+# which `kind`'s set_kind insertion only abuts (they insert on opposite sides
+# of it), so the hunks stay separable at -U1. See
+# scip-clang-patches/README.md's "Independence" section.
+diff --git a/indexer/Indexer.cc b/indexer/Indexer.cc
+index 79560fb..5eae8b2 100644
+--- a/indexer/Indexer.cc
++++ b/indexer/Indexer.cc
+@@ -22,2 +22,3 @@
+ #include "clang/AST/ExprCXX.h"
++#include "clang/AST/PrettyPrinter.h"
+ #include "clang/AST/RawCommentList.h"
+@@ -30,2 +31,3 @@
+ #include "llvm/ADT/SmallVector.h"
++#include "llvm/Support/raw_ostream.h"
+ 
+@@ -525,2 +527,30 @@ void TuIndexer::saveFieldReference(const clang::FieldDecl &fieldDecl,
+ 
++// Prints the declaration itself (return type, name, parameters — including
++// default arguments — plus specifiers and `= 0` / `= delete` /
++// `= default` markers, but no body and no trailing semicolon) for SCIP's
++// SymbolInformation.signature_documentation. Uses the AST declaration
++// printer with a PrintingPolicy rather than lexing the source range, so
++// the text is well-formed regardless of macro expansion or formatting.
++//
++// Scope: only declarations which reach saveDefinition get a
++// SymbolInformation, i.e. definitions and pure-virtual methods. Bodyless
++// in-class declarations are emitted as ForwardDefinitions instead and get
++// no signature text (accepted v1 limitation).
++static std::optional<std::string>
++declToSignatureText(const clang::FunctionDecl &functionDecl) {
++  clang::PrintingPolicy policy(functionDecl.getASTContext().getLangOpts());
++  policy.SuppressTagKeyword = true;
++  policy.TerseOutput = true; // suppresses the body and ctor initializers
++  policy.FullyQualifiedName = false;
++  std::string sig;
++  llvm::raw_string_ostream os(sig);
++  functionDecl.print(os, policy);
++  os.flush();
++  absl::StripTrailingAsciiWhitespace(&sig);
++  if (sig.empty()) {
++    return std::nullopt;
++  }
++  return sig;
++}
++
+ void TuIndexer::saveFunctionDecl(const clang::FunctionDecl &functionDecl) {
+@@ -536,2 +566,7 @@ void TuIndexer::saveFunctionDecl(const clang::FunctionDecl &functionDecl) {
+     this->getDocComment(functionDecl).addTo(symbolInfo);
++    if (auto sig = declToSignatureText(functionDecl)) {
++      auto *sigDoc = symbolInfo.mutable_signature_documentation();
++      sigDoc->set_language(scip::Language_Name(scip::Language::CPP));
++      sigDoc->set_text(*sig);
++    }
+     if (auto *cxxMethodDecl =
+diff --git a/indexer/ScipExtras.cc b/indexer/ScipExtras.cc
+index db5f8be..09f4758 100644
+--- a/indexer/ScipExtras.cc
++++ b/indexer/ScipExtras.cc
+@@ -114,2 +114,8 @@ void SymbolInformationBuilder::finish(bool deterministic,
+       }));
++
++  if (!this->signatureDocumentation.empty()) {
++    auto *sigDoc = out.mutable_signature_documentation();
++    sigDoc->set_language(scip::Language_Name(scip::Language::CPP));
++    sigDoc->set_text(this->signatureDocumentation);
++  }
+ }
+@@ -191,2 +197,10 @@ void DocumentBuilder::merge(scip::Document &&doc) {
+       this->symbolInfos.emplace(name, std::move(builder));
++      // SAFETY: the emplace above always inserts (this is the
++      // not-found branch), so find() always succeeds. The builder was
++      // moved into the map, so the signature documentation is attached
++      // to the map value; on a fresh builder, set-if-empty is just an
++      // assignment.
++      this->symbolInfos.find(name)
++          ->second.setSignatureDocumentation(
++              symbolInfo.signature_documentation().text());
+       continue;
+@@ -200,2 +214,4 @@ void DocumentBuilder::merge(scip::Document &&doc) {
+         std::move(*symbolInfo.mutable_relationships()));
++    symbolInfoBuilder.setSignatureDocumentation(
++        symbolInfo.signature_documentation().text());
+   }
+@@ -288,2 +304,9 @@ void IndexBuilder::addExternalSymbolUnchecked(
+   this->externalSymbols.emplace(name, std::move(builder));
++  // SAFETY: the emplace above always inserts (this helper is only called
++  // when the symbol isn't present yet), so find() always succeeds. The
++  // builder was moved into the map, so the signature documentation is
++  // attached to the map value.
++  this->externalSymbols.find(name)
++      ->second->setSignatureDocumentation(
++          extSym.signature_documentation().text());
+ }
+@@ -305,2 +328,3 @@ void IndexBuilder::addExternalSymbol(scip::SymbolInformation &&extSym) {
+   builder->mergeRelationships(std::move(*extSym.mutable_relationships()));
++  builder->setSignatureDocumentation(extSym.signature_documentation().text());
+ }
+diff --git a/indexer/ScipExtras.h b/indexer/ScipExtras.h
+index 7250a22..69473e4 100644
+--- a/indexer/ScipExtras.h
++++ b/indexer/ScipExtras.h
+@@ -90,2 +90,5 @@ class SymbolInformationBuilder final {
+   std::vector<std::string> documentation;
++  // Carries SCIP's signature_documentation (SymbolInformation field 7)
++  // through the merge pipeline; empty = absent.
++  std::string signatureDocumentation;
+   absl::flat_hash_set<RelationshipExt> relationships;
+@@ -107,2 +110,11 @@ public:
+ 
++  // Adopts newText when the builder has no signature documentation yet:
++  // the first non-empty one wins, and a later duplicate can fill an
++  // earlier empty one (mirrors how documentation is merged).
++  void setSignatureDocumentation(std::string newText) {
++    if (this->signatureDocumentation.empty()) {
++      this->signatureDocumentation = std::move(newText);
++    }
++  }
++
+   bool hasDocumentation() const;

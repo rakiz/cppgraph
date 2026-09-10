@@ -39,26 +39,40 @@ def _pinned_scip_version() -> str:
         return _DEFAULT_SCIP_VERSION
 
 
+def _pinned_patchset_version() -> int:
+    """The pinned patch-bundle version (versions.json `scip_clang.patchset_version`)
+    — tracks THIS repo's patches on top of the upstream tag, independent of
+    `_pinned_scip_version`. Falls back to 1 (the initial patchset) when absent
+    or unparseable, mirroring `_pinned_scip_version`'s fallback."""
+    try:
+        data = json.loads((_repo_root() / "versions.json").read_text())
+        return int((data.get("scip_clang") or {}).get("patchset_version"))
+    except (OSError, ValueError, TypeError):
+        return 1
+
+
 def platform_sources() -> tuple[str | None, str | None, bool]:
-    """`(native_asset, native_504_asset, host_can_build)` for this machine.
+    """`(native_asset, native_patched_asset, host_can_build)` for this machine.
     `native_asset` is the prebuilt stock release asset name (upstream
-    sourcegraph/scip-clang), or None when none is published. `native_504_asset` is
-    the prebuilt #504 (enclosing_range) asset name published by this project's own
-    releases (see `scripts/publish-scip-clang-504.sh`), or None when this host's
-    platform has no published #504 binary yet. `host_can_build` is True on Linux (a
-    local #504 build compiles a Linux binary for the host)."""
+    sourcegraph/scip-clang), or None when none is published. `native_patched_asset`
+    is the prebuilt patched (this project's full patch bundle — see
+    `scip-clang-patches/README.md` for the current list)
+    asset name published by this project's own releases (see
+    `scripts/publish-scip-clang-patched.sh`), or None when this host's platform has
+    no published patched binary yet. `host_can_build` is True on Linux (a local
+    patched build compiles a Linux binary for the host)."""
     system, machine = platform.system(), platform.machine()
     native = {
         ("Darwin", "arm64"): "scip-clang-arm64-darwin",
         ("Linux", "x86_64"): "scip-clang-x86_64-linux",
     }.get((system, machine))
-    native_504 = {
-        ("Darwin", "arm64"): "scip-clang-504-arm64-darwin",
-        ("Linux", "aarch64"): "scip-clang-504-aarch64-linux",
-        ("Linux", "arm64"): "scip-clang-504-aarch64-linux",
+    native_patched = {
+        ("Darwin", "arm64"): "scip-clang-patched-arm64-darwin",
+        ("Linux", "aarch64"): "scip-clang-patched-aarch64-linux",
+        ("Linux", "arm64"): "scip-clang-patched-aarch64-linux",
     }.get((system, machine))
     host_can_build = system == "Linux" and machine in ("x86_64", "aarch64", "arm64")
-    return native, native_504, host_can_build
+    return native, native_patched, host_can_build
 
 
 def read_sidecar(bin_dir: Path) -> dict | None:
@@ -71,17 +85,20 @@ def read_sidecar(bin_dir: Path) -> dict | None:
         return None
 
 
-def _write_sidecar(bin_dir: Path, version: str, variant: str, source: str) -> None:
-    (bin_dir / "scip-clang.json").write_text(
-        json.dumps(
-            {
-                "version": version,
-                "variant": variant,
-                "source": source,
-                "installed_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
-            }
-        )
-    )
+def _write_sidecar(
+    bin_dir: Path, version: str, variant: str, source: str, patchset: int | None = None
+) -> None:
+    """Write the provenance sidecar next to the binary. `patchset_version` is
+    recorded only for a patched build (stock has no patch bundle)."""
+    side: dict = {
+        "version": version,
+        "variant": variant,
+        "source": source,
+        "installed_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+    if patchset is not None:
+        side["patchset_version"] = patchset
+    (bin_dir / "scip-clang.json").write_text(json.dumps(side))
 
 
 def _download_scip(bin_dir: Path, asset: str, version: str, p: Prompter) -> bool:
@@ -99,14 +116,17 @@ def _download_scip(bin_dir: Path, asset: str, version: str, p: Prompter) -> bool
     return True
 
 
-def _download_504(bin_dir: Path, asset: str, version: str, p: Prompter) -> bool:
-    """Download a prebuilt #504 (enclosing_range) binary from this project's own
-    GitHub releases (published by `scripts/publish-scip-clang-504.sh`), verified
-    against its `.sha256` sidecar asset."""
+def _download_patched(bin_dir: Path, asset: str, version: str, p: Prompter) -> bool:
+    """Download a prebuilt patched binary (this project's full patch bundle —
+    see `scip-clang-patches/README.md` for the current list)
+    from this project's own GitHub releases (published by
+    `scripts/publish-scip-clang-patched.sh`), verified against its `.sha256`
+    sidecar asset."""
     binary = bin_dir / "scip-clang"
-    tag = f"scip-clang-504-v{version}"
+    patchset = _pinned_patchset_version()
+    tag = f"scip-clang-patched-v{version}-p{patchset}"
     base = f"https://github.com/{_CPPGRAPH_REPO}/releases/download/{tag}"
-    p.note(f"==> Downloading scip-clang #504 {tag} ({asset})")
+    p.note(f"==> Downloading scip-clang patched {tag} ({asset})")
     proc = subprocess.run(["curl", "-fL", "--retry", "3", "-o", str(binary), f"{base}/{asset}"])
     if proc.returncode != 0:
         binary.unlink(missing_ok=True)
@@ -130,31 +150,42 @@ def _download_504(bin_dir: Path, asset: str, version: str, p: Prompter) -> bool:
         p.note(f"error: checksum mismatch for {asset} (expected {expected}, got {actual}).")
         return False
     binary.chmod(0o755)
-    _write_sidecar(bin_dir, version, "504", "download-504")
+    _write_sidecar(
+        bin_dir, version, "patched", "download-patched", patchset=_pinned_patchset_version()
+    )
     return True
 
 
 def _build_scip(bin_dir: Path, p: Prompter) -> bool:
-    build = _repo_root() / "docker" / "build-scip-clang" / "build.sh"
+    build = _repo_root() / "docker" / "build-scip-clang-patched-linux" / "build.sh"
     if not build.is_file():
         p.note(f"error: build script not found at {build}.")
         return False
-    p.note("==> Building scip-clang locally with enclosing_range / #504 (~30-60 min)")
+    p.note(
+        "==> Building scip-clang locally with the patchset "
+        "(this project's full patch bundle — see scip-clang-patches/README.md) (~30-60 min)"
+    )
     proc = subprocess.run([str(build), str(bin_dir)])
     return proc.returncode == 0
 
 
 def _valid_sources(
-    native: str | None, native_504: str | None, host_can_build: bool
+    native: str | None, native_patched: str | None, host_can_build: bool
 ) -> list[tuple[str, str]]:
     """The scip-clang sources valid on this host, each `(value, label-with-cost)`."""
     options: list[tuple[str, str]] = []
-    if native_504:
-        options.append(("download-504", "download prebuilt #504 (enclosing_range) — ~1 min"))
+    if native_patched:
+        options.append(
+            (
+                "download-patched",
+                "download prebuilt patched (full patch bundle — see "
+                "scip-clang-patches/README.md) — ~1 min",
+            )
+        )
     if native:
-        options.append(("download", "download prebuilt binary (stock, no #504) — ~1 min"))
+        options.append(("download", "download prebuilt binary (stock, unpatched) — ~1 min"))
     if host_can_build:
-        options.append(("build", "build #504 locally — ~30-60 min, needs Docker"))
+        options.append(("build", "build patched locally — ~30-60 min, needs Docker"))
     options.append(("emulate", "no host binary; index via an x86 container — slower later"))
     return options
 
@@ -176,9 +207,9 @@ def obtain_scip_clang(
     bin_dir = bin_dir or scip_clang_bin_dir()
     bin_dir.mkdir(parents=True, exist_ok=True)
     binary = bin_dir / "scip-clang"
-    native, native_504, host_can_build = platform_sources()
+    native, native_patched, host_can_build = platform_sources()
     version = _pinned_scip_version()
-    valid = _valid_sources(native, native_504, host_can_build)
+    valid = _valid_sources(native, native_patched, host_can_build)
     valid_values = {v for v, _ in valid}
 
     if os.access(binary, os.X_OK) and not from_scratch:
@@ -192,8 +223,8 @@ def obtain_scip_clang(
                 ("installed", side.get("installed_at", "unknown")),
             ],
         )
-        # Keep it unless explicitly told to re-obtain — a self-built #504 binary is
-        # expensive, so the default (and the non-interactive answer) is to keep.
+        # Keep it unless explicitly told to re-obtain — a self-built patched binary
+        # is expensive, so the default (and the non-interactive answer) is to keep.
         if source is None:
             reobtain = (
                 p.confirm("Re-obtain it (replace the current binary)?", False)
@@ -216,8 +247,8 @@ def obtain_scip_clang(
         choice = p.select(
             "How should scip-clang be obtained?",
             [*valid, ("abort", "don't install — stop setup")],
-            "download-504"
-            if native_504
+            "download-patched"
+            if native_patched
             else ("download" if native else ("build" if host_can_build else "emulate")),
         )
     else:
@@ -236,11 +267,11 @@ def obtain_scip_clang(
             p.note("error: no prebuilt binary for this platform.")
             return "failed"
         return "present" if _download_scip(bin_dir, native, version, p) else "failed"
-    if choice == "download-504":
-        if not native_504:
-            p.note("error: no prebuilt #504 binary for this platform.")
+    if choice == "download-patched":
+        if not native_patched:
+            p.note("error: no prebuilt patched binary for this platform.")
             return "failed"
-        return "present" if _download_504(bin_dir, native_504, version, p) else "failed"
+        return "present" if _download_patched(bin_dir, native_patched, version, p) else "failed"
     if choice == "build":
         if not host_can_build:
             p.note("error: a local build only works on a Linux host.")

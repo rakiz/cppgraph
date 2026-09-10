@@ -265,6 +265,76 @@ def test_reachable_from_unknown_symbol_returns_empty(tmp_path: Path) -> None:
     assert store.reachable_from("nope") == set()
 
 
+# --- typed-by (Relationship.is_type_definition) ------------------------------
+
+
+def test_impact_over_typed_by_returns_fields_typed_as_the_type(tmp_path: Path) -> None:
+    """Reverse impact on a TYPE with kind="typed-by" returns the fields and
+    variables typed as it — the clean traversable form of "who has a field of
+    this type?" (src = field/var, dst = type)."""
+    field = "cxx . . $ mongo/Outer#f."
+    global_var = "cxx . . $ mongo/g."
+    typ = "cxx . . $ mongo/Value#"
+    graph = Graph()
+    graph.add_edge("typed-by", field, typ, file="outer.h", line=4)
+    graph.add_edge("typed-by", global_var, typ, file="globals.cpp", line=9)
+    graph.add_edge("calls", "unrelated", "other", file="f.cpp", line=3)
+    store = _store(tmp_path, graph)
+    assert store.impact(typ, kind="typed-by") == {field, global_var}
+
+
+def test_reachable_from_over_typed_by_returns_the_declared_type(tmp_path: Path) -> None:
+    """Forward reachability from a FIELD with kind="typed-by" returns its
+    declared type — the exact mirror of impact's direction."""
+    field = "cxx . . $ mongo/Outer#f."
+    typ = "cxx . . $ mongo/Value#"
+    graph = Graph()
+    graph.add_edge("typed-by", field, typ, file="outer.h", line=4)
+    store = _store(tmp_path, graph)
+    assert store.reachable_from(field, kind="typed-by") == {typ}
+
+
+def test_typed_by_does_not_leak_into_other_kinds(tmp_path: Path) -> None:
+    """A typed-by edge is invisible to calls/inherits traversals and vice
+    versa — one edge kind per call, no cross-kind leakage."""
+    field = "cxx . . $ mongo/Outer#f."
+    typ = "cxx . . $ mongo/Value#"
+    graph = Graph()
+    graph.add_edge("typed-by", field, typ, file="outer.h", line=4)
+    graph.add_edge("calls", "fn", "other_fn", file="f.cpp", line=1)
+    store = _store(tmp_path, graph)
+    # typed-by edges don't show up under the other kinds
+    assert store.impact(typ, kind="typed-by") == {field}
+    assert store.impact(typ, kind="calls") == set()
+    assert store.impact(typ, kind="inherits") == set()
+    assert store.reachable_from(field, kind="typed-by") == {typ}
+    assert store.reachable_from(field, kind="calls") == set()
+    # and calls edges don't show up under typed-by
+    assert store.reachable_from("fn", kind="typed-by") == set()
+    assert store.impact("other_fn", kind="typed-by") == set()
+
+
+def test_boundary_violations_typed_by_opt_in_and_default_excluded(tmp_path: Path) -> None:
+    """A field/variable typed as a type across the declared layer boundary is a
+    genuine violation — but only when `typed-by` is requested explicitly: the
+    default edge kinds stay `("calls", "inherits")`."""
+    field = "common_widget"
+    typ = "cxx . . $ platform/Value#"
+    graph = Graph()
+    graph.add_edge("typed-by", field, typ, file="common/widget.h", line=7)
+    graph.nodes[field].file = "common/widget.h"
+    graph.nodes[typ].file = "platform/value.h"
+    store = _store(tmp_path, graph)
+    rules = [("common/", "platform/")]
+    violations, total = store.boundary_violations(rules, edge_kinds=("typed-by",))
+    assert total == 1
+    assert violations[0]["kind"] == "typed-by"
+    assert violations[0]["src"] == field
+    assert violations[0]["dst"] == typ
+    # excluded from the default kinds
+    assert store.boundary_violations(rules) == ([], 0)
+
+
 # --- hotspots ----------------------------------------------------------------
 
 
@@ -1674,6 +1744,43 @@ def test_attributed_references_round_trip(tmp_path: Path) -> None:
     assert store.meta().get("attributed_ref_count") == "1"
 
 
+WRITE_ACCESS = scip_pb2.SymbolRole.WriteAccess
+READ_ACCESS = scip_pb2.SymbolRole.ReadAccess
+
+
+def test_reference_roles_round_trip(tmp_path: Path) -> None:
+    graph = Graph()
+    graph.add_reference(TYPE, "a.cpp", 11, roles=WRITE_ACCESS)
+    graph.add_reference(TYPE, "a.cpp", 12, roles=READ_ACCESS | WRITE_ACCESS)
+    graph.add_reference(TYPE, "b.cpp", 7)  # plain read / no data
+    store = _store(tmp_path, graph)
+    refs = store.references_of(TYPE)
+    assert [(r.line, r.roles) for r in refs] == [
+        (11, WRITE_ACCESS),
+        (12, READ_ACCESS | WRITE_ACCESS),
+        (7, 0),
+    ]
+    assert store.meta().get("has_access_roles") == "true"
+
+
+def test_references_of_on_a_pre_roles_store_degrades_to_no_roles(tmp_path: Path) -> None:
+    """An older (schema v4) store has no `refs.roles` column; reading it with a
+    newer cppgraph must degrade to roles=0 (no data), not crash."""
+    graph = Graph()
+    graph.add_reference(TYPE, "a.cpp", 11)
+    db = tmp_path / "g.db"
+    write_sqlite(graph, db)
+    con = sqlite3.connect(db)
+    con.execute("ALTER TABLE refs DROP COLUMN roles")
+    con.execute("UPDATE meta SET value = '4' WHERE key = 'schema_version'")
+    con.commit()
+    con.close()
+
+    store = GraphStore(db)
+    refs = store.references_of(TYPE)
+    assert [(r.file, r.line, r.roles) for r in refs] == [("a.cpp", 11, 0)]
+
+
 def test_enrich_references_backfills_from_scip(tmp_path: Path) -> None:
     """A store built without attribution is upgraded in place from a #504 .scip:
     the enclosing ranges attribute the already-stored references, no rebuild."""
@@ -1704,6 +1811,54 @@ def test_enrich_references_backfills_from_scip(tmp_path: Path) -> None:
     store = GraphStore(db)
     assert [r.enclosing_symbol for r in store.references_of(typ)] == [user]
     assert store.meta().get("has_attributed_refs") == "true"
+
+
+def test_enrich_references_backfills_access_roles(tmp_path: Path) -> None:
+    """Re-running enrich-refs with a read-write-access-patch .scip backfills the
+    role bits alongside attribution — the no-rebuild path must carry them too."""
+    typ = "cxx . . $ pkg/Widget#"
+    doc = scip_pb2.Document(relative_path="render.cpp")
+    use = scip_pb2.Occurrence(symbol=typ, symbol_roles=scip_pb2.SymbolRole.WriteAccess)
+    use.range.extend([8, 0, 6])
+    doc.occurrences.append(use)
+    index = scip_pb2.Index(documents=[doc])
+
+    # a store built before role data existed (pre-patch binary or old cppgraph)
+    graph = Graph()
+    graph.add_reference(typ, "render.cpp", 8)
+    db = tmp_path / "g.db"
+    write_sqlite(graph, db)
+
+    from cppgraph.store import enrich_references
+
+    attributed, total = enrich_references(db, index)
+    assert (attributed, total) == (0, 1)  # no enclosing ranges in this .scip
+
+    store = GraphStore(db)
+    assert [r.roles for r in store.references_of(typ)] == [scip_pb2.SymbolRole.WriteAccess]
+    assert store.meta().get("has_access_roles") == "true"
+
+
+def test_enrich_references_with_a_roleless_scip_fabricates_nothing(tmp_path: Path) -> None:
+    """A stock .scip carries no role bits: the enrich writes none, and the flag
+    is stamped 'false' — degrading cleanly, never inventing writes."""
+    doc = scip_pb2.Document(relative_path="render.cpp")
+    use = doc.occurrences.add(symbol=TYPE)
+    use.range.extend([8, 0, 6])
+    index = scip_pb2.Index(documents=[doc])
+
+    graph = Graph()
+    graph.add_reference(TYPE, "render.cpp", 8)
+    db = tmp_path / "g.db"
+    write_sqlite(graph, db)
+
+    from cppgraph.store import enrich_references
+
+    enrich_references(db, index)
+
+    store = GraphStore(db)
+    assert [r.roles for r in store.references_of(TYPE)] == [0]
+    assert store.meta().get("has_access_roles") == "false"
 
 
 def test_enrich_references_migrates_a_v3_store_documentation_column(tmp_path: Path) -> None:
@@ -1741,6 +1896,608 @@ def test_enrich_references_errors_without_reference_index(tmp_path: Path) -> Non
         enrich_references(tmp_path / "graph.db", scip_pb2.Index())
 
 
+# --- symbols.scip_kind / has_symbol_kind -------------------------------------
+#
+# The fine-grained SCIP `SymbolInformation.kind` (kind-patch binaries only,
+# patchset 4), following the `has_access_roles` pattern exactly: a data-driven
+# meta flag + a nullable column; absent/UnspecifiedKind is "no info", never an
+# error — a stock .scip must behave exactly as before this feature.
+
+
+def test_symbol_kind_round_trip(tmp_path: Path) -> None:
+    graph = Graph()
+    graph.nodes[METHOD] = Node(
+        symbol=METHOD,
+        display_name="makeResumeToken",
+        file="a.cpp",
+        line=4,
+        scip_kind="StaticMethod",
+    )
+    graph.add_node(OTHER)  # no kind: NULL column, no flag contribution
+    store = _store(tmp_path, graph)
+
+    node = store.get_node(METHOD)
+    assert node is not None
+    assert node.scip_kind == "StaticMethod"
+    assert store.get_node(OTHER).scip_kind is None
+    assert store.meta().get("has_symbol_kind") == "true"
+
+
+def test_store_without_kinds_has_no_symbol_kind_flag(tmp_path: Path) -> None:
+    """Stock-binary graph: no node carries a kind -> the flag stays absent (the
+    `has_access_roles` write_sqlite convention), nodes read back scip_kind=None,
+    and nothing raises."""
+    graph = Graph()
+    graph.add_node(METHOD, display_name="makeResumeToken")
+    store = _store(tmp_path, graph)
+
+    assert store.get_node(METHOD).scip_kind is None
+    assert store.meta().get("has_symbol_kind") is None
+
+
+def test_find_returns_scip_kind_when_present(tmp_path: Path) -> None:
+    graph = Graph()
+    graph.nodes[METHOD] = Node(
+        symbol=METHOD,
+        display_name="makeResumeToken",
+        file="a.cpp",
+        line=4,
+        scip_kind="StaticMethod",
+    )
+    store = _store(tmp_path, graph)
+
+    (node,) = store.find("makeResumeToken")
+    assert node.scip_kind == "StaticMethod"
+
+
+def test_get_node_and_find_on_a_pre_kind_store_degrade(tmp_path: Path) -> None:
+    """A store built before `symbols.scip_kind` (released schema v4) must read
+    back with scip_kind=None — never crash — and the fallback cascade must NOT
+    lose `documentation`, the datum the released shape already carries."""
+    graph = Graph()
+    graph.nodes[METHOD] = Node(
+        symbol=METHOD,
+        display_name="makeResumeToken",
+        file="a.cpp",
+        line=4,
+        documentation="/** Doc. */",
+    )
+    db = tmp_path / "g.db"
+    write_sqlite(graph, db)
+    con = sqlite3.connect(db)
+    con.execute("ALTER TABLE symbols DROP COLUMN scip_kind")
+    con.commit()
+    con.close()
+
+    store = GraphStore(db)
+    node = store.get_node(METHOD)
+    assert node.scip_kind is None
+    assert node.documentation == "/** Doc. */"
+    assert [n.scip_kind for n in store.find("makeResumeToken")] == [None]
+
+
+def test_enrich_references_backfills_symbol_kinds(tmp_path: Path) -> None:
+    """Re-running enrich-refs with a kind-patch .scip backfills the fine-grained
+    kinds alongside attribution — the no-rebuild path must carry them too (the
+    same decision `refs.roles` made)."""
+    typ = "cxx . . $ pkg/Widget#"
+    doc = scip_pb2.Document(relative_path="widget.cpp")
+    doc.symbols.add(symbol=typ, kind=scip_pb2.SymbolInformation.Struct)
+    def_occ = doc.occurrences.add(symbol=typ, symbol_roles=scip_pb2.SymbolRole.Definition)
+    def_occ.range.extend([4, 0, 8])
+    index = scip_pb2.Index(documents=[doc])
+
+    graph = Graph()
+    graph.add_reference(typ, "widget.cpp", 6)
+    db = tmp_path / "g.db"
+    write_sqlite(graph, db)
+
+    from cppgraph.store import enrich_references
+
+    enrich_references(db, index)
+
+    store = GraphStore(db)
+    assert store.get_node(typ).scip_kind == "Struct"
+    assert store.meta().get("has_symbol_kind") == "true"
+
+
+def test_enrich_references_with_a_kindless_scip_fabricates_nothing(tmp_path: Path) -> None:
+    """A stock .scip carries no kinds: the enrich writes none and the flag is
+    stamped 'false' — degrading cleanly, never inventing data."""
+    doc = scip_pb2.Document(relative_path="widget.cpp")
+    doc.symbols.add(symbol="cxx . . $ pkg/Widget#")
+    index = scip_pb2.Index(documents=[doc])
+
+    graph = Graph()
+    graph.add_reference("cxx . . $ pkg/Widget#", "widget.cpp", 6)
+    db = tmp_path / "g.db"
+    write_sqlite(graph, db)
+
+    from cppgraph.store import enrich_references
+
+    enrich_references(db, index)
+
+    store = GraphStore(db)
+    assert store.get_node("cxx . . $ pkg/Widget#").scip_kind is None
+    assert store.meta().get("has_symbol_kind") == "false"
+
+
+def test_update_carries_symbol_kinds_from_the_partial(tmp_path: Path) -> None:
+    """An incremental update from a kind-carrying binary: the fresh definition
+    site's kind replaces the stored one, and `has_symbol_kind` flips on."""
+    db = tmp_path / "graph.db"
+    original = Graph()
+    original.add_node(METHOD, display_name="makeResumeToken")
+    write_sqlite(original, db)
+
+    partial = scip_pb2.Index()
+    doc = partial.documents.add(relative_path="foo.cpp")
+    doc.symbols.add(symbol=METHOD, kind=scip_pb2.SymbolInformation.StaticMethod)
+    d = doc.occurrences.add(symbol=METHOD, symbol_roles=scip_pb2.SymbolRole.Definition)
+    d.range.extend([4, 0, 6])
+    update_store(db, partial)
+
+    store = GraphStore(db)
+    assert store.get_node(METHOD).scip_kind == "StaticMethod"
+    assert store.meta().get("has_symbol_kind") == "true"
+
+
+def test_update_with_a_kindless_partial_degrades_changed_files(tmp_path: Path) -> None:
+    """A partial re-index from a stock binary (no kinds): the changed file's
+    kind degrades to the partial's level (None) — a fresh definition site wins
+    even with NULL, the exact semantics of `documentation`/`end_line` on a
+    stock update — while the flag never flips off and nothing crashes."""
+    db = tmp_path / "graph.db"
+    original = Graph()
+    original.nodes[METHOD] = Node(
+        symbol=METHOD,
+        display_name="makeResumeToken",
+        file="foo.cpp",
+        line=4,
+        scip_kind="StaticMethod",
+    )
+    write_sqlite(original, db)
+
+    partial = scip_pb2.Index()
+    doc = partial.documents.add(relative_path="foo.cpp")
+    doc.symbols.add(symbol=METHOD)  # no kind field
+    d = doc.occurrences.add(symbol=METHOD, symbol_roles=scip_pb2.SymbolRole.Definition)
+    d.range.extend([4, 0, 6])
+    update_store(db, partial)
+
+    store = GraphStore(db)
+    assert store.get_node(METHOD).scip_kind is None  # degraded with the fresh site
+    assert store.meta().get("has_symbol_kind") == "true"  # never flipped off
+
+
+# --- symbols.signature_documentation -----------------------------------------
+#
+# The signature text a signature-emitting binary records in
+# `SymbolInformation.signature_documentation.text`, ungated like
+# `documentation` (a plain nullable column, no meta flag). Empty/absent text
+# is "no data", never an error — a stock .scip must behave exactly as before
+# this feature.
+
+
+def test_signature_documentation_round_trip(tmp_path: Path) -> None:
+    graph = Graph()
+    graph.nodes[METHOD] = Node(
+        symbol=METHOD,
+        display_name="makeResumeToken",
+        file="a.cpp",
+        line=4,
+        signature_documentation="void makeResumeToken(const Document& doc)",
+    )
+    graph.add_node(OTHER)  # no signature: NULL column
+    store = _store(tmp_path, graph)
+
+    node = store.get_node(METHOD)
+    assert node is not None
+    assert node.signature_documentation == "void makeResumeToken(const Document& doc)"
+    assert store.get_node(OTHER).signature_documentation is None
+
+
+def test_get_node_degrades_on_a_pre_signature_documentation_store(tmp_path: Path) -> None:
+    """A store built before this amendment (no `signature_documentation`
+    column, never migrated) must read back with signature_documentation=None —
+    never crash — and the fallback cascade must NOT lose `documentation` or
+    `scip_kind`, the data the previous shape already carries."""
+    graph = Graph()
+    graph.nodes[METHOD] = Node(
+        symbol=METHOD,
+        display_name="makeResumeToken",
+        file="a.cpp",
+        line=4,
+        documentation="/** Doc. */",
+        scip_kind="StaticMethod",
+    )
+    db = tmp_path / "g.db"
+    write_sqlite(graph, db)
+    con = sqlite3.connect(db)
+    con.execute("ALTER TABLE symbols DROP COLUMN signature_documentation")
+    con.commit()
+    con.close()
+
+    store = GraphStore(db)
+    node = store.get_node(METHOD)
+    assert node is not None
+    assert node.signature_documentation is None
+    assert node.documentation == "/** Doc. */"
+    assert node.scip_kind == "StaticMethod"
+
+
+def test_update_carries_signature_documentation_from_the_partial(tmp_path: Path) -> None:
+    """An incremental update from a signature-emitting binary: the fresh
+    definition site's recorded signature replaces the stored one."""
+    db = tmp_path / "graph.db"
+    original = Graph()
+    original.add_node(METHOD, display_name="makeResumeToken")
+    write_sqlite(original, db)
+
+    partial = scip_pb2.Index()
+    doc = partial.documents.add(relative_path="foo.cpp")
+    doc.symbols.add(
+        symbol=METHOD
+    ).signature_documentation.text = "void makeResumeToken(const Document& doc)"
+    d = doc.occurrences.add(symbol=METHOD, symbol_roles=scip_pb2.SymbolRole.Definition)
+    d.range.extend([4, 0, 6])
+    update_store(db, partial)
+
+    store = GraphStore(db)
+    assert store.get_node(METHOD).signature_documentation == (
+        "void makeResumeToken(const Document& doc)"
+    )
+
+
+def test_update_with_a_signatureless_partial_degrades_changed_files(tmp_path: Path) -> None:
+    """A partial re-index from a stock binary (no recorded signatures): the
+    changed file's signature degrades to the partial's level (None) — a fresh
+    definition site wins even with NULL, the exact semantics of
+    `documentation`/`end_line` on a stock update."""
+    db = tmp_path / "graph.db"
+    original = Graph()
+    original.nodes[METHOD] = Node(
+        symbol=METHOD,
+        display_name="makeResumeToken",
+        file="foo.cpp",
+        line=4,
+        signature_documentation="void makeResumeToken(const Document& doc)",
+    )
+    write_sqlite(original, db)
+
+    partial = scip_pb2.Index()
+    doc = partial.documents.add(relative_path="foo.cpp")
+    doc.symbols.add(symbol=METHOD)  # no signature_documentation field
+    d = doc.occurrences.add(symbol=METHOD, symbol_roles=scip_pb2.SymbolRole.Definition)
+    d.range.extend([4, 0, 6])
+    update_store(db, partial)
+
+    store = GraphStore(db)
+    assert store.get_node(METHOD).signature_documentation is None  # degraded
+
+
+def test_update_clears_signature_documentation_when_definition_site_is_removed(
+    tmp_path: Path,
+) -> None:
+    """A symbol's definition can be cleared (file re-indexed with no occurrence
+    for it anymore) while it survives GC because something elsewhere still
+    calls it. The recorded signature must clear alongside file_id/line — not
+    linger as text paired with a NULL definition site."""
+    db = tmp_path / "graph.db"
+    original = Graph()
+    original.nodes["shared()."] = Node(
+        symbol="shared().",
+        file="foo.cpp",
+        line=10,
+        end_line=60,
+        documentation="/** Shared implementation. */",
+        signature_documentation="void shared()",
+    )
+    original.add_edge("calls", "b().", "shared().", file="bar.cpp", line=7)
+    write_sqlite(original, db)
+
+    # foo.cpp re-indexed with no occurrence of shared() at all (its definition
+    # was deleted from the source); bar.cpp (still calling it) is untouched.
+    update_store(db, _partial_index("foo.cpp"))
+
+    store = GraphStore(db)
+    assert store.has_symbol("shared().")  # kept: bar.cpp still calls it
+    node = store.get_node("shared().")
+    assert node is not None
+    assert node.file is None
+    assert node.signature_documentation is None  # not left stale
+
+
+def test_update_upgrades_a_pre_signature_documentation_store(tmp_path: Path) -> None:
+    """An older store (schema v5 as first drafted, before this amendment) has
+    no `signature_documentation` column; an incremental update whose partial
+    carries a recorded signature must add it on demand (the same ALTER pattern
+    the scip_kind migration uses), write the text, and stamp the current
+    schema version."""
+    db = tmp_path / "graph.db"
+    graph = Graph()
+    graph.add_node(METHOD, display_name="makeResumeToken")
+    graph.nodes[METHOD].file = "foo.cpp"
+    graph.nodes[METHOD].line = 41
+    write_sqlite(graph, db)
+    con = sqlite3.connect(db)
+    con.execute("ALTER TABLE symbols DROP COLUMN signature_documentation")
+    con.commit()
+    con.close()
+
+    partial = scip_pb2.Index()
+    doc = partial.documents.add(relative_path="foo.cpp")
+    doc.symbols.add(
+        symbol=METHOD
+    ).signature_documentation.text = "void makeResumeToken(const Document& doc)"
+    d = doc.occurrences.add(symbol=METHOD, symbol_roles=scip_pb2.SymbolRole.Definition)
+    d.range.extend([41, 0, 3])
+    update_store(db, partial)
+
+    store = GraphStore(db)
+    assert store.schema_version() == SCHEMA_VERSION
+    con = sqlite3.connect(db)
+    columns = {row[1] for row in con.execute("PRAGMA table_info(symbols)")}
+    con.close()
+    assert "signature_documentation" in columns
+    node = store.get_node(METHOD)
+    assert node is not None
+    assert node.signature_documentation == "void makeResumeToken(const Document& doc)"
+
+
+def test_enrich_references_adds_signature_column_but_never_backfills(tmp_path: Path) -> None:
+    """An old store missing `symbols.signature_documentation` gets the column
+    added — the stamped `schema_version` must be shaped to match what
+    `get_node`/`apply_update` read — but enrich-refs does NOT backfill
+    signature text, even when the .scip carries it: that's `cppgraph build`'s
+    job (the design decision made for this field)."""
+    typ = "cxx . . $ pkg/Widget#"
+    doc = scip_pb2.Document(relative_path="widget.cpp")
+    doc.symbols.add(symbol=typ).signature_documentation.text = "class Widget"
+    def_occ = doc.occurrences.add(symbol=typ, symbol_roles=scip_pb2.SymbolRole.Definition)
+    def_occ.range.extend([4, 0, 8])
+    index = scip_pb2.Index(documents=[doc])
+
+    graph = Graph()
+    graph.add_reference(typ, "widget.cpp", 6)
+    db = tmp_path / "g.db"
+    write_sqlite(graph, db)
+    con = sqlite3.connect(db)
+    con.execute("ALTER TABLE symbols DROP COLUMN signature_documentation")
+    con.commit()
+    con.close()
+
+    from cppgraph.store import enrich_references
+
+    enrich_references(db, index)
+
+    store = GraphStore(db)
+    assert store.schema_version() == SCHEMA_VERSION
+    con = sqlite3.connect(db)
+    columns = {row[1] for row in con.execute("PRAGMA table_info(symbols)")}
+    con.close()
+    assert "signature_documentation" in columns  # added...
+    assert store.get_node(typ).signature_documentation is None  # ...but not backfilled
+
+
+# --- symbols.is_out_of_project / has_external_symbols -------------------------
+#
+# The `Index.external_symbols` classification (a field the STOCK scip-clang
+# binary already emits): True = defined in an un-indexed external package,
+# False = project-native (a `Document.symbols` SymbolInformation — project
+# evidence always wins), NULL = no SymbolInformation from either source (a
+# pure phantom node). Gated by the `has_external_symbols` meta flag, which
+# ONLY a full build sets — an incremental update touches individual symbols
+# but can never classify the whole pre-existing store.
+
+
+@pytest.mark.parametrize("classified", [True, False, None], ids=["external", "native", "phantom"])
+def test_is_out_of_project_round_trip(tmp_path: Path, classified: bool | None) -> None:
+    graph = Graph()
+    graph.nodes[METHOD] = Node(
+        symbol=METHOD,
+        display_name="makeResumeToken",
+        file="a.cpp",
+        line=4,
+        is_out_of_project=classified,
+    )
+    store = _store(tmp_path, graph)
+
+    node = store.get_node(METHOD)
+    assert node is not None
+    assert node.is_out_of_project is classified
+
+
+def test_find_returns_is_out_of_project(tmp_path: Path) -> None:
+    graph = Graph()
+    graph.nodes[METHOD] = Node(
+        symbol=METHOD,
+        display_name="makeResumeToken",
+        file="a.cpp",
+        line=4,
+        is_out_of_project=True,
+    )
+    store = _store(tmp_path, graph)
+
+    (node,) = store.find("makeResumeToken")
+    assert node.is_out_of_project is True
+
+
+def test_get_node_and_find_on_a_pre_is_out_of_project_store_degrade(tmp_path: Path) -> None:
+    """A store built before the `is_out_of_project` amendment (schema v5 as
+    first drafted) must read back with is_out_of_project=None — never crash —
+    and the fallback cascade must NOT lose `documentation`/`scip_kind`/
+    `signature_documentation`, the data the previous shape already carries."""
+    graph = Graph()
+    graph.nodes[METHOD] = Node(
+        symbol=METHOD,
+        display_name="makeResumeToken",
+        file="a.cpp",
+        line=4,
+        documentation="/** Doc. */",
+        scip_kind="StaticMethod",
+        signature_documentation="void makeResumeToken(const Document& doc)",
+    )
+    db = tmp_path / "g.db"
+    write_sqlite(graph, db)
+    con = sqlite3.connect(db)
+    con.execute("ALTER TABLE symbols DROP COLUMN is_out_of_project")
+    con.commit()
+    con.close()
+
+    store = GraphStore(db)
+    node = store.get_node(METHOD)
+    assert node is not None
+    assert node.is_out_of_project is None
+    assert node.documentation == "/** Doc. */"
+    assert node.scip_kind == "StaticMethod"
+    assert node.signature_documentation == "void makeResumeToken(const Document& doc)"
+    assert [n.is_out_of_project for n in store.find("makeResumeToken")] == [None]
+
+
+def test_full_build_sets_has_external_symbols_even_when_empty(tmp_path: Path) -> None:
+    """The flag means "built with this feature", not "found at least one
+    external symbol": a full build over an index whose `external_symbols` list
+    is empty still writes `has_external_symbols` — the capability gates the
+    FIELD's presence in query output, not any particular value."""
+    doc = scip_pb2.Document(relative_path="plain.cpp")
+    doc.symbols.add(symbol="cxx . . $ mongo/plain(p1).")
+    db = tmp_path / "g.db"
+    write_sqlite(build_graph(scip_pb2.Index(documents=[doc])), db)
+
+    assert GraphStore(db).meta().get("has_external_symbols") == "true"
+
+
+def test_store_without_the_feature_has_no_external_symbols_flag(tmp_path: Path) -> None:
+    """A plain in-memory graph (not produced by `build_graph`) carries no
+    marker: the flag stays absent and nothing raises — the pre-feature
+    behaviour, byte for byte."""
+    graph = Graph()
+    graph.add_node(METHOD, display_name="makeResumeToken")
+    store = _store(tmp_path, graph)
+
+    assert store.get_node(METHOD).is_out_of_project is None
+    assert store.meta().get("has_external_symbols") is None
+
+
+def test_update_adds_the_column_but_never_claims_the_capability(tmp_path: Path) -> None:
+    """An incremental update may classify the symbols it touches (the partial's
+    doc.symbols entries are project-native evidence) and must add the column if
+    missing — but it covers only the changed TUs and can never classify the
+    whole pre-existing store, so `has_external_symbols` must stay unset."""
+    db = tmp_path / "graph.db"
+    original = Graph()
+    original.add_node(METHOD, display_name="makeResumeToken")
+    write_sqlite(original, db)
+    con = sqlite3.connect(db)
+    con.execute("ALTER TABLE symbols DROP COLUMN is_out_of_project")
+    con.commit()
+    con.close()
+
+    partial = scip_pb2.Index()
+    doc = partial.documents.add(relative_path="foo.cpp")
+    doc.symbols.add(symbol=METHOD, display_name="makeResumeToken")
+    d = doc.occurrences.add(symbol=METHOD, symbol_roles=scip_pb2.SymbolRole.Definition)
+    d.range.extend([4, 0, 6])
+    update_store(db, partial)
+
+    store = GraphStore(db)
+    assert store.schema_version() == SCHEMA_VERSION  # migration stamped
+    assert store.get_node(METHOD).is_out_of_project is False  # value written
+    assert store.meta().get("has_external_symbols") is None  # capability never claimed
+
+
+def test_enrich_references_adds_is_out_of_project_column_but_never_populates(
+    tmp_path: Path,
+) -> None:
+    """enrich-refs adds the column for schema-shape completeness (the stamped
+    `schema_version` must match what `get_node`'s full SELECT reads) but never
+    populates it and never touches the meta flag — a whole-store classification
+    is only ever a full build's claim, and the .scip enrich consumes may be
+    partial."""
+    doc = scip_pb2.Document(relative_path="widget.cpp")
+    doc.symbols.add(symbol="cxx . . $ pkg/Widget#", display_name="Widget")
+    index = scip_pb2.Index(external_symbols=[_external_proto_info("cxx . . $ boost/B#")])
+
+    graph = Graph()
+    graph.add_reference("cxx . . $ pkg/Widget#", "widget.cpp", 6)
+    db = tmp_path / "g.db"
+    write_sqlite(graph, db)
+
+    from cppgraph.store import enrich_references
+
+    enrich_references(db, index)
+
+    store = GraphStore(db)
+    assert store.schema_version() == SCHEMA_VERSION
+    con = sqlite3.connect(db)
+    columns = {row[1] for row in con.execute("PRAGMA table_info(symbols)")}
+    values = con.execute("SELECT DISTINCT is_out_of_project FROM symbols").fetchall()
+    con.close()
+    assert "is_out_of_project" in columns  # added...
+    assert values == [(None,)]  # ...but never populated
+    assert store.meta().get("has_external_symbols") is None  # flag untouched
+
+
+def test_update_flips_external_symbol_to_project_native(tmp_path: Path) -> None:
+    """The incremental collision case: a symbol classified out-of-project by a
+    prior full build (only an `external_symbols` entry existed) is later
+    defined in the project — a partial carrying a real `doc.symbols` definition
+    must flip it to False and give it its definition site. The capability flag
+    itself stays (nothing ever flips capabilities off)."""
+    ext = "cxx . . $ boost/Foo#bar(a1)."
+    index = scip_pb2.Index(external_symbols=[_external_proto_info(ext)])
+    db = tmp_path / "graph.db"
+    write_sqlite(build_graph(index), db)
+    assert GraphStore(db).get_node(ext).is_out_of_project is True
+
+    partial = scip_pb2.Index()
+    doc = partial.documents.add(relative_path="now_native.cpp")
+    doc.symbols.add(symbol=ext, display_name="boost::Foo::bar")
+    d = doc.occurrences.add(symbol=ext, symbol_roles=scip_pb2.SymbolRole.Definition)
+    d.range.extend([41, 0, 6])
+    update_store(db, partial)
+
+    store = GraphStore(db)
+    node = store.get_node(ext)
+    assert node is not None
+    assert node.is_out_of_project is False  # project-native evidence wins
+    assert (node.file, node.line) == ("now_native.cpp", 41)
+    assert store.meta().get("has_external_symbols") == "true"  # never flipped off
+
+
+def test_update_never_flips_project_native_to_external(tmp_path: Path) -> None:
+    """The reverse collision: a project-defined symbol whose changed-file
+    re-index only *references* it (the partial's `external_symbols` carries an
+    entry) must stay project-native — an external True never overwrites a
+    stored False, and the definition site survives the file-less partial."""
+    sym = "cxx . . $ mine/Widget#wobble(a1)."
+    full = scip_pb2.Index()
+    doc = full.documents.add(relative_path="widget.cpp")
+    doc.symbols.add(symbol=sym, display_name="wobble")
+    d = doc.occurrences.add(symbol=sym, symbol_roles=scip_pb2.SymbolRole.Definition)
+    d.range.extend([9, 0, 6])
+    db = tmp_path / "graph.db"
+    write_sqlite(build_graph(full), db)
+
+    partial = scip_pb2.Index()
+    partial.documents.add(relative_path="other.cpp")  # re-indexed, only references sym
+    partial.external_symbols.add(symbol=sym, display_name="wobble")
+    update_store(db, partial)
+
+    store = GraphStore(db)
+    node = store.get_node(sym)
+    assert node is not None
+    assert node.is_out_of_project is False  # False always wins
+    assert (node.file, node.line) == ("widget.cpp", 9)  # site untouched
+
+
+def _external_proto_info(symbol: str) -> scip_pb2.SymbolInformation:
+    """An external `SymbolInformation` for store-level tests (same shape as the
+    builder tests')."""
+    return scip_pb2.SymbolInformation(symbol=symbol, display_name="ext")
+
+
 def test_references_empty_when_not_built(tmp_path: Path) -> None:
     # a graph with no references at all -> no has_references flag, empty query
     store = _sample(tmp_path)
@@ -1771,6 +2528,45 @@ def test_update_replaces_references_for_changed_file(tmp_path: Path) -> None:
     refs = store.references_of(TYPE)
     # a.cpp:5 replaced by a.cpp:21; b.cpp:9 untouched
     assert sorted((r.file, r.line) for r in refs) == [("a.cpp", 21), ("b.cpp", 9)]
+
+
+def test_update_upgrades_a_pre_roles_store_adding_roles(tmp_path: Path) -> None:
+    """An older (schema v4) store has no `refs.roles` column; an incremental
+    update whose partial carries role data must add it on demand (the same
+    ALTER pattern the v2 end_line migration uses), write the re-inserted refs'
+    roles, and flip `has_access_roles` — without corrupting untouched rows."""
+    untouched = "cxx . . $ mongo/Other#"
+    graph = Graph()
+    graph.add_reference(untouched, "b.cpp", 9)
+    db = tmp_path / "g.db"
+    write_sqlite(graph, db)
+    con = sqlite3.connect(db)
+    con.execute("ALTER TABLE refs DROP COLUMN roles")
+    con.execute("UPDATE meta SET value = '4' WHERE key = 'schema_version'")
+    con.commit()
+    con.close()
+
+    partial = scip_pb2.Index()
+    doc = partial.documents.add(relative_path="a.cpp")
+    write = doc.occurrences.add(symbol=TYPE, symbol_roles=WRITE_ACCESS)
+    write.range.extend([11, 0, 5])
+    read = doc.occurrences.add(symbol=TYPE, symbol_roles=READ_ACCESS)
+    read.range.extend([12, 0, 5])
+    GraphStore(db).apply_update(build_graph(partial, include_references=True), ["a.cpp"])
+
+    store = GraphStore(db)
+    assert store.schema_version() == SCHEMA_VERSION
+    con = sqlite3.connect(db)
+    columns = {row[1] for row in con.execute("PRAGMA table_info(refs)")}
+    con.close()
+    assert "roles" in columns
+    assert [(r.line, r.roles) for r in store.references_of(TYPE)] == [
+        (11, WRITE_ACCESS),
+        (12, READ_ACCESS),
+    ]
+    # the untouched b.cpp ref survives, degraded to roles=0 (no data for it)
+    assert [(r.file, r.line, r.roles) for r in store.references_of(untouched)] == [("b.cpp", 9, 0)]
+    assert store.meta().get("has_access_roles") == "true"
 
 
 def test_impact_over_inherits_gives_transitive_descendants(tmp_path: Path) -> None:
