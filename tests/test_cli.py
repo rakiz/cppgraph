@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from cppgraph.cli import main
+from cppgraph.cli import extract_signature, main
 from cppgraph.model import Graph, Node
 from cppgraph.proto import scip_pb2
 from cppgraph.store import GraphStore, write_sqlite
@@ -2523,3 +2523,110 @@ def test_no_graph_and_none_discovered_errors(
     monkeypatch.chdir(tmp_path)  # no .cppgraph/ anywhere above
     with pytest.raises(SystemExit):
         main(["callers", "makeResumeToken"])
+
+
+# --- extract_signature: source-derived parameter list for explain -------------
+#
+# Best-effort, display-only heuristic (see its docstring): read the def line +
+# lookahead, capture first `(` to its matching `)`. These tests exercise the
+# real file-reading path (`tmp_path` on disk, no mocking) — the bug this guards
+# against was purely in the text-scanning logic.
+
+
+_SHARD_ID_H = """class ShardId {
+public:
+    ShardId() = default;
+
+private:
+    std::string _shardId;
+
+    friend bool operator==(const ShardId& lhs, const ShardId& rhs);
+};
+"""
+
+
+def test_extract_signature_field_before_unrelated_operator_returns_none(tmp_path: Path) -> None:
+    """The reported bug: `_shardId` is a field with no parameter list of its own;
+    without the `;`/`{`-before-`(` check, the lookahead scan reached into the
+    `friend bool operator==(...)` a few lines below and misattributed the
+    operator's parameters to the field (observed on MongoDB's ShardId)."""
+    (tmp_path / "shard_id.h").write_text(_SHARD_ID_H)
+    assert extract_signature(str(tmp_path), "shard_id.h", 5) is None  # 0-indexed field line
+
+
+def test_extract_signature_field_with_nothing_nearby_returns_none(tmp_path: Path) -> None:
+    (tmp_path / "alone.h").write_text("int x;\nint y;\n")
+    assert extract_signature(str(tmp_path), "alone.h", 0) is None
+
+
+def test_extract_signature_single_line_function(tmp_path: Path) -> None:
+    (tmp_path / "fn.h").write_text("int f(int a, int b);\n")
+    assert extract_signature(str(tmp_path), "fn.h", 0) == "(int a, int b)"
+
+
+def test_extract_signature_multi_line_params_with_default_argument(tmp_path: Path) -> None:
+    """A parameter list spanning several lines is still captured whole (the
+    `(`/`)` scan runs over the joined lookahead text), default value verbatim."""
+    (tmp_path / "multiline.h").write_text(
+        "void f(\n"
+        "    const Document& doc,\n"
+        "    bool useNullIfMissing = false,\n"
+        "    int retries = 3) {\n"
+        "}\n"
+    )
+    assert extract_signature(str(tmp_path), "multiline.h", 0) == (
+        "( const Document& doc, bool useNullIfMissing = false, int retries = 3)"
+    )
+
+
+def test_extract_signature_empty_parameter_list_is_not_none(tmp_path: Path) -> None:
+    """A one-line definition with empty parens must read as `()`: a found-but-
+    empty capture is not the same as "no parens found" (`find` returned -1)."""
+    (tmp_path / "empty_parens.h").write_text("int getX() { return x_; }\n")
+    assert extract_signature(str(tmp_path), "empty_parens.h", 0) == "()"
+
+
+def test_extract_signature_brace_initializer_inside_params(tmp_path: Path) -> None:
+    """A `{` inside an already-open parameter list (a brace-initialized default)
+    must not trip the ends-before-`(` check: the check only fires when `;`/`{`
+    comes BEFORE the first `(`."""
+    (tmp_path / "brace_default.h").write_text("void f(std::vector<int> v = {1, 2, 3});\n")
+    assert extract_signature(str(tmp_path), "brace_default.h", 0) == (
+        "(std::vector<int> v = {1, 2, 3})"
+    )
+
+
+def test_extract_signature_lambda_default_argument_with_semicolon(tmp_path: Path) -> None:
+    """Adversarial twin of the bug: a `;` INSIDE the parens (a lambda body in a
+    default arg) is at an index after the first `(` by construction, so the
+    ends-before-`(` check must not fire and the capture spans it whole."""
+    (tmp_path / "lambda_default.h").write_text(
+        "void f(std::function<void()> cb = []{ return; });\n"
+    )
+    assert extract_signature(str(tmp_path), "lambda_default.h", 0) == (
+        "(std::function<void()> cb = []{ return; })"
+    )
+
+
+def test_extract_signature_constructor_with_member_initializer_list(tmp_path: Path) -> None:
+    """The first `(` on a ctor definition line is the ctor's own parameter list —
+    returned before the scan ever reaches the initializer list's `(x)` or `{}`."""
+    (tmp_path / "ctor.h").write_text("Foo(int x) : x_(x) {}\n")
+    assert extract_signature(str(tmp_path), "ctor.h", 0) == "(int x)"
+
+
+@pytest.mark.parametrize(
+    ("root", "file", "line0"),
+    [(None, "fn.h", 0), ("/tmp", None, 0), ("/tmp", "fn.h", None)],
+    ids=["no-root", "no-file", "no-line"],
+)
+def test_extract_signature_missing_arguments_return_none(
+    root: str | None, file: str | None, line0: int | None
+) -> None:
+    """No root / no file / no line — the source-read signature is simply absent."""
+    assert extract_signature(root, file, line0) is None
+
+
+def test_extract_signature_unreadable_file_returns_none(tmp_path: Path) -> None:
+    # A missing file is an expected, recoverable condition, not an error.
+    assert extract_signature(str(tmp_path), "nope.h", 0) is None

@@ -117,7 +117,12 @@ def extract_signature(root: str | None, file: str | None, line0: int | None) -> 
     parameter (`bool useNullIfMissing = false`) is visible without opening the
     header. Display-only, so templates / macros / multi-line params are
     tolerated (whitespace collapsed). `None` if there's no root, the file can't
-    be read, or no parameter list is found."""
+    be read, no parameter list is found, or the declaration at this line ends
+    (`;`/`{`) before any `(` — a field/variable has no parameter list of its
+    own, and without this check a bare `int x;` followed a few lines later by
+    an unrelated function would misattribute that function's parameter list
+    to the field (observed in practice on a field declared just above a
+    `friend bool operator==(...)`)."""
     if root is None or file is None or line0 is None:
         return None
     snippet = read_source_snippet(root, file, line0, context=8)
@@ -126,6 +131,13 @@ def extract_signature(root: str | None, file: str | None, line0: int | None) -> 
     text = " ".join(t for i, t in snippet if i >= line0)
     start = text.find("(")
     if start < 0:
+        return None
+    # A `;` or `{` before the first `(` ends the current declaration/statement
+    # without ever opening a parameter list — this line/lookahead window
+    # belongs to a DIFFERENT, later declaration (e.g. a field with no `(` of
+    # its own, followed within the lookahead window by an unrelated function).
+    stop = min((i for i in (text.find(";"), text.find("{")) if i >= 0), default=-1)
+    if stop >= 0 and stop < start:
         return None
     depth = 0
     for j in range(start, len(text)):
