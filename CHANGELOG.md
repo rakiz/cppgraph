@@ -8,6 +8,14 @@ on-disk store also carries its own `schema_version` for forward-compatibility.
 
 ### Added
 
+- **Spelling aliases for the CLI subcommands** — every command named with one
+  convention now also answers to the other: `line-span`/`line_span`,
+  `no-incoming-calls`/`no_incoming_calls`, `global-init-references`/
+  `global_init_references`, and the mirror direction for the hyphenated ones
+  (`api_surface`, `boundary_violations`, `class_members`, `compdb_summary`,
+  `dependency_cost`, `enrich_refs`, `reachable_from`,
+  `strongly_connected_components`). Single-word commands need no alias;
+  `init`/`index` keeps its existing one.
 - **Cycle mode on `export`/`view`/MCP `visualize`** — `mode="cycle"` renders
   the multi-member call cycle (the strongly-connected component of the
   `calls` subgraph) containing a symbol, the symbol-centered view of

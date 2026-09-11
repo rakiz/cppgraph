@@ -651,6 +651,7 @@ def main(argv: list[str] | None = None) -> int:
 
     p_enrich = sub.add_parser(
         "enrich-refs",
+        aliases=["enrich_refs"],
         help="add symbol-granularity reference attribution to an existing store "
         "from a #504 .scip, without a full rebuild",
     )
@@ -666,6 +667,7 @@ def main(argv: list[str] | None = None) -> int:
 
     p_compdb = sub.add_parser(
         "compdb-summary",
+        aliases=["compdb_summary"],
         help="summarize a compile_commands.json before indexing: how many TUs, "
         "where they live, how many are tests — so the index scope is an informed choice",
     )
@@ -961,6 +963,7 @@ def main(argv: list[str] | None = None) -> int:
 
     p_reachable = sub.add_parser(
         "reachable-from",
+        aliases=["reachable_from"],
         help="forward reachability: everything a symbol transitively calls (a lower bound)",
     )
     p_reachable.add_argument(
@@ -1017,6 +1020,7 @@ def main(argv: list[str] | None = None) -> int:
 
     p_dep_cost = sub.add_parser(
         "dependency-cost",
+        aliases=["dependency_cost"],
         help="call-site count against a target library — 'if I replace/remove this "
         "library, how many call sites change?' (exact count of calls edges into it)",
     )
@@ -1076,6 +1080,7 @@ def main(argv: list[str] | None = None) -> int:
 
     p_line_span = sub.add_parser(
         "line_span",
+        aliases=["line-span"],
         help="rank definitions by body extent (end_line - start, largest first); "
         "needs a graph indexed with a #504-built scip-clang",
     )
@@ -1101,6 +1106,7 @@ def main(argv: list[str] | None = None) -> int:
 
     p_no_incoming = sub.add_parser(
         "no_incoming_calls",
+        aliases=["no-incoming-calls"],
         help="defined callables with zero incoming calls edges (a fact, not a "
         "dead-code verdict); needs a graph indexed with a #504-built scip-clang",
     )
@@ -1129,6 +1135,7 @@ def main(argv: list[str] | None = None) -> int:
 
     p_gir = sub.add_parser(
         "global_init_references",
+        aliases=["global-init-references"],
         help="globals referenced by one global's initializer region (the fact "
         "behind the static-init-order question, not a verdict); needs a "
         "#504-built graph with --attributed-refs",
@@ -1152,8 +1159,10 @@ def main(argv: list[str] | None = None) -> int:
 
     p_boundary = sub.add_parser(
         "boundary-violations",
+        aliases=["boundary_violations"],
         help="declared-layering conformance: list calls/inherits edges that "
-        "cross a rule you supply (zero false positives — each hit is a real edge)",
+        "cross a rule you supply (zero false positives — each hit is a real "
+        "edge); pass --out PATH to also render this as a graph",
     )
     p_boundary.add_argument(
         "--graph",
@@ -1199,6 +1208,7 @@ def main(argv: list[str] | None = None) -> int:
 
     p_api = sub.add_parser(
         "api-surface",
+        aliases=["api_surface"],
         help="the actually-used external surface of a module: definitions "
         "inside a prefix called/referenced from outside it",
     )
@@ -1250,6 +1260,7 @@ def main(argv: list[str] | None = None) -> int:
 
     p_members = sub.add_parser(
         "class-members",
+        aliases=["class_members"],
         help="members declared on a class/struct (methods, fields, nested types), by line",
     )
     p_members.add_argument(
@@ -1271,8 +1282,10 @@ def main(argv: list[str] | None = None) -> int:
 
     p_scc = sub.add_parser(
         "strongly-connected-components",
+        aliases=["strongly_connected_components"],
         help="cycles in the calls graph: groups of 2+ symbols that can all "
-        "reach each other (a fact, not a bad-architecture verdict)",
+        "reach each other (a fact, not a bad-architecture verdict); to see the "
+        "shape of one as a graph, export/view a symbol with --mode cycle",
     )
     p_scc.add_argument(
         "--graph",
@@ -1545,7 +1558,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"[cppgraph] source commit: {commit}{dirty}")
         return 0
 
-    if args.command == "compdb-summary":
+    if args.command in ("compdb-summary", "compdb_summary"):
         from cppgraph.compdb import format_summary, load_compdb, summarize_compdb
 
         try:
@@ -1604,7 +1617,7 @@ def main(argv: list[str] | None = None) -> int:
             prompter=make_prompter(),
         )
 
-    if args.command == "enrich-refs":
+    if args.command in ("enrich-refs", "enrich_refs"):
         index = scip_pb2.Index()
         with open(args.scip, "rb") as f:
             index.ParseFromString(f.read())
@@ -1902,7 +1915,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  ... and {len(nodes) - len(shown)} more (raise --limit to see them)")
         return 0
 
-    if args.command == "reachable-from":
+    if args.command in ("reachable-from", "reachable_from"):
         store = _open_store_checked(args, parser)
         args.symbol = _resolve_symbol(store, args.symbol, parser)
         if args.kind == "calls" and args.symbol.rstrip().endswith("#"):
@@ -1967,7 +1980,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  ... and {total - len(ranked)} more (raise --limit to see them)")
         return 0
 
-    if args.command == "dependency-cost":
+    if args.command in ("dependency-cost", "dependency_cost"):
         store = _open_store_checked(args, parser)
         # limit=None: the aggregate must sum over the full ranking, --limit
         # caps only the displayed breakdown (same shape as the MCP report).
@@ -2017,7 +2030,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  ... and {total - len(groups)} more (raise --limit to see them)")
         return 0
 
-    if args.command == "line_span":
+    if args.command in ("line_span", "line-span"):
         store = _open_store_checked(args, parser)
         result = store.line_span(
             limit=args.limit,
@@ -2047,7 +2060,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  ... and {total - len(ranked)} more (raise --limit to see them)")
         return 0
 
-    if args.command == "no_incoming_calls":
+    if args.command in ("no_incoming_calls", "no-incoming-calls"):
         store = _open_store_checked(args, parser)
         result = store.no_incoming_calls(
             limit=args.limit,
@@ -2086,7 +2099,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  ... and {total - len(symbols)} more (raise --limit to see them)")
         return 0
 
-    if args.command == "global_init_references":
+    if args.command in ("global_init_references", "global-init-references"):
         store = _open_store_checked(args, parser)
         args.symbol = _resolve_symbol(store, args.symbol, parser)
         try:
@@ -2120,7 +2133,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  ... and {total - len(refs)} more (raise --limit to see them)")
         return 0
 
-    if args.command == "boundary-violations":
+    if args.command in ("boundary-violations", "boundary_violations"):
         store = _open_store_checked(args, parser)
         rules: list[tuple[str, str]] = []
         for value in args.rules:
@@ -2157,7 +2170,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  open viz/cppgraph-viz.html and load {args.out}")
         return 0
 
-    if args.command == "api-surface":
+    if args.command in ("api-surface", "api_surface"):
         store = _open_store_checked(args, parser)
         try:
             ranked, total, has_refs = store.api_surface(
@@ -2210,7 +2223,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  ... and {total - len(nodes)} more (raise --limit to see them)")
         return 0
 
-    if args.command == "class-members":
+    if args.command in ("class-members", "class_members"):
         store = _open_store_checked(args, parser)
         args.symbol = _resolve_symbol(store, args.symbol, parser)
         result = store.class_members(args.symbol, limit=args.limit)
@@ -2234,7 +2247,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  ... and {total - len(members)} more (raise --limit to see them)")
         return 0
 
-    if args.command == "strongly-connected-components":
+    if args.command in ("strongly-connected-components", "strongly_connected_components"):
         store = _open_store_checked(args, parser)
         try:
             components, total = store.strongly_connected_components(

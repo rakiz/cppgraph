@@ -3248,3 +3248,67 @@ def test_extract_signature_missing_arguments_return_none(
 def test_extract_signature_unreadable_file_returns_none(tmp_path: Path) -> None:
     # A missing file is an expected, recoverable condition, not an error.
     assert extract_signature(str(tmp_path), "nope.h", 0) is None
+
+
+# --- subcommand spelling aliases (hyphen <-> underscore) -----------------
+
+ALIASED_COMMANDS: list[tuple[str, str]] = [
+    ("enrich-refs", "enrich_refs"),
+    ("compdb-summary", "compdb_summary"),
+    ("reachable-from", "reachable_from"),
+    ("dependency-cost", "dependency_cost"),
+    ("line_span", "line-span"),
+    ("no_incoming_calls", "no-incoming-calls"),
+    ("global_init_references", "global-init-references"),
+    ("boundary-violations", "boundary_violations"),
+    ("api-surface", "api_surface"),
+    ("class-members", "class_members"),
+    ("strongly-connected-components", "strongly_connected_components"),
+]
+
+
+@pytest.mark.parametrize(("canonical", "alias"), ALIASED_COMMANDS)
+def test_command_answers_to_both_spelling_conventions(canonical: str, alias: str) -> None:
+    """A command named with one spelling convention also answers to the other
+    (`line_span` <-> `line-span`, `api-surface` <-> `api_surface`): the alias
+    reaches its parser — whose --help action exits 0 — instead of an
+    invalid-choice rejection (exit 2)."""
+    for name in (canonical, alias):
+        with pytest.raises(SystemExit) as exc:
+            main([name, "--help"])
+        assert exc.value.code == 0
+
+
+def test_unknown_command_is_rejected_not_aliased() -> None:
+    # The discriminator behind the test above: an unregistered name never
+    # reaches a help action — argparse rejects it with exit 2.
+    with pytest.raises(SystemExit) as exc:
+        main(["no_such_command", "--help"])
+    assert exc.value.code == 2
+
+
+@pytest.mark.parametrize(
+    ("canonical", "alias", "extra_args"),
+    [
+        ("line_span", "line-span", []),
+        ("no_incoming_calls", "no-incoming-calls", []),
+        ("api-surface", "api_surface", ["mongo"]),
+        ("reachable-from", "reachable_from", ["makeResumeToken"]),
+        ("dependency-cost", "dependency_cost", ["--target-path", "mongo"]),
+        ("boundary-violations", "boundary_violations", ["--rule", "common/:platform/"]),
+        ("strongly-connected-components", "strongly_connected_components", []),
+    ],
+)
+def test_alias_dispatches_like_the_canonical_command(
+    alias: str,
+    canonical: str,
+    extra_args: list[str],
+    graph_path: Path,
+) -> None:
+    """argparse leaves the spelling AS TYPED in args.command, so the dispatcher
+    accepts both: invoking via the alias returns the same exit code as the
+    canonical name (and neither is an argparse rejection, which would raise
+    SystemExit)."""
+    alias_code = main([alias, "--graph", str(graph_path), *extra_args])
+    canonical_code = main([canonical, "--graph", str(graph_path), *extra_args])
+    assert alias_code == canonical_code
