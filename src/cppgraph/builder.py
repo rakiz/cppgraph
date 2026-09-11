@@ -343,9 +343,16 @@ def _attribute_containment(
         events.append((start, OPEN, end, symbol))
     for i, line in enumerate(points):
         events.append((line, POINT, i, None))
-    # (line, phase): an interval starting on a point's line contains it, so OPEN
-    # (phase 0) sorts before POINT (phase 1) at equal line.
-    events.sort(key=lambda e: (e[0], e[1]))
+    # (line, phase, -end): an interval starting on a point's line contains it,
+    # so OPEN (phase 0) sorts before POINT (phase 1) at equal line. Two OPENs
+    # sharing a start line (outer/inner co-starting, e.g. code compressed onto
+    # one line) must open the WIDER one first — else the inner is pushed first,
+    # the outer sits on top of the stack, and points on that line attribute to
+    # the outer instead of the innermost. -end orders wider (larger end) first;
+    # POINT's 3rd slot is a point index, kept out of the key (0 for all of them,
+    # so their relative order is preserved by the stable sort — irrelevant
+    # anyway, POINT events don't interact).
+    events.sort(key=lambda e: (e[0], e[1], -e[2] if e[1] == OPEN else 0))
 
     result: list[str | None] = [None] * len(points)
     stack: list[tuple[int, str]] = []  # (end, symbol), innermost on top

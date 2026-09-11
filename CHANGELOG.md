@@ -67,6 +67,12 @@ on-disk store also carries its own `schema_version` for forward-compatibility.
   produced no hint at all, because the query itself was never stripped of its
   namespace prefix/trailing `#` before comparison. Fixed by normalizing the
   query the same way a candidate's leaf already is.
+- **`_attribute_containment` attributed by insertion order for co-starting
+  nested definitions** — two intervals sharing a start line (e.g. code
+  compressed onto one line) sorted their OPEN events by `(line, phase)` only,
+  so an inner definition listed before its outer could end up *below* it on
+  the sweep's stack, attributing that line's points to the outer instead of
+  the innermost. At equal start line the wider interval is now opened first.
 
 ### Changed
 

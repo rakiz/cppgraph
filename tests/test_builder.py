@@ -171,6 +171,30 @@ def test_enclosing_range_attributes_caller_by_containment() -> None:
     assert callers == sorted([outer, nested])  # 20 -> run (contains it), 11 -> lambda
 
 
+def test_co_starting_nested_intervals_innermost_wins_regardless_of_order() -> None:
+    """Two nested definitions starting on the SAME line (e.g. code compressed
+    onto one line): a point inside the inner one must attribute to the inner
+    definition no matter which order the document listed the two occurrences
+    in. The sweep opens both at that line — if the inner one is pushed first,
+    the outer ends up on top of the stack and steals the attribution, so at
+    equal start line the wider interval must be opened first."""
+    outer = "cxx . . $ pkg/Outer#run(o1)."
+    nested = "cxx . . $ pkg/Outer#run/lambda#operator()(l1)."
+    helper = "cxx . . $ pkg/helper(h1)."
+
+    doc = scip_pb2.Document(relative_path="outer.cpp")
+    doc.occurrences.extend(
+        [
+            _def_with_body(nested, line=10, end_line=12),  # inner listed first
+            _def_with_body(outer, line=10, end_line=30),  # co-starts, wider
+            _occurrence(helper, line=11),  # call inside the lambda
+        ]
+    )
+    graph = build_graph(scip_pb2.Index(documents=[doc]))
+
+    assert [e.src for e in graph.callers_of(helper)] == [nested]
+
+
 def test_definition_body_extent_recorded_on_node() -> None:
     """#504: a definition's enclosing_range end is kept on the Node (`end_line`,
     what `line_span` ranks by) instead of being discarded after attribution; a
