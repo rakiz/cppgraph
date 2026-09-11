@@ -1,8 +1,7 @@
 """Tests for the Phase 2 SQLite-backed store (interned symbols, indexed topology).
 
-The store must answer the exact same queries as the in-memory `Graph`
-(callers/callees/find/path/impact) but off a SQLite file, without loading the
-whole graph into RAM. See DESIGN.md § Store.
+The store answers the full query surface (callers/callees/find/path/impact)
+off a SQLite file, without loading the whole graph into RAM. See DESIGN.md § Store.
 """
 
 from __future__ import annotations
@@ -67,9 +66,9 @@ def test_find_substring_matches_symbol_or_display_name(tmp_path: Path) -> None:
     assert matches[0].display_name == "makeResumeToken"
 
 
-def test_find_is_case_sensitive_like_in_memory(tmp_path: Path) -> None:
-    """The in-memory `Graph.find` uses Python `in` (case-sensitive); the SQLite
-    store must match that, not SQLite's default case-insensitive LIKE."""
+def test_find_is_case_sensitive(tmp_path: Path) -> None:
+    """Matching uses a case-sensitive substring test (Python `in` semantics),
+    not SQLite's default case-insensitive LIKE."""
     store = _sample(tmp_path)
     assert store.find("makeresumetoken") == []
     assert len(store.find("makeResumeToken")) == 1

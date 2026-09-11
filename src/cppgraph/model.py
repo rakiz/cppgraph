@@ -1,11 +1,13 @@
-"""In-memory graph model: nodes (SCIP symbols) and edges between them."""
+"""In-memory graph model: nodes (SCIP symbols) and edges between them.
+
+`Graph` is the builder's accumulation buffer (interning + dedup while a SCIP
+index is walked), consumed by `write_sqlite`; it is never queried at runtime —
+the query surface lives on `GraphStore`.
+"""
 
 from __future__ import annotations
 
-import json
-from collections import deque
 from dataclasses import dataclass, field
-from pathlib import Path
 
 
 # `slots=True`: these three are created in the millions during a build (mongo:
@@ -155,123 +157,9 @@ class Graph:
         )
 
     def references_of(self, symbol: str) -> list[Reference]:
+        """Filter `references` by symbol — kept as the verification helper the
+        builder tests assert through (mirrors `GraphStore.references_of`)."""
         return [r for r in self.references if r.symbol == symbol]
 
     def callers_of(self, symbol: str) -> list[Edge]:
         return [e for e in self.edges if e.kind == "calls" and e.dst == symbol]
-
-    def callees_of(self, symbol: str) -> list[Edge]:
-        return [e for e in self.edges if e.kind == "calls" and e.src == symbol]
-
-    def _calls_adjacency(self) -> dict[str, list[Edge]]:
-        adjacency: dict[str, list[Edge]] = {}
-        for e in self.edges:
-            if e.kind == "calls":
-                adjacency.setdefault(e.src, []).append(e)
-        return adjacency
-
-    def shortest_call_path(self, src: str, dst: str) -> list[Edge] | None:
-        """Shortest chain of `calls` edges from `src` to `dst`, BFS (unweighted).
-
-        Returns `[]` if src == dst, `None` if no path exists or either symbol
-        is unknown.
-        """
-        if src not in self.nodes or dst not in self.nodes:
-            return None
-        if src == dst:
-            return []
-        adjacency = self._calls_adjacency()
-        visited = {src}
-        queue: deque[tuple[str, list[Edge]]] = deque([(src, [])])
-        while queue:
-            node, path = queue.popleft()
-            for edge in adjacency.get(node, []):
-                if edge.dst == dst:
-                    return path + [edge]
-                if edge.dst not in visited:
-                    visited.add(edge.dst)
-                    queue.append((edge.dst, path + [edge]))
-        return None
-
-    def impact(self, symbol: str, max_depth: int | None = None) -> set[str]:
-        """Symbols that transitively call `symbol` (reverse blast-radius).
-
-        `max_depth` bounds the number of `calls` hops walked backwards;
-        `None` means unbounded.
-        """
-        if symbol not in self.nodes:
-            return set()
-        reverse_adjacency: dict[str, list[str]] = {}
-        for e in self.edges:
-            if e.kind == "calls":
-                reverse_adjacency.setdefault(e.dst, []).append(e.src)
-
-        visited = {symbol}
-        frontier = [symbol]
-        depth = 0
-        while frontier and (max_depth is None or depth < max_depth):
-            next_frontier = []
-            for node in frontier:
-                for caller in reverse_adjacency.get(node, []):
-                    if caller not in visited:
-                        visited.add(caller)
-                        next_frontier.append(caller)
-            frontier = next_frontier
-            depth += 1
-        visited.discard(symbol)
-        return visited
-
-    def find(self, query: str) -> list[Node]:
-        """Nodes matching `query` (case-sensitive).
-
-        A single token is a substring test; a multi-token query (whitespace-
-        separated) is an order-free AND — every token must appear in the symbol
-        or the display name. SCIP symbol strings aren't memorable, so this is how
-        a user locates the exact symbol to pass to `callers_of`/`callees_of`.
-        """
-        tokens = query.split()
-        if not tokens:
-            return []
-        return [
-            n
-            for n in self.nodes.values()
-            if all(t in n.symbol or t in n.display_name for t in tokens)
-        ]
-
-    def to_dict(self) -> dict:
-        return {
-            "nodes": [
-                {
-                    "symbol": n.symbol,
-                    "display_name": n.display_name,
-                    "file": n.file,
-                    "line": n.line,
-                    "end_line": n.end_line,
-                    "documentation": n.documentation,
-                    "scip_kind": n.scip_kind,
-                    "signature_documentation": n.signature_documentation,
-                    "is_out_of_project": n.is_out_of_project,
-                }
-                for n in self.nodes.values()
-            ],
-            "edges": [
-                {"kind": e.kind, "src": e.src, "dst": e.dst, "file": e.file, "line": e.line}
-                for e in self.edges
-            ],
-        }
-
-    @classmethod
-    def from_dict(cls, data: dict) -> Graph:
-        graph = cls()
-        for n in data["nodes"]:
-            graph.nodes[n["symbol"]] = Node(**n)
-        for e in data["edges"]:
-            graph.edges.append(Edge(**e))
-        return graph
-
-    def save_json(self, path: str | Path) -> None:
-        Path(path).write_text(json.dumps(self.to_dict(), indent=2))
-
-    @classmethod
-    def load_json(cls, path: str | Path) -> Graph:
-        return cls.from_dict(json.loads(Path(path).read_text()))

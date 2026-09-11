@@ -63,8 +63,6 @@ on-disk store also carries its own `schema_version` for forward-compatibility.
   pure chain/corridor — unless explicitly requested), and `limit` caps the
   merged result with `truncated`/`total` reporting when it was cut.
 
-### Fixed
-
 - **MCP `visualize` didn't resolve plain names** — the one MCP tool that bypassed
   `_resolve()` entirely, unlike every other tool and unlike the CLI's equivalent
   `export`/`view` commands: a plain "human" name that wasn't already an exact
@@ -107,6 +105,20 @@ on-disk store also carries its own `schema_version` for forward-compatibility.
   error — a deliberately-unpatched upstream limitation (no local pydantic
   monkeypatch planned), not a cppgraph bug, so a typo'd kwarg like `path=`
   produces a silent unfiltered/global result instead of a clear failure.
+
+### Removed
+
+- **Dead in-memory query engine on `Graph`** — `shortest_call_path`, `impact`,
+  `find`, `callees_of`, `to_dict`/`from_dict`, `save_json`/`load_json`, and
+  `_calls_adjacency` had zero callers in production (every CLI/MCP/queries
+  path goes through `GraphStore`'s identically-named methods; verified by
+  grep over `src/`, `scripts/`, `scratch/`), so they are removed. `Graph` is
+  now just the builder's accumulation buffer (`add_node`/`add_edge`/
+  `add_reference` → `write_sqlite`) plus the `references_of`/`callers_of`
+  filters the builder tests (`tests/test_builder.py`,
+  `tests/test_scip_compat.py`) assert through — those two were kept for that
+  reason. `tests/test_model.py` now covers the accumulation/dedup behavior
+  instead of the deleted engine.
 
 ## [0.3.1] - 2026-09-10
 

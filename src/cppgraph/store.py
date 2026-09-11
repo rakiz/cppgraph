@@ -850,9 +850,10 @@ class GraphStore:
     """Query + incremental-update handle over a SQLite store written by
     `write_sqlite`.
 
-    Mirrors the query surface of the in-memory `Graph` (callers_of, callees_of,
-    find, shortest_call_path, impact) so the CLI is agnostic to the backend, and
-    adds `apply_update` for in-place partial re-indexing.
+    Carries the whole query surface (callers_of, callees_of, find,
+    shortest_call_path, impact, references_of) — the in-memory `Graph` is only
+    the builder's accumulation buffer, never queried at runtime — and adds
+    `apply_update` for in-place partial re-indexing.
     """
 
     def __init__(self, path: str | Path) -> None:
@@ -1086,8 +1087,8 @@ class GraphStore:
     def find(self, query: str, fuzzy: bool = False) -> list[Node]:
         """Nodes matching `query`.
 
-        A single-token query is a substring test (`instr(col, ?) > 0`, matching
-        the in-memory `Graph.find`'s Python `in` — unlike `LIKE`, which SQLite
+        A single-token query is a substring test (`instr(col, ?) > 0` — the
+        case-sensitive semantics of Python's `in`, unlike `LIKE`, which SQLite
         runs case-insensitively for ASCII). A multi-token query (whitespace-
         separated) is an order-free **AND**: every token must appear as a
         substring in the symbol *or* the display name (tokens may match either,
