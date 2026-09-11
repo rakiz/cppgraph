@@ -94,6 +94,18 @@ on-disk store also carries its own `schema_version` for forward-compatibility.
 
 ### Changed
 
+- **Store reads no longer probe the schema with exceptions** — `get_node` (and
+  the same anti-pattern in `find` and `references_of`) retried their SELECT
+  through up to five nested `try/except sqlite3.OperationalError` levels on a
+  store predating a column (`is_out_of_project`, `signature_documentation`,
+  `scip_kind`, `documentation`, `end_line`), so every read on a legacy store
+  paid for raising+catching exceptions the schema's shape had already
+  decided. The shape is now introspected once per store instance
+  (`PRAGMA table_info`, cached) and each query's SELECT is built to the
+  columns actually present — the legacy shapes read back identically (missing
+  columns as None/0), the hot path runs zero try/except, and `apply_update`
+  drops the caches when its ALTERs migrate the shape. Observable behavior per
+  store shape is unchanged; the per-query exception cost is gone.
 - **`find`'s docstring/help now points at `include_paths`/`exclude_paths`**
   as the fix for a broad query dominated by generated-code clutter (IDL
   Spec/getter classes and the like) — the tool won't auto-detect "generated

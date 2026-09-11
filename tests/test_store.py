@@ -1584,6 +1584,45 @@ def test_update_upgrades_a_v3_store_adding_documentation(tmp_path: Path) -> None
     assert node.documentation == "/** Extracts the shard key. */"
 
 
+def test_reads_on_the_same_store_see_columns_an_update_adds(tmp_path: Path) -> None:
+    """The read SELECTs are shaped once per store instance (schema
+    introspection cached, no per-query exception probing), so an
+    `apply_update` that ALTERs the shape must drop those cached queries: a
+    `get_node` issued *before* the update (against the v2 shape the store
+    opened as) must still read `end_line` and `documentation` written *after*
+    it — same instance, no reopen."""
+    db = tmp_path / "graph.db"
+    graph = Graph()
+    graph.add_node(METHOD, display_name="makeResumeToken")
+    graph.nodes[METHOD].file = "foo.cpp"
+    graph.nodes[METHOD].line = 41
+    write_sqlite(graph, db)
+    con = sqlite3.connect(db)
+    con.execute("ALTER TABLE symbols DROP COLUMN end_line")
+    con.execute("ALTER TABLE symbols DROP COLUMN documentation")
+    con.execute("UPDATE meta SET value = '2' WHERE key = 'schema_version'")
+    con.commit()
+    con.close()
+
+    store = GraphStore(db)
+    pre = store.get_node(METHOD)
+    assert pre is not None
+    assert pre.end_line is None  # shaped to the v2 store it opened as
+
+    partial = Graph()
+    partial.add_node(METHOD, display_name="makeResumeToken")
+    partial.nodes[METHOD].file = "foo.cpp"
+    partial.nodes[METHOD].line = 41
+    partial.nodes[METHOD].end_line = 60
+    partial.nodes[METHOD].documentation = "/** Extracts the shard key. */"
+    store.apply_update(partial, {"foo.cpp"})
+
+    node = store.get_node(METHOD)
+    assert node is not None
+    assert node.end_line == 60
+    assert node.documentation == "/** Extracts the shard key. */"
+
+
 def test_update_clears_end_line_when_definition_site_is_removed(tmp_path: Path) -> None:
     """A symbol's definition can be cleared (file re-indexed with no occurrence
     for it anymore) while it survives GC because something elsewhere still

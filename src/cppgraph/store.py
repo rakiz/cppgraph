@@ -30,7 +30,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from importlib import metadata as importlib_metadata
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from cppgraph.builder import (
     _gc_disabled,
@@ -845,6 +845,21 @@ def _tarjan_sccs(adjacency: dict[int, list[int]]) -> list[list[int]]:
 # lower bound, surfaced as the method's `truncated` flag (never silent).
 _MAX_CORRIDOR_BFS_NODES = 20_000
 
+# `symbols` columns a store may predate, in schema-history order (v3 added
+# `end_line`, v4 `documentation`, v5 `scip_kind`, `signature_documentation` and
+# `is_out_of_project` — see SCHEMA_VERSION). The read queries shape their SELECT
+# to the columns `PRAGMA table_info(symbols)` says the store actually carries
+# (see `GraphStore._table_columns`), so a legacy store reads back with the
+# columns it predates as None — one introspection per store, never an
+# exception-driven probe per query.
+_SYMBOL_OPTIONAL_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("end_line", "end_line"),
+    ("documentation", "documentation"),
+    ("scip_kind", "scip_kind"),
+    ("signature_documentation", "signature_documentation"),
+    ("is_out_of_project", "is_out_of_project"),
+)
+
 
 class GraphStore:
     """Query + incremental-update handle over a SQLite store written by
@@ -859,6 +874,29 @@ class GraphStore:
     def __init__(self, path: str | Path) -> None:
         self._con = sqlite3.connect(Path(path))
         self._check_schema_compat()
+        # Schema introspection, filled lazily by `_table_columns`: a store's
+        # SQLite shape never changes under a live connection, so each table's
+        # column set — and the SELECTs shaped to it (below) — is read once per
+        # instance, never re-probed per query.
+        self._table_columns_cache: dict[str, frozenset[str]] = {}
+        self._get_node_sql_cache: tuple[str, tuple[str, ...]] | None = None
+        self._find_select_cache: tuple[str, tuple[str, ...]] | None = None
+        self._references_of_query_cache: tuple[str, tuple[str, ...]] | None = None
+
+    def _table_columns(self, table: str) -> frozenset[str]:
+        """The column names of `table`, read once per instance and cached.
+
+        The one-time replacement for the old per-query try/except probing: a
+        query that needs to know whether this store carries a column asks here
+        instead of raising+catching `OperationalError` on every call. An
+        absent table yields an empty set (`table` is always an internal
+        literal). `apply_update` clears the cache when it ALTERs the shape.
+        """
+        cached = self._table_columns_cache.get(table)
+        if cached is None:
+            cached = frozenset(row[1] for row in self._con.execute(f"PRAGMA table_info({table})"))
+            self._table_columns_cache[table] = cached
+        return cached
 
     def _check_schema_compat(self) -> None:
         """Refuse a store whose format is newer than this binary understands.
@@ -940,148 +978,61 @@ class GraphStore:
     # --- point queries -----------------------------------------------------
 
     def get_node(self, symbol: str) -> Node | None:
-        try:
-            row = self._con.execute(
-                """
-                SELECT s.symbol, s.display_name, f.path, s.line, s.end_line, s.documentation,
-                       s.scip_kind, s.signature_documentation, s.is_out_of_project
-                FROM symbols s LEFT JOIN files f ON f.id = s.file_id
-                WHERE s.symbol = ?
-                """,
-                (symbol,),
-            ).fetchone()
-        except sqlite3.OperationalError:
-            # Store predates `symbols.is_out_of_project` (schema v5 as first
-            # drafted, before this amendment) — degrade to that shape rather
-            # than crash a plain read-only query, keeping every datum the
-            # amended shape already carries.
-            return self._get_node_pre_is_out_of_project(symbol)
-        if row is None:
-            return None
-        return Node(
-            symbol=row[0],
-            display_name=row[1] or "",
-            file=row[2],
-            line=row[3],
-            end_line=row[4],
-            documentation=row[5],
-            scip_kind=row[6],
-            signature_documentation=row[7],
-            is_out_of_project=None if row[8] is None else bool(row[8]),
-        )
+        """The definition-site node for `symbol`, or None.
 
-    def _get_node_pre_is_out_of_project(self, symbol: str) -> Node | None:
-        """The `get_node` fallback cascade as it was before the
-        `symbols.is_out_of_project` amendment — one degrade level per column a
-        store may predate (same pattern, continued in a helper rather than a
-        sixth nesting level). Nodes read back with `is_out_of_project=None`
-        (the "no data" default), never an error."""
-        try:
-            row = self._con.execute(
-                """
-                SELECT s.symbol, s.display_name, f.path, s.line, s.end_line, s.documentation,
-                       s.scip_kind, s.signature_documentation
+        The SELECT is shaped once to the columns this store's `symbols` table
+        actually carries (`_get_node_query`, cached) — a store predating a
+        column reads that field back as None, and the hot path runs no
+        exception-driven probing whatever the store's age.
+        """
+        sql, names = self._get_node_query()
+        row = self._con.execute(sql, (symbol,)).fetchone()
+        if row is None:
+            return None
+        return self._node_from_row(dict(zip(names, row)))
+
+    def _get_node_query(self) -> tuple[str, tuple[str, ...]]:
+        """The `get_node` SELECT plus its result-column names, built once per
+        store: the four columns every schema has, plus each of
+        `_SYMBOL_OPTIONAL_COLUMNS` the store's `symbols` table actually
+        carries. That constant's schema-history order reproduces every shape
+        the old try/except cascade degraded to, one level per column a store
+        may predate (v2 ← end_line ← documentation ← scip_kind ←
+        signature_documentation ← is_out_of_project)."""
+        if self._get_node_sql_cache is None:
+            present = self._table_columns("symbols")
+            cols = ["s.symbol", "s.display_name", "f.path", "s.line"]
+            names = ["symbol", "display_name", "file", "line"]
+            for column, name in _SYMBOL_OPTIONAL_COLUMNS:
+                if column in present:
+                    cols.append(f"s.{column}")
+                    names.append(name)
+            self._get_node_sql_cache = (
+                f"""
+                SELECT {", ".join(cols)}
                 FROM symbols s LEFT JOIN files f ON f.id = s.file_id
                 WHERE s.symbol = ?
                 """,
-                (symbol,),
-            ).fetchone()
-        except sqlite3.OperationalError:
-            # Store predates `symbols.signature_documentation` (schema v5 as
-            # first drafted, before this amendment) — degrade to that shape
-            # rather than crash a plain read-only query, keeping every datum
-            # the amended shape already carries.
-            try:
-                row = self._con.execute(
-                    """
-                    SELECT s.symbol, s.display_name, f.path, s.line, s.end_line, s.documentation,
-                           s.scip_kind
-                    FROM symbols s LEFT JOIN files f ON f.id = s.file_id
-                    WHERE s.symbol = ?
-                    """,
-                    (symbol,),
-                ).fetchone()
-            except sqlite3.OperationalError:
-                # Store predates `symbols.scip_kind` (schema v4, never migrated
-                # by apply_update/enrich_references) — degrade to the v4 shape
-                # rather than crash a plain read-only query (and keep `documentation`,
-                # which the released shape already carries).
-                try:
-                    row = self._con.execute(
-                        """
-                        SELECT s.symbol, s.display_name, f.path, s.line, s.end_line, s.documentation
-                        FROM symbols s LEFT JOIN files f ON f.id = s.file_id
-                        WHERE s.symbol = ?
-                        """,
-                        (symbol,),
-                    ).fetchone()
-                except sqlite3.OperationalError:
-                    # Nor even `documentation` (schema v3) — degrade again.
-                    try:
-                        row = self._con.execute(
-                            """
-                            SELECT s.symbol, s.display_name, f.path, s.line, s.end_line
-                            FROM symbols s LEFT JOIN files f ON f.id = s.file_id
-                            WHERE s.symbol = ?
-                            """,
-                            (symbol,),
-                        ).fetchone()
-                    except sqlite3.OperationalError:
-                        # Nor even `end_line` (schema v2) — the original fallback.
-                        row = self._con.execute(
-                            """
-                            SELECT s.symbol, s.display_name, f.path, s.line
-                            FROM symbols s LEFT JOIN files f ON f.id = s.file_id
-                            WHERE s.symbol = ?
-                            """,
-                            (symbol,),
-                        ).fetchone()
-                        if row is None:
-                            return None
-                        return Node(
-                            symbol=row[0], display_name=row[1] or "", file=row[2], line=row[3]
-                        )
-                    if row is None:
-                        return None
-                    return Node(
-                        symbol=row[0],
-                        display_name=row[1] or "",
-                        file=row[2],
-                        line=row[3],
-                        end_line=row[4],
-                    )
-                if row is None:
-                    return None
-                return Node(
-                    symbol=row[0],
-                    display_name=row[1] or "",
-                    file=row[2],
-                    line=row[3],
-                    end_line=row[4],
-                    documentation=row[5],
-                )
-            if row is None:
-                return None
-            return Node(
-                symbol=row[0],
-                display_name=row[1] or "",
-                file=row[2],
-                line=row[3],
-                end_line=row[4],
-                documentation=row[5],
-                scip_kind=row[6],
+                tuple(names),
             )
-        if row is None:
-            return None
+        return self._get_node_sql_cache
+
+    @staticmethod
+    def _node_from_row(values: dict[str, Any]) -> Node:
+        """A `Node` from one shaped row (`dict(zip(names, row))`) — optional
+        columns the store predates are simply absent from the dict and read as
+        None, the same "no data" the degrade cascade produced."""
+        oop = values.get("is_out_of_project")
         return Node(
-            symbol=row[0],
-            display_name=row[1] or "",
-            file=row[2],
-            line=row[3],
-            end_line=row[4],
-            documentation=row[5],
-            scip_kind=row[6],
-            signature_documentation=row[7],
+            symbol=values["symbol"],
+            display_name=values["display_name"] or "",
+            file=values["file"],
+            line=values["line"],
+            end_line=values.get("end_line"),
+            documentation=values.get("documentation"),
+            scip_kind=values.get("scip_kind"),
+            signature_documentation=values.get("signature_documentation"),
+            is_out_of_project=None if oop is None else bool(oop),
         )
 
     def find(self, query: str, fuzzy: bool = False) -> list[Node]:
@@ -1130,59 +1081,33 @@ class GraphStore:
             params = []
             for t in tokens:
                 params.extend((t, t))
-        try:
-            rows = self._con.execute(
+        select, names = self._find_select()
+        rows = self._con.execute(f"{select} WHERE {clause}", params).fetchall()
+        return [self._node_from_row(dict(zip(names, r))) for r in rows]
+
+    def _find_select(self) -> tuple[str, tuple[str, ...]]:
+        """The `find` SELECT (everything above the WHERE clause) plus its
+        result-column names, shaped once to the store's actual `symbols`
+        columns — same one-time introspection as `_get_node_query`."""
+        if self._find_select_cache is None:
+            present = self._table_columns("symbols")
+            cols = ["s.symbol", "s.display_name", "f.path", "s.line"]
+            names = ["symbol", "display_name", "file", "line"]
+            for column, name in (
+                ("scip_kind", "scip_kind"),
+                ("is_out_of_project", "is_out_of_project"),
+            ):
+                if column in present:
+                    cols.append(f"s.{column}")
+                    names.append(name)
+            self._find_select_cache = (
                 f"""
-                SELECT s.symbol, s.display_name, f.path, s.line, s.scip_kind,
-                       s.is_out_of_project
+                SELECT {", ".join(cols)}
                 FROM symbols s LEFT JOIN files f ON f.id = s.file_id
-                WHERE {clause}
                 """,
-                params,
-            ).fetchall()
-            return [
-                Node(
-                    symbol=r[0],
-                    display_name=r[1] or "",
-                    file=r[2],
-                    line=r[3],
-                    scip_kind=r[4],
-                    is_out_of_project=None if r[5] is None else bool(r[5]),
-                )
-                for r in rows
-            ]
-        except sqlite3.OperationalError:
-            # Store predates `symbols.is_out_of_project` (schema v5 as first
-            # drafted, before this amendment) — degrade to that shape rather
-            # than crash a read-only query.
-            try:
-                rows = self._con.execute(
-                    f"""
-                    SELECT s.symbol, s.display_name, f.path, s.line, s.scip_kind
-                    FROM symbols s LEFT JOIN files f ON f.id = s.file_id
-                    WHERE {clause}
-                    """,
-                    params,
-                ).fetchall()
-                return [
-                    Node(symbol=r[0], display_name=r[1] or "", file=r[2], line=r[3], scip_kind=r[4])
-                    for r in rows
-                ]
-            except sqlite3.OperationalError:
-                # Store predates `symbols.scip_kind` (schema v4, never
-                # migrated) — degrade to the released shape rather than crash
-                # a read-only query.
-                rows = self._con.execute(
-                    f"""
-                    SELECT s.symbol, s.display_name, f.path, s.line
-                    FROM symbols s LEFT JOIN files f ON f.id = s.file_id
-                    WHERE {clause}
-                    """,
-                    params,
-                ).fetchall()
-                return [
-                    Node(symbol=r[0], display_name=r[1] or "", file=r[2], line=r[3]) for r in rows
-                ]
+                tuple(names),
+            )
+        return self._find_select_cache
 
     def resolve(self, query: str) -> tuple[str | None, list[Node]]:
         """Resolve a caller-supplied `query` to one exact symbol — the shared
@@ -1366,65 +1291,61 @@ class GraphStore:
 
         Each carries its `enclosing_symbol` when the graph was built with
         `--attributed-refs` (else None). Empty if built without `--references`
-        (or the store predates the `refs` table).
+        (or the store predates the `refs` table). The SELECT is shaped once to
+        the `refs` columns the store actually carries (`enclosing_id` arrived
+        post-v1, `roles` v5) — same one-time introspection as `get_node`.
         """
         sym_id = self._symbol_id(symbol)
-        if sym_id is None:
+        # No `refs` table at all (pre-reference-index store): an empty cached
+        # PRAGMA answer, not an exception to probe.
+        if sym_id is None or not self._table_columns("refs"):
             return []
-        try:
-            rows = self._con.execute(
-                """
-                SELECT f.path, r.line, e.symbol, r.roles
+        sql, names = self._references_of_query()
+        return [
+            self._reference_from_row(symbol, dict(zip(names, r)))
+            for r in self._con.execute(sql, (sym_id,)).fetchall()
+        ]
+
+    def _references_of_query(self) -> tuple[str, tuple[str, ...]]:
+        """The `references_of` SELECT plus its result-column names, built once
+        per store — callers rule out a missing `refs` table first via
+        `_table_columns("refs")`."""
+        if self._references_of_query_cache is None:
+            present = self._table_columns("refs")
+            cols = ["f.path", "r.line"]
+            names = ["file", "line"]
+            enclosing_join = ""
+            if "enclosing_id" in present:
+                cols.append("e.symbol")
+                names.append("enclosing_symbol")
+                enclosing_join = "\n            LEFT JOIN symbols e ON e.id = r.enclosing_id"
+            if "roles" in present:
+                cols.append("r.roles")
+                names.append("roles")
+            self._references_of_query_cache = (
+                f"""
+                SELECT {", ".join(cols)}
                 FROM refs r
-                LEFT JOIN files f ON f.id = r.file_id
-                LEFT JOIN symbols e ON e.id = r.enclosing_id
+                LEFT JOIN files f ON f.id = r.file_id{enclosing_join}
                 WHERE r.symbol_id = ?
                 ORDER BY f.path, r.line
                 """,
-                (sym_id,),
-            ).fetchall()
-        except sqlite3.OperationalError:
-            # Store predates the `roles` column (schema v4): retry without it —
-            # the graph carries no access data, so roles degrade to 0 (never
-            # fabricated).
-            try:
-                rows = [
-                    (r[0], r[1], r[2], 0)
-                    for r in self._con.execute(
-                        """
-                        SELECT f.path, r.line, e.symbol
-                        FROM refs r
-                        LEFT JOIN files f ON f.id = r.file_id
-                        LEFT JOIN symbols e ON e.id = r.enclosing_id
-                        WHERE r.symbol_id = ?
-                        ORDER BY f.path, r.line
-                        """,
-                        (sym_id,),
-                    ).fetchall()
-                ]
-            except sqlite3.OperationalError:
-                # Store predates the `enclosing_id` column (schema v1) or the
-                # refs table entirely; retry without the enclosing join, else
-                # give up.
-                try:
-                    rows = [
-                        (r[0], r[1], None, 0)
-                        for r in self._con.execute(
-                            """
-                            SELECT f.path, r.line
-                            FROM refs r LEFT JOIN files f ON f.id = r.file_id
-                            WHERE r.symbol_id = ?
-                            ORDER BY f.path, r.line
-                            """,
-                            (sym_id,),
-                        ).fetchall()
-                    ]
-                except sqlite3.OperationalError:
-                    return []
-        return [
-            Reference(symbol=symbol, file=r[0], line=r[1], enclosing_symbol=r[2], roles=r[3])
-            for r in rows
-        ]
+                tuple(names),
+            )
+        return self._references_of_query_cache
+
+    @staticmethod
+    def _reference_from_row(symbol: str, values: dict[str, Any]) -> Reference:
+        """A `Reference` from one shaped `refs` row — `enclosing_symbol`
+        absent (pre-attribution store) reads as None, `roles` absent (pre-v5
+        store) as 0, never fabricated."""
+        return Reference(
+            symbol=symbol,
+            file=values["file"],
+            line=values["line"],
+            enclosing_symbol=values.get("enclosing_symbol"),
+            roles=values.get("roles", 0),
+        )
 
     # --- traversals (indexed neighbour lookups, never a full load) ---------
 
@@ -2709,6 +2630,13 @@ class GraphStore:
                     "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                     (str(SCHEMA_VERSION),),
                 )
+                # The ALTERs above changed the shape this instance's cached
+                # introspection was read from — drop it (and the SELECTs shaped
+                # to it) so later reads on this same store see the new columns.
+                self._table_columns_cache.clear()
+                self._get_node_sql_cache = None
+                self._find_select_cache = None
+                self._references_of_query_cache = None
             changed_ids = self._file_ids(changed_files)
 
             # (1) candidate symbols for GC: endpoints of the edges we're about
