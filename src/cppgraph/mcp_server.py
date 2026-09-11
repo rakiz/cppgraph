@@ -2249,7 +2249,10 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         membership is the endpoint's own definition file, matched on a
         path-segment boundary ("common/" matches common/util.cpp, never
         commons/util.cpp). edge_kinds defaults to ["calls", "inherits"]
-        ("implements" also accepted). `limit` caps the list (default 40):
+        ("implements" also accepted). To see the shape of the violations rather
+        than read the list, `visualize_boundary_violations(rules=..., ...)`
+        (same `rules`/`edge_kinds` shape) renders the violating edges as a
+        graph. `limit` caps the list (default 40):
         lower it to spend fewer tokens, raise it when `truncated` — `total`
         always reports the full count."""
         return _call(
@@ -2427,7 +2430,10 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         `include_paths`/`exclude_paths` filter which components are REPORTED:
         a component is dropped only when every member is filtered out, and a
         reported one always lists all its members (the cycle is a fact about
-        the compiled binary). `limit` caps the number of components (default
+        the compiled binary). To see the shape of a cycle rather than just its
+        member list, `visualize(symbol=..., mode="cycle")` renders the actual
+        induced subgraph (nodes and edges) of the cycle containing a given
+        symbol. `limit` caps the number of components (default
         40), never a partial one — `total` always reports the full count,
         `truncated` says if more exist."""
         return _call(

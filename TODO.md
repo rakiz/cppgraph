@@ -151,6 +151,48 @@ in `CHANGELOG.md`, releases in `versions.json`.
   `api_surface` in `mcp_server.py`) warn about it. A real fix needs the `mcp` SDK
   to support strict/forbid-extra argument models.
 
+- **Split the three largest modules** (`store.py` ~2830 lines, `mcp_server.py`
+  ~2700 lines, `cli.py` ~2700 lines) — grown mostly through this project's own
+  feature accretion (each new query type adds a store method + a report
+  function + a CLI handler + an MCP tool, all landing in the same three files).
+  **Measured breakdown, not a guess** (checked before parking this, not after;
+  re-measured after the `find_symbols`/`queries.py` extraction below, since
+  that extraction shifted these numbers):
+  - `mcp_server.py`: `build_server()`+`main()` (the actual FastMCP wiring) is
+    only ~960 lines; the other ~1740 lines are "pure query functions" that the
+    module's own docstring already claims are conceptually separate from the
+    transport layer — they just never got split into their own module. A first
+    slice of exactly this (`find_symbols` and its node/label/signature helpers)
+    already moved out into `src/cppgraph/queries.py` as a side effect of giving
+    the CLI's `find` parity with MCP's — the rest still group cleanly by domain
+    into further files (call-graph, hierarchy, ranking, architecture,
+    introspection, explain/status, export/visualize) — the best-ROI,
+    lowest-risk piece of this: no dependency-direction issue (`mcp_server.py`
+    already only imports FROM `cli.py`/`queries.py`, never the reverse), and it
+    would finally make `mcp_server.py` match what its docstring already claims.
+  - `cli.py`: `main()` alone is ~2130 of the file's ~2700 lines — pure argparse
+    boilerplate (30 subcommands, now with spelling aliases on the
+    hyphen/underscore ones) plus `if args.command in (...)` handler bodies
+    (29 commands, ~40 lines average) that could each become their own
+    function. Splitting this does NOT shrink the total line count (argparse
+    setup doesn't get smaller by moving it) — the only real gain is turning
+    one ~2130-line function into ~30 small ones plus a thin dispatcher, for
+    readability/testability, not for size.
+  - `store.py` is the contested one: `GraphStore` is a single class around one
+    shared SQLite connection (`self._con`), not a pile of independent
+    functions like the other two files — splitting the FILE without breaking
+    the class means either Python mixins across multiple files (workable, ~7
+    files of 150-550 lines, but a real architecture decision — a reader has to
+    hop across files to see one class's full behavior) or leaving it as one
+    file, since the size here reflects genuine breadth of one cohesive
+    responsibility (the data layer), not disorganization.
+  **Verdict**: real and worth doing eventually, but a large, three-part effort
+  (~23 resulting files) for a maintainability improvement with no user-facing
+  payoff right now — parked here rather than actioned. If revisited, do the
+  `mcp_server.py` query-module split first (cleanest win, lowest risk),
+  `cli.py`'s handler-per-function split second, and treat `store.py`'s mixin
+  question as its own design decision, not a mechanical follow-on.
+
 ## scip-clang (upstream)
 
 cppgraph is downstream of scip-clang: some features are blocked not by our code but by

@@ -106,6 +106,16 @@ when you want to measure at scale; keep such paths out of the shipped code.)
 - **Verify before asserting.** Don't claim an edge is missing, a symbol is
   unused, or a build passes without checking. This project's whole thesis is
   "measure, don't guess" — hold the tooling to the same bar.
+- **Cross-reference siblings, not just the new thing's own docs.** When a new
+  capability is the equivalent/complement of an existing one (a visual
+  counterpart to a JSON-reporting tool, a new mode alongside existing modes),
+  a doc/comment audit must explicitly check whether the EXISTING sibling's
+  docstring/help text should now point at the new one — not just whether the
+  new code documents itself well in isolation. "Does this thing describe
+  itself accurately" and "does anything ELSE need to mention this now" are two
+  different questions; skipping the second one is how a cross-reference gap
+  survives two full audit passes and only surfaces later from an unrelated
+  question.
 - **Small, reversible steps.** Don't gold-plate (e.g. don't rewrite in Rust)
   without a measurement demanding it.
 
