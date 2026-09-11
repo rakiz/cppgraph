@@ -105,11 +105,11 @@ bound.
 |---|---|---|
 | `callers` | list callers of a symbol | --graph, <symbol>, --limit, --exclude-tests/--no-exclude-tests, --include-path PREFIX, --exclude-path PREFIX, --full-symbols |
 | `callees` | list callees of a symbol | --graph, <symbol>, --limit, --exclude-tests/--no-exclude-tests, --include-path PREFIX, --exclude-path PREFIX, --full-symbols, --hide-trivial |
-| `path` | shortest call chain from one symbol to another | --graph, <src>, <dst> |
+| `path` | shortest call chain from one symbol to another (see it as a graph: `view <src> --dst <dst> --mode path`; `--expand-paths` widens it to the corridor) | --graph, <src>, <dst> |
 | `impact` | reverse blast-radius: everything that transitively calls a symbol | --graph, <symbol>, --depth, --kind, --limit, --exclude-tests/--no-exclude-tests, --include-path PREFIX, --exclude-path PREFIX, --full-symbols |
 | `reachable-from` (alias `reachable_from`) | forward reachability: everything a symbol transitively calls (a lower bound) | --graph, <symbol>, --depth, --kind, --limit, --exclude-tests/--no-exclude-tests, --include-path PREFIX, --exclude-path PREFIX, --full-symbols |
 | `hotspots` | global ranking of symbols by call-edge volume | --graph, --kind, --limit, --exclude-tests/--no-exclude-tests, --full-symbols, --include-path PREFIX, --exclude-path PREFIX |
-| `dependency-cost` (alias `dependency_cost`) | call-site count against a target library — 'if I replace/remove this library, how many call sites change?' (exact count of calls edges into it) | --graph, --target-path PREFIX*, --limit, --exclude-tests/--no-exclude-tests, --full-symbols, --include-path PREFIX, --exclude-path PREFIX |
+| `dependency-cost` (alias `dependency_cost`) | call-site count against a target library — 'if I replace/remove this library, how many call sites change?' (exact count of calls edges into it); the module-exposure complement: `api-surface` | --graph, --target-path PREFIX*, --limit, --exclude-tests/--no-exclude-tests, --full-symbols, --include-path PREFIX, --exclude-path PREFIX |
 <!-- /cppgraph-gen -->
 
 ```bash
@@ -130,7 +130,7 @@ declares (`class-members`), what a file defines (`outline`).
 <!-- cppgraph-gen:bases subtypes class-members outline -->
 | Command | Purpose (from `--help`) | Arguments |
 |---|---|---|
-| `bases` | direct base classes a type inherits from | --graph, <symbol> |
+| `bases` | direct base classes a type inherits from (full transitive hierarchy: `reachable-from --kind inherits`) | --graph, <symbol> |
 | `subtypes` | direct subclasses of a type | --graph, <symbol> |
 | `class-members` (alias `class_members`) | members declared on a class/struct (methods, fields, nested types), by line | --graph, <symbol>, --limit, --full-symbols |
 | `outline` | the outline of one file: every symbol defined in it, sorted by line | --graph, <file>, --limit, --full-symbols |
@@ -153,8 +153,8 @@ shows what one global's initializer touches.
 <!-- cppgraph-gen:references api-surface global_init_references -->
 | Command | Purpose (from `--help`) | Arguments |
 |---|---|---|
-| `references` | exact use sites of a symbol (unless the graph was built --no-references) | --graph, <symbol>, --root, --context N, --limit, --access, --include-path PREFIX, --exclude-path PREFIX |
-| `api-surface` (alias `api_surface`) | the actually-used external surface of a module: definitions inside a prefix called/referenced from outside it | --graph, <module_prefix>, --limit, --exclude-tests/--no-exclude-tests, --full-symbols |
+| `references` | exact use sites of a symbol (unless the graph was built --no-references); see them as a graph with `view <symbol> --mode usage` | --graph, <symbol>, --root, --context N, --limit, --access, --include-path PREFIX, --exclude-path PREFIX |
+| `api-surface` (alias `api_surface`) | the actually-used external surface of a module: definitions inside a prefix called/referenced from outside it (the consumption complement: `dependency-cost`) | --graph, <module_prefix>, --limit, --exclude-tests/--no-exclude-tests, --full-symbols |
 | `global_init_references` (alias `global-init-references`) | globals referenced by one global's initializer region (the fact behind the static-init-order question, not a verdict); needs a #504-built graph with --attributed-refs | --graph, <symbol>, --limit, --full-symbols |
 <!-- /cppgraph-gen -->
 

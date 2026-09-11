@@ -837,7 +837,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     _add_query_filters(p_callees, hide_trivial=True)
 
-    p_bases = sub.add_parser("bases", help="direct base classes a type inherits from")
+    p_bases = sub.add_parser(
+        "bases",
+        help="direct base classes a type inherits from (full transitive "
+        "hierarchy: `reachable-from --kind inherits`)",
+    )
     p_bases.add_argument(
         "--graph",
         required=False,
@@ -863,7 +867,8 @@ def main(argv: list[str] | None = None) -> int:
 
     p_refs = sub.add_parser(
         "references",
-        help="exact use sites of a symbol (unless the graph was built --no-references)",
+        help="exact use sites of a symbol (unless the graph was built "
+        "--no-references); see them as a graph with `view <symbol> --mode usage`",
     )
     p_refs.add_argument(
         "--graph",
@@ -903,7 +908,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     _add_path_filters(p_refs)
 
-    p_path = sub.add_parser("path", help="shortest call chain from one symbol to another")
+    p_path = sub.add_parser(
+        "path",
+        help="shortest call chain from one symbol to another (see it as a "
+        "graph: `view <src> --dst <dst> --mode path`; `--expand-paths` widens "
+        "it to the corridor)",
+    )
     p_path.add_argument(
         "--graph",
         required=False,
@@ -1007,7 +1017,8 @@ def main(argv: list[str] | None = None) -> int:
         "dependency-cost",
         aliases=["dependency_cost"],
         help="call-site count against a target library — 'if I replace/remove this "
-        "library, how many call sites change?' (exact count of calls edges into it)",
+        "library, how many call sites change?' (exact count of calls edges into it); "
+        "the module-exposure complement: `api-surface`",
     )
     p_dep_cost.add_argument(
         "--graph",
@@ -1195,7 +1206,8 @@ def main(argv: list[str] | None = None) -> int:
         "api-surface",
         aliases=["api_surface"],
         help="the actually-used external surface of a module: definitions "
-        "inside a prefix called/referenced from outside it",
+        "inside a prefix called/referenced from outside it (the consumption "
+        "complement: `dependency-cost`)",
     )
     p_api.add_argument(
         "--graph",

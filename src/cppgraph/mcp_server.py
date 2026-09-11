@@ -1898,8 +1898,9 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
     ) -> dict[str, Any]:
         """Direct base classes a type inherits from (`symbol` is a name or an exact
         SCIP type string, ending in `#`; a unique name resolves automatically).
-        Compact `name` + `file:line` by default; `full_symbols=True` for raw SCIP
-        strings. `limit` caps the list.
+        For the full transitive base hierarchy use `reachable_from` with
+        kind="inherits". Compact `name` + `file:line` by default; `full_symbols=True`
+        for raw SCIP strings. `limit` caps the list.
         An empty result carries a `note` (the type may be a root, or a holder
         with no base) rather than a bare `0`."""
         return _call(bases, symbol, limit=limit, full_symbols=full_symbols)
@@ -1939,6 +1940,8 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         ("write"/"read+write") — only when the graph carries that data (built
         with a scip-clang ReadAccess/WriteAccess-patch binary); on a graph
         without it the tool reports `available: false` rather than guessing.
+        To see the use sites as a graph rather than a list,
+        `visualize(symbol, mode="usage")` draws the symbol->file usage graph.
         `limit` caps the list. If the graph was built with `--no-references`,
         `available` is false (rebuild with references to enable this)."""
         return _call(
@@ -1961,7 +1964,9 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         list with `hops`. Returns `found=false` with
         a `hint` when there's no *static* path — which may mean the flow crosses
         runtime dispatch (a virtual call / a registered factory), not that the two
-        are unrelated."""
+        are unrelated. To see the chain rendered as a graph rather than read it
+        as a list, `visualize(symbol=src, mode="path", dst=dst)` draws it
+        (corridor and context knobs included)."""
         return _call(call_path, src, dst)
 
     @mcp.tool()
@@ -2092,7 +2097,9 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         symbols. Response: `total_call_sites` (the headline "N call sites"
         answer), `distinct_target_symbols`, and `top_targets` — which symbols
         in the library are hit hardest, bounded by `limit` (raise it when
-        `truncated`; the totals are always full)."""
+        `truncated`; the totals are always full). The complementary inward view —
+        what a module exposes to outside callers, rather than what outside code
+        consumes of a target — is `api_surface`."""
         return _call(
             dependency_cost_report,
             target_paths=target_paths,
@@ -2355,7 +2362,9 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         by the underlying MCP argument validation rather than raising, so a
         typo silently yields an unfiltered (whole-tree) result. `limit` caps
         the list (default 40): raise it when
-        `truncated` — `total` always reports the full count."""
+        `truncated` — `total` always reports the full count. The complementary
+        outward view — how many call sites outside code runs into a module
+        (e.g. before replacing it) — is `dependency_cost`."""
         return _call(
             api_surface_report,
             module_prefix,
@@ -2557,7 +2566,9 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         A valid symbol in no multi-member cycle returns `found: false` + a note
         (no HTML written/opened — the same clean shape as path mode's no-chain
         case). Returns the HTML path and
-        the command to open it (in case the browser didn't launch)."""
+        the command to open it (in case the browser didn't launch). Separate
+        from the symbol-centred modes, `visualize_boundary_violations(rules=...)`
+        renders declared-layering violations as a graph."""
         from cppgraph.viz_html import open_in_browser, write_temp_html
 
         s = stores.get()
