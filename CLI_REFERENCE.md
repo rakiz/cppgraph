@@ -80,13 +80,14 @@ and it shows the exact SCIP strings the other `<symbol>` commands accept.
 <!-- cppgraph-gen:find -->
 | Command | Purpose (from `--help`) | Arguments |
 |---|---|---|
-| `find` | find symbols by name (SCIP symbol strings aren't memorable) | --graph, <query>, --include-path PREFIX, --exclude-path PREFIX |
+| `find` | find symbols by name (SCIP symbol strings aren't memorable) | --graph, <query>, --limit, --hide-trivial, --root, --include-path PREFIX, --exclude-path PREFIX |
 <!-- /cppgraph-gen -->
 
 ```bash
 cppgraph find change_stream             # substring, any position
 cppgraph find Connection pool           # every word must appear, any order
 cppgraph find --include-path src/ plan  # scope the matches to your code
+cppgraph find --hide-trivial pipeline   # skip operators/*assert/lambda noise
 ```
 
 ## Traversing the call graph

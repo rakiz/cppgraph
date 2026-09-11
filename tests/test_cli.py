@@ -61,6 +61,109 @@ def test_find_retries_cxx_colon_spelling_as_scip_separator(
     assert main(["find", "--graph", str(path), "Bar::baz"]) == 1
 
 
+def test_find_groups_overloads_with_signatures(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """MCP parity: same-named overloads collapse into one entry, and `--root`
+    (the CLI's checkout switch, like `refs`/`explain`) adds each arm's
+    source-derived signature so the arms are distinguishable."""
+    (tmp_path / "rt.h").write_text(
+        "Status parse(const ResumeToken& tok, bool strict = false);\n"
+        "Status parse(const BSONObj& obj);\n"
+    )
+    p1 = "cxx . . $ mongo/ResumeToken#parse(aaaaaa)."
+    p2 = "cxx . . $ mongo/ResumeToken#parse(bbbbbb)."
+    graph = Graph()
+    graph.nodes[p1] = Node(symbol=p1, display_name="parse", file="rt.h", line=0)
+    graph.nodes[p2] = Node(symbol=p2, display_name="parse", file="rt.h", line=1)
+    path = tmp_path / "ov.db"
+    write_sqlite(graph, path)
+    assert main(["find", "--graph", str(path), "--root", str(tmp_path), "parse"]) == 0
+    out = capsys.readouterr().out
+    assert "2 match(es) in 1 group(s)" in out
+    assert "2 overload(s):" in out
+    assert p1 in out and p2 in out
+    assert "signature: (const ResumeToken& tok, bool strict = false)" in out
+    assert "signature: (const BSONObj& obj)" in out
+
+
+def test_find_groups_overloads_without_root_omits_signatures(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """No `--root`: the group still collapses with every arm's exact symbol and
+    site — only the source read is skipped (signatures are a checkout feature,
+    never stored)."""
+    p1 = "cxx . . $ mongo/ResumeToken#parse(aaaaaa)."
+    p2 = "cxx . . $ mongo/ResumeToken#parse(bbbbbb)."
+    graph = Graph()
+    graph.nodes[p1] = Node(symbol=p1, display_name="parse", file="rt.h", line=0)
+    graph.nodes[p2] = Node(symbol=p2, display_name="parse", file="rt.h", line=1)
+    path = tmp_path / "ov.db"
+    write_sqlite(graph, path)
+    assert main(["find", "--graph", str(path), "parse"]) == 0
+    out = capsys.readouterr().out
+    assert "2 overload(s):" in out
+    assert p1 in out and p2 in out
+    assert "signature:" not in out
+
+
+def test_find_hide_trivial_drops_noise_and_reports_hidden(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`--hide-trivial` mirrors the MCP `find` flag: generated/boilerplate hits
+    are dropped and counted, the default stays lossless, and an all-noise
+    result is a miss that says what it hid rather than a bare empty answer."""
+    real = "cxx . . $ mongo/DocumentSourceChangeStream#buildPipeline(a1)."
+    lam = "cxx . . $ mongo/`$anonymous_type_7`#operator()(a2)."
+    op = "cxx . . $ mongo/Pipeline#operator==(a3)."
+    graph = Graph()
+    for s in (real, lam, op):
+        graph.nodes[s] = Node(symbol=s, file="cs.cpp", line=1)
+    path = tmp_path / "noise.db"
+    write_sqlite(graph, path)
+
+    assert main(["find", "--graph", str(path), "mongo"]) == 0
+    out = capsys.readouterr().out
+    assert "3 match(es)" in out
+    assert "hidden" not in out  # lossless by default
+
+    assert main(["find", "--graph", str(path), "--hide-trivial", "mongo"]) == 0
+    out = capsys.readouterr().out
+    assert "1 match(es)" in out
+    assert real in out
+    assert "(2 trivial hit(s) hidden — drop --hide-trivial to see them)" in out
+
+    # Everything matched was noise: exit 1, but the count is still reported.
+    assert main(["find", "--graph", str(path), "--hide-trivial", "operator"]) == 1
+    out = capsys.readouterr().out
+    assert "no symbol matching" in out
+    assert "(2 trivial hit(s) hidden" in out
+
+
+def test_find_limit_caps_groups_and_reports_total(
+    graph_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`--limit` caps the result groups (the MCP `find` semantics) while the
+    header keeps the true total and says the cap bit."""
+    assert main(["find", "--graph", str(graph_path), "--limit", "1", "Foo"]) == 0
+    out = capsys.readouterr().out
+    assert "2 match(es)" in out  # the true total, not the shown count
+    assert "(showing 1 — raise --limit for more)" in out
+    assert out.count("  cxx . . $ ") == 1  # one group head shown
+
+
+def test_find_relaxes_case_insensitively_like_mcp(
+    graph_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The full relaxation cascade is shared with the MCP `find`: after the
+    exact and `::`-spelling tries miss, a case/separator-insensitive retry
+    answers the `changeStream` vs `change_stream` trap instead of a bare miss."""
+    assert main(["find", "--graph", str(graph_path), "makeResumetoken"]) == 0
+    out = capsys.readouterr().out
+    assert "makeResumeToken" in out
+    assert "case/separator-insensitively" in out
+
+
 def test_callers_lists_caller_with_location(
     graph_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

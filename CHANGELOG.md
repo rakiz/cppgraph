@@ -8,6 +8,18 @@ on-disk store also carries its own `schema_version` for forward-compatibility.
 
 ### Added
 
+- **CLI `find` reaches MCP parity** — `cppgraph find` gains the flags the MCP
+  `find` tool already had: `--hide-trivial` (drop compiler-generated /
+  boilerplate hits — unnamed-type lambdas, operators, `*assert`/`makeStatus` —
+  reporting the count hidden), `--limit` (caps the result groups, always
+  printing the true total plus a truncation note), and `--root` (reads each
+  overload arm's signature from the checkout). Same-named overloads now
+  collapse into one entry listing every arm's exact symbol, kind, and site —
+  same grouping the MCP tool does. Both surfaces are driven by one shared
+  implementation, `cppgraph.queries.find_symbols` (moved from the MCP server,
+  alongside `read_source_snippet`/`extract_signature`), so the relaxation
+  cascade the CLI lacked (case/separator-insensitive and bare-leaf fallbacks)
+  now answers `cppgraph find` too, flagged in a note like the MCP's.
 - **Spelling aliases for the CLI subcommands** — every command named with one
   convention now also answers to the other: `line-span`/`line_span`,
   `no-incoming-calls`/`no_incoming_calls`, `global-init-references`/

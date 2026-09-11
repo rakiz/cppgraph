@@ -27,6 +27,7 @@ from cppgraph.filters import (
 )
 from cppgraph.model import Edge, Node
 from cppgraph.proto import scip_pb2
+from cppgraph.queries import extract_signature, find_symbols, read_source_snippet
 from cppgraph.store import (
     GraphStore,
     IncompatibleStoreError,
@@ -79,77 +80,41 @@ def _print_node(node: Node, *, full_symbols: bool = True, external: bool = False
         print(f"  {node.display_name or short_label(node.symbol)}  ({loc}){kind}{marker}")
 
 
-def read_source_snippet(
-    root: str | Path, rel_path: str, line0: int, *, context: int = 3
-) -> list[tuple[int, str]] | None:
-    """Read `line0` (0-indexed) ± `context` lines from `root/rel_path`.
-
-    Returns a list of `(0-indexed line number, text)`, or `None` if the file
-    can't be read — the checkout root is a runtime argument, so a missing file
-    is an expected, recoverable condition, not an error.
-    """
-    try:
-        text = (Path(root) / rel_path).read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return None
-    lines = text.splitlines()
-    start = max(0, line0 - context)
-    end = min(len(lines), line0 + context + 1)
-    return [(i, lines[i]) for i in range(start, end)]
-
-
 def _print_edge(edge: Edge, *, other: str, full_symbols: bool = True) -> None:
     line = edge.line + 1 if edge.line is not None else "?"
     label = other if full_symbols else short_label(other)
     print(f"  {label}  ({edge.file}:{line})")
 
 
-def extract_signature(root: str | None, file: str | None, line0: int | None) -> str | None:
-    """A best-effort readable parameter signature — including any default
-    argument values, verbatim as written — read from the source at a
-    definition site.
-
-    `scip-clang` disambiguates overloads by an opaque hash, not by argument
-    types, so grouped overloads (`find`) are otherwise indistinguishable. A
-    patched scip-clang can carry a stored `signature_documentation` on the
-    graph itself (`explain`/`explain_symbol`'s "signature (stored):"), but it
-    is a pretty-printed declaration, not this verbatim-source extraction.
-    Since cppgraph has the checkout (`root`), it reads the def line and captures
-    the text from the first `(` to its matching `)` verbatim — so a defaulted
-    parameter (`bool useNullIfMissing = false`) is visible without opening the
-    header. Display-only, so templates / macros / multi-line params are
-    tolerated (whitespace collapsed). `None` if there's no root, the file can't
-    be read, no parameter list is found, or the declaration at this line ends
-    (`;`/`{`) before any `(` — a field/variable has no parameter list of its
-    own, and without this check a bare `int x;` followed a few lines later by
-    an unrelated function would misattribute that function's parameter list
-    to the field (observed in practice on a field declared just above a
-    `friend bool operator==(...)`)."""
-    if root is None or file is None or line0 is None:
-        return None
-    snippet = read_source_snippet(root, file, line0, context=8)
-    if not snippet:
-        return None
-    text = " ".join(t for i, t in snippet if i >= line0)
-    start = text.find("(")
-    if start < 0:
-        return None
-    # A `;` or `{` before the first `(` ends the current declaration/statement
-    # without ever opening a parameter list — this line/lookahead window
-    # belongs to a DIFFERENT, later declaration (e.g. a field with no `(` of
-    # its own, followed within the lookahead window by an unrelated function).
-    stop = min((i for i in (text.find(";"), text.find("{")) if i >= 0), default=-1)
-    if stop >= 0 and stop < start:
-        return None
-    depth = 0
-    for j in range(start, len(text)):
-        if text[j] == "(":
-            depth += 1
-        elif text[j] == ")":
-            depth -= 1
-            if depth == 0:
-                return " ".join(text[start : j + 1].split())
-    return None
+def _print_found(entry: dict[str, object]) -> None:
+    """One `find` result row, rendered from the shared `find_symbols` entry
+    (`cppgraph.queries`) — the same dict the MCP tool returns, so the two
+    surfaces can't drift. The full SCIP string leads (what the other commands
+    accept as `<symbol>`); an overload group lists every arm's exact symbol
+    under the head entry, each with its source-derived signature when `--root`
+    made one readable."""
+    kind = f"  [{entry['scip_kind']}]" if entry.get("scip_kind") else ""
+    marker = "  [out-of-project]" if entry.get("is_out_of_project") is True else ""
+    loc = (
+        f"{entry['file']}:{entry['line']}"
+        if entry.get("file") is not None and entry.get("line") is not None
+        else "?"
+    )
+    name = entry.get("name") or "?"
+    print(f"  {entry['symbol']}  ({name} @ {loc}){kind}{marker}")
+    sigs = entry.get("signatures")
+    if not sigs:
+        return
+    print(f"    {entry['overloads']} overload(s):")
+    for arm in sigs:
+        arm_kind = f"  [{arm['scip_kind']}]" if arm.get("scip_kind") else ""
+        arm_loc = (
+            f"{arm['file']}:{arm['line']}"
+            if arm.get("file") is not None and arm.get("line") is not None
+            else "?"
+        )
+        sig = f"  signature: {arm['signature']}" if arm.get("signature") else ""
+        print(f"    {arm['symbol']}  ({arm_loc}){arm_kind}{sig}")
 
 
 def _add_query_filters(parser: argparse.ArgumentParser, *, hide_trivial: bool = False) -> None:
@@ -823,6 +788,26 @@ def main(argv: list[str] | None = None) -> int:
         "several space-separated words that must all appear (order-free AND). "
         "If a broad query returns mostly generated-code clutter (IDL Spec/getter "
         "classes), scope with --include-path/--exclude-path instead",
+    )
+    p_find.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="cap the number of result groups shown (default: all); the true "
+        "total is always printed, with a truncation note when the cap bites",
+    )
+    p_find.add_argument(
+        "--hide-trivial",
+        action="store_true",
+        help="drop compiler-generated / boilerplate hits (unnamed-type lambdas, "
+        "operators, `*assert`/`makeStatus`, …); the number hidden is reported",
+    )
+    p_find.add_argument(
+        "--root",
+        default=None,
+        help="checkout root to read overload signatures from (a runtime "
+        "argument, never stored). Omit for coordinates only — grouped "
+        "overloads still collapse into one entry, without their signatures",
     )
     _add_path_filters(p_find)
 
@@ -1714,33 +1699,37 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "find":
         store = _open_store_checked(args, parser)
-        matches = store.find(args.query)
-        if not matches and "::" in args.query:
-            # The same first relaxation `GraphStore.resolve` (and the MCP
-            # `find`) tries: C++ `Class::method` is `Class#method` in SCIP's
-            # spelling. Otherwise strict — CLI find has no fuzzy/leaf cascade.
-            scip_query = args.query.replace("::", "#")
-            matches = store.find(scip_query)
-            if matches:
-                print(
-                    f"[cppgraph] no exact match for {args.query!r}; showing "
-                    f"results for {scip_query!r} (`::` normalized to SCIP's `#` "
-                    "member separator)"
-                )
-        if args.include_paths or args.exclude_paths:
-            matches = [
-                n
-                for n in matches
-                if matches_path_prefix(
-                    n.file, include=args.include_paths, exclude=args.exclude_paths
-                )
-            ]
-        if not matches:
+        r = find_symbols(
+            store,
+            args.query,
+            limit=args.limit,
+            hide_trivial=args.hide_trivial,
+            root=args.root,
+            include_paths=args.include_paths,
+            exclude_paths=args.exclude_paths,
+        )
+        if r.get("relaxed"):
+            print(f"[cppgraph] {r['note']}")
+        if not r["results"]:
             print(f"[cppgraph] no symbol matching {args.query!r}")
+            if r.get("trivial_hidden"):
+                print(
+                    f"  ({r['trivial_hidden']} trivial hit(s) hidden — drop "
+                    "--hide-trivial to see them)"
+                )
             return 1
-        show_external = store.meta().get("has_external_symbols") == "true"
-        for node in matches:
-            _print_node(node, external=show_external and node.is_out_of_project is True)
+        header = f"[cppgraph] {r['total']} match(es)"
+        if r["groups"] != r["total"]:
+            header += f" in {r['groups']} group(s)"
+        if r["truncated"]:
+            header += f" (showing {len(r['results'])} — raise --limit for more)"
+        print(header)
+        for entry in r["results"]:
+            _print_found(entry)
+        if r.get("trivial_hidden"):
+            print(
+                f"  ({r['trivial_hidden']} trivial hit(s) hidden — drop --hide-trivial to see them)"
+            )
         return 0
 
     if args.command == "callers":

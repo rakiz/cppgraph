@@ -28,7 +28,6 @@ out of the box: the checkout root is auto-discovered (the project that owns the
 from __future__ import annotations
 
 import argparse
-import re
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -37,8 +36,6 @@ from cppgraph.cli import (
     SOURCE_EXTS,
     boundary_violations_graph,
     build_export_json,
-    extract_signature,
-    read_source_snippet,
 )
 from cppgraph.export import is_test_file
 from cppgraph.filters import access_tag as _access_tag
@@ -46,11 +43,14 @@ from cppgraph.filters import ambiguous_candidate_hint as _ambiguous_candidate_hi
 from cppgraph.filters import drop_test_edges as _drop_test_edges
 from cppgraph.filters import filter_by_access as _filter_by_access
 from cppgraph.filters import filter_by_path as _filter_by_path
-from cppgraph.filters import is_noise_symbol as _is_noise_symbol
 from cppgraph.filters import is_trivial_callee as _is_trivial_callee
 from cppgraph.filters import matches_path_prefix as _matches_path_prefix
-from cppgraph.filters import qualified_name as _qualified_name
 from cppgraph.filters import short_label as _short_label
+from cppgraph.queries import capped as _capped
+from cppgraph.queries import extract_signature, find_symbols, read_source_snippet
+from cppgraph.queries import label as _label
+from cppgraph.queries import line1 as _line1
+from cppgraph.queries import node_dict as _node_dict
 from cppgraph.store import (
     GraphStore,
     IncompatibleStoreError,
@@ -64,7 +64,7 @@ from cppgraph.store import (
 from cppgraph.updates import attributed_refs_cost_note, scip_update_advice, update_advice
 
 if TYPE_CHECKING:
-    from cppgraph.model import Edge, Node
+    from cppgraph.model import Edge
 
 # Default cap on any list a tool returns. Big enough to be useful for reasoning,
 # small enough that a hub symbol's callers don't blow the context budget. The
@@ -199,11 +199,6 @@ _REACHABLE_NOTE = (
 )
 
 
-def _line1(line0: int | None) -> int | None:
-    """0-indexed store line -> 1-indexed for display; None stays None."""
-    return None if line0 is None else line0 + 1
-
-
 def _is_type_symbol(symbol: str) -> bool:
     """True if the SCIP string denotes a *type* (class/struct/enum), not a
     callable. SCIP suffixes a type descriptor with `#` and a method/function
@@ -211,41 +206,6 @@ def _is_type_symbol(symbol: str) -> bool:
     call-graph callers, so `impact_of(kind="calls")` on one is meaningless —
     the blast radius lives in `find_references` instead."""
     return symbol.rstrip().endswith("#")
-
-
-def _loosen_to_leaf(query: str) -> str | None:
-    """The trailing name segment of a qualified query, or None if there's nothing
-    to loosen.
-
-    `find` is an exact substring match, so a guessed *qualifier* that's wrong
-    (`Class#method` when `method` is actually a free function, or a wrong
-    namespace) returns nothing even though the bare name exists. Dropping
-    everything up to the last `#`, `::`, or `/` gives the leaf name to retry on.
-    Returns None when the query has no such separator (it's already a leaf, so
-    there's nothing to relax)."""
-    leaf = re.split(r"#|::|/", query.rstrip(".#")).pop().strip()
-    if not leaf or leaf == query:
-        return None
-    return leaf
-
-
-def _label(symbol: str, node: Node | None) -> str:
-    """Preferred human label: the indexed display name if present (other indexers
-    may fill it), else one derived from the SCIP string."""
-    return (node.display_name if node is not None else "") or _short_label(symbol)
-
-
-def _node_dict(node: Node, full_symbols: bool = False) -> dict[str, Any]:
-    """Compact node identity. The full SCIP `symbol` string is 150-250 chars of
-    near-noise repeated per hit; by default we emit a readable `name` +
-    `file:line` (a substring `find` can re-resolve) and only carry the raw SCIP
-    string when explicitly asked (`full_symbols`)."""
-    d: dict[str, Any] = {"name": _label(node.symbol, node)}
-    if full_symbols:
-        d["symbol"] = node.symbol
-    d["file"] = node.file
-    d["line"] = _line1(node.line)
-    return d
 
 
 def _edge_dict(
@@ -262,10 +222,6 @@ def _edge_dict(
     d["file"] = edge.file
     d["line"] = _line1(edge.line)
     return d
-
-
-def _capped(items: list[Any], limit: int) -> tuple[list[Any], bool]:
-    return items[:limit], len(items) > limit
 
 
 def _merged_source(
@@ -290,166 +246,6 @@ def _merged_source(
     for h in hits:
         wanted.update(range(max(0, h - context), min(len(lines), h + context + 1)))
     return [{"line": i + 1, "text": lines[i], "is_use": i in hits} for i in sorted(wanted)]
-
-
-def find_symbols(
-    store: GraphStore,
-    query: str,
-    limit: int = DEFAULT_LIMIT,
-    hide_trivial: bool = False,
-    root: str | None = None,
-    include_paths: list[str] | None = None,
-    exclude_paths: list[str] | None = None,
-) -> dict[str, Any]:
-    """Symbols whose SCIP string or display name contains `query`.
-
-    The entry point to every other tool: SCIP symbol strings aren't memorable,
-    so an LLM resolves a human name here first, then feeds the exact string on.
-    With `hide_trivial=True`, compiler-generated / boilerplate hits (unnamed-type
-    lambdas, operators, `*assert`/`makeStatus`, …) are dropped and counted as
-    `trivial_hidden`, so a broad query isn't buried in noise. `include_paths`/
-    `exclude_paths` filter matches by their definition file's path prefix (e.g.
-    scope out vendored deps).
-
-    On an exact-zero result, `find` relaxes and flags the response `relaxed`:
-    first a C++-spelled qualified guess (`Class::method`) is retried with
-    SCIP's `Class#method` separator (the same step `GraphStore.resolve` tries
-    before anything fuzzier), then case/separator-insensitively (the
-    `change_stream` vs `changeStream` vs `changestream` trap), then, for a
-    *qualified* query (`Class#method`, a wrong guess), on the bare leaf name.
-    So a naming miss degrades to a hint instead of a silent empty answer.
-
-    Grouped overloads carry a best-effort `signature` read from source (when
-    `root` is available), since scip-clang distinguishes them only by hash.
-    When the graph was built from a kind-patched binary (`has_symbol_kind`),
-    the symbol's fine-grained SCIP kind is returned as `scip_kind` (e.g.
-    "StaticMethod") on the entry and on each `signatures[i]` arm — also absent
-    when the graph carries none. When the graph carries external-package
-    symbol metadata (`has_external_symbols`), `is_out_of_project` is returned
-    on the entry and on each arm — true (defined in an un-indexed external
-    package), false (project-native), or null (no `SymbolInformation` from
-    either source); for a grouped entry the top-level value is the arms'
-    shared value, or null when the arms disagree. Absent when the graph
-    predates the feature.
-    """
-    has_external_symbols = store.meta().get("has_external_symbols") == "true"
-    matches = store.find(query)
-    relaxation: str | None = None
-    relaxed_query: str | None = None
-    if not matches and "::" in query:
-        # `Class::method` in C++ spelling is `Class#method` in SCIP's — the same
-        # first relaxation `GraphStore.resolve` tries (before fuzzy), so a
-        # qualified guess resolves exactly instead of loosening to the bare
-        # leaf and dragging in same-named methods on unrelated classes.
-        scip_query = query.replace("::", "#")
-        matches = store.find(scip_query)
-        if matches:
-            relaxation = "colon"
-            relaxed_query = scip_query
-    if not matches:
-        fuzzy = store.find(query, fuzzy=True)
-        if fuzzy:
-            matches = fuzzy
-            relaxation = "fuzzy"
-        else:
-            leaf = _loosen_to_leaf(query)
-            if leaf:
-                loosened = store.find(leaf) or store.find(leaf, fuzzy=True)
-                if loosened:
-                    matches = loosened
-                    relaxation = "leaf"
-                    relaxed_query = leaf
-    trivial_hidden = 0
-    if hide_trivial:
-        kept = [n for n in matches if not _is_noise_symbol(n.symbol)]
-        trivial_hidden = len(matches) - len(kept)
-        matches = kept
-    if include_paths or exclude_paths:
-        matches = [
-            n
-            for n in matches
-            if _matches_path_prefix(n.file, include=include_paths, exclude=exclude_paths)
-        ]
-
-    # Group overloads: signatures sharing a qualified name (distinct SCIP hashes
-    # for the same `Class::method`) collapse into one entry, so querying doesn't
-    # silently surface only one arm of an overload set. Order-preserving.
-    groups: dict[str, list[Node]] = {}
-    for n in matches:
-        groups.setdefault(_qualified_name(n.symbol), []).append(n)
-
-    shown_keys, truncated = _capped(list(groups), limit)
-    results: list[dict[str, Any]] = []
-    for key in shown_keys:
-        members = groups[key]
-        entry = _node_dict(members[0], full_symbols=True)
-        if members[0].scip_kind is not None:
-            # Fine-grained SCIP kind (kind-patched binary, `has_symbol_kind`);
-            # absent when the graph carries none — never null.
-            entry["scip_kind"] = members[0].scip_kind
-        if has_external_symbols:
-            # External-package classification (`has_external_symbols`):
-            # true/false/null on every result — null meaning "no
-            # SymbolInformation from either source", never omitted. A grouped
-            # entry carries the arms' shared value, null when they disagree
-            # (never one arm's value picked silently).
-            classifications = {m.is_out_of_project for m in members}
-            entry["is_out_of_project"] = (
-                next(iter(classifications)) if len(classifications) == 1 else None
-            )
-        if len(members) > 1:
-            # An overload set: keep every signature's exact symbol + site, plus a
-            # source-derived parameter signature so the arms are distinguishable.
-            entry["overloads"] = len(members)
-            sigs: list[dict[str, Any]] = []
-            for m in members:
-                d = _node_dict(m, full_symbols=True)
-                if m.scip_kind is not None:
-                    d["scip_kind"] = m.scip_kind
-                if has_external_symbols:
-                    d["is_out_of_project"] = m.is_out_of_project
-                sig = extract_signature(root, m.file, m.line)
-                if sig:
-                    d["signature"] = sig
-                sigs.append(d)
-            entry["signatures"] = sigs
-        results.append(entry)
-
-    result = {
-        "query": query,
-        "total": len(matches),
-        "groups": len(groups),
-        "truncated": truncated,
-        "results": results,
-    }
-    if relaxation == "fuzzy":
-        result["relaxed"] = True
-        result["note"] = (
-            f"no exact match for {query!r}; matched case/separator-insensitively "
-            "(e.g. `changestream` ~ `change_stream` / `changeStream`)"
-        )
-    elif relaxation == "colon":
-        result["relaxed"] = True
-        result["relaxed_query"] = relaxed_query
-        result["note"] = (
-            f"no exact match for {query!r}; showing results for "
-            f"{relaxed_query!r} (C++ `::` normalized to SCIP's `#` member "
-            "separator)"
-        )
-    elif relaxation == "leaf":
-        result["relaxed"] = True
-        result["relaxed_query"] = relaxed_query
-        result["note"] = (
-            f"no exact match for {query!r}; showing results for the loosened "
-            f"name {relaxed_query!r} (the qualifier may be wrong — e.g. a free "
-            "function, not a method)"
-        )
-    if hide_trivial:
-        result["trivial_hidden"] = trivial_hidden
-    if include_paths or exclude_paths:
-        result["include_paths"] = include_paths
-        result["exclude_paths"] = exclude_paths
-    return result
 
 
 def _resolve(store: GraphStore, symbol: str) -> tuple[str | None, dict[str, Any] | None]:
