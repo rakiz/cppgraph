@@ -50,6 +50,41 @@ file), edges by relation (`calls` / `inherits` / `implements` / `references`);
 usage edges are thicker the more use sites a file has. Hover a node for its
 `file:line`.
 
+### Beyond the neighbourhood: `--mode path` and `--mode cycle`
+
+`view`/`export` (and the MCP `visualize`) also answer two structural questions
+directly, producing the same self-contained HTML / `graph.json` as above:
+
+- **`--mode path --dst <other>`** — "how do these two connect?": the shortest
+  `calls` chain between the symbol and `--dst` (required in this mode; a plain
+  name or exact SCIP string, resolved like the main symbol). `--expand-paths`
+  widens it to the **corridor**: every node/edge lying on *some* call path to
+  `--dst` (the chain is always inside it; siblings that don't reach `--dst` are
+  not). `--depth N` adds N context hops around every chain/corridor node
+  (default 0 — the pure answer, vs deps mode's 2-hop radius); `--limit N`
+  (default 40) caps the node count, chain/corridor nodes kept first.
+- **`--mode cycle`** — the multi-member **call cycle** containing the symbol
+  (the strongly-connected component of the `calls` graph): members as nodes,
+  every `calls` edge induced on them as links — the visual counterpart of
+  `cppgraph strongly-connected-components`. `--dst` is not used in this mode;
+  `--depth`/`--limit` behave exactly as in path mode.
+
+When there is no static chain, or the symbol sits in no multi-member cycle,
+nothing is rendered — the tools say so (`found: false` + a hint) instead of
+opening a near-empty picture, since the real flow may cross a virtual call or
+registered factory the static graph can't link.
+
+### Layering violations: `boundary-violations --out`
+
+`cppgraph boundary-violations --rule FROM:FORBIDDEN --out graph.json` checks
+your declared layering rules and, next to the stdout table, writes the
+violating edges as a `graph.json` for this viewer: nodes are every distinct
+endpoint of a violating edge, edges are the violations themselves. The MCP
+server exposes the same as the `visualize_boundary_violations` tool (rules as
+`[from, forbidden]` prefix pairs, e.g. `[["common/", "platform/"]]`; `limit`
+caps the list), so an LLM can pop the picture open for you. With **zero**
+violations nothing is written or opened — 0 is a clean outcome, not an error.
+
 ## The `graph.json` format
 
 `cppgraph export` writes the **graphify-compatible** schema on purpose:

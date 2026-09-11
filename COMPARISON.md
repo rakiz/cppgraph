@@ -35,7 +35,7 @@ a name.
 
 | Query | graphify | cppgraph | Serena / clangd |
 |---|---|---|---|
-| callers of the **method** `ChangeStreamEventTransformation::makeResumeToken` | **0** call edges | **3** (2 real overrides + 1 known decl false-positive) | **1** same-TU call site (see below) |
+| callers of the **method** `ChangeStreamEventTransformation::makeResumeToken` | **0** call edges | **2** real callers (the earlier stock-binary graph reported a 3rd, a decl false-positive — since fixed, see below) | **1** same-TU call site (see below) |
 | callers of the **free helper** `change_stream_test_helper::makeResumeToken` | **0** call edges | **122** (test code) | needs whole-repo index (never completed in 6 min) |
 | the two `makeResumeToken` kept distinct? | yes (file+class id) but with no call edges | **yes**, with correct separate caller sets | yes (compiler-grade) |
 | `Value` (common nested type) | **431** unrelated calls collapsed onto **one** node | hundreds of distinct `Value` symbols kept separate | distinct |
@@ -70,19 +70,25 @@ avoid.
 ## What cppgraph gets right
 
 Because edges come from the compiler's resolved symbol (USR), the two
-`makeResumeToken` symbols carry **separate, correct caller sets** (3 vs 122),
-`Value` stays hundreds of distinct symbols, and the transitive blast-radius
+`makeResumeToken` symbols carry **separate, correct caller sets** (2 vs 122 —
+the original stock-binary measurement saw 3, the decl false-positive fixed
+below), `Value` stays hundreds of distinct symbols, and the transitive blast-radius
 (`impact`) is one query returning 14 symbols. cppgraph also records **155 exact
 use-sites** for the *type* `ResumeTokenData` — a symbol with **zero** call
 edges, invisible to any call-graph, that a by-name tool collapses with every
 other `ResumeTokenData` mention.
 
-The one caveat we own: cppgraph reports **3** method callers where **2** are
-genuine — the third is a known false-positive from the nearest-preceding
-attribution heuristic against a member's in-class declaration. It's in the
-*safe* direction (over-, never under-report on real function-body calls), and is
-fixable once `scip-clang` emits `enclosing_range` (upstream PR #504). See
-`DESIGN.md` § "Building calls".
+The one caveat we *owned*: the original measurement reported **3** method
+callers where **2** are genuine — the third was a false-positive from the
+nearest-preceding attribution heuristic against a member's in-class
+declaration. It sat in the *safe* direction (over-, never under-report on real
+function-body calls), and it is **fixed**: our scip-clang patch
+`forward-definition-on-v0.4.0.patch` tags bodyless in-class declarations with
+SCIP's `ForwardDefinition` role so the builder drops them from the callable
+candidates — the graph now isolates exactly the **2** real callers. (A #504
+binary's `enclosing_range` protects the same case; a stock *official* binary,
+lacking both signals, keeps the over-capture.) See `DESIGN.md` § "Building
+calls".
 
 ## Serena (clangd / LSP) — measured, not assumed
 
@@ -97,8 +103,8 @@ checkout (same engine Serena's `find_referencing_symbols` uses), with mongo's
 
 - **`callHierarchy/incomingCalls` on the method** returned in **~2.7 s** — but
   with **1** caller: the direct, same-translation-unit call site. The full
-  override / virtual-dispatch caller set that cppgraph gives (3, of which 2 are
-  genuine) lives in *other* TUs and needs the whole-project index.
+  override / virtual-dispatch caller set that cppgraph gives (the **2** genuine
+  ones) lives in *other* TUs and needs the whole-project index.
 - **`textDocument/references`**, polled over a **6-minute** background-index
   warmup, stayed at **1 reference, 0 cross-TU** the entire time. clangd indexes
   MongoDB's ~6000 TUs lazily in the background; that index simply does not finish
@@ -216,7 +222,9 @@ name-collision that sinks a tree-sitter tool. grep dumps **156 lines / ~6,635
 tokens**, of which **3** are real call sites: **98% noise.** To trust those 3 you
 read around each of the 156 → **~110,857 tokens.** cppgraph: `find` (255 tok,
 splits the four apart) + `who_calls` on the method (153 tok) = **~408 tokens**,
-exactly the 3 callers. **272× leaner, and exact where grep is ambiguous.**
+exactly the callers (measured on the stock-binary graph: 3, incl. the decl
+false-positive above — since fixed, the graph returns exactly the **2** real
+ones, a few tokens fewer). **272× leaner, and exact where grep is ambiguous.**
 
 **Where cppgraph's own tokens go — the token-lean defaults.** Each fan-out hit
 could carry the raw 150-250-char SCIP symbol string; instead the tools ship a
