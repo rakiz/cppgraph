@@ -641,3 +641,83 @@ def test_cycle_mode_limit_truncates_and_reports(tmp_path: Path) -> None:
     }
     assert g["truncated"] is True
     assert g["total"] == 5
+
+
+# --- path/cycle context expansion must honour exclude_tests ---------------------
+
+
+C_TEST_CALLER = "cxx . . $ mongo/LoopTest#testCaller()."
+
+
+def _cycle_store_with_test_caller(tmp_path: Path) -> GraphStore:
+    """The cycle store plus a caller living in a TEST file that calls into the
+    cycle — a depth-1 context neighbour of member n1, never a member itself."""
+    graph = Graph()
+    for s, name, line, file in [
+        (C1, "n1", 1, "loop.cpp"),
+        (C2, "n2", 2, "loop.cpp"),
+        (C3, "n3", 3, "loop.cpp"),
+        (C_TEST_CALLER, "testCaller", 8, "tests/loop_test.cpp"),
+    ]:
+        graph.nodes[s] = Node(symbol=s, display_name=name, file=file, line=line)
+    for i, (src, dst) in enumerate(_CYCLE_EDGES):
+        graph.add_edge("calls", src, dst, file="loop.cpp", line=i + 1)
+    graph.add_edge("calls", C_TEST_CALLER, C1, file="tests/loop_test.cpp", line=8)
+    db = tmp_path / "cycle_test.db"
+    write_sqlite(graph, db)
+    return GraphStore(db)
+
+
+def test_cycle_mode_depth_exclude_tests_filters_test_context(tmp_path: Path) -> None:
+    # The context expansion (depth >= 1) must honour exclude_tests like every
+    # other view: a test-file caller one hop from a cycle member is pulled in
+    # by the neighbourhood walk, and must be dropped (node AND edge) when
+    # exclude_tests is set — while the core cycle itself is untouched.
+    from cppgraph.cli import build_export_json
+
+    store = _cycle_store_with_test_caller(tmp_path)
+    unfiltered = build_export_json(store, C1, mode="cycle", depth=1)
+    assert unfiltered is not None
+    assert C_TEST_CALLER in {n["id"] for n in unfiltered["nodes"]}  # fixture sanity
+
+    g = build_export_json(store, C1, mode="cycle", depth=1, exclude_tests=True)
+    assert g is not None
+    assert {n["id"] for n in g["nodes"]} == {C1, C2, C3}
+    assert {(lk["source"], lk["target"]) for lk in g["links"]} == set(_CYCLE_EDGES)
+    assert g["core_edges"] == 3  # the cycle proper — filtering must not touch it
+
+
+def test_path_mode_depth_exclude_tests_filters_test_context(tmp_path: Path) -> None:
+    # Same guarantee in path mode: the sibling lives in a TEST file, so with
+    # exclude_tests it must not survive the depth-1 context union (the chain
+    # itself is kept whole — exclude_tests never cuts the core).
+    from cppgraph.cli import build_export_json
+
+    graph = Graph()
+    for s, name, file in [
+        (P_SRC, "src", "f.cpp"),
+        (P_LEFT, "left", "f.cpp"),
+        (P_DST, "dst", "f.cpp"),
+        (P_SIB, "sibling", "tests/flow_test.cpp"),
+    ]:
+        graph.add_node(s, display_name=name)
+        graph.nodes[s].file = file
+    graph.add_edge("calls", P_SRC, P_LEFT, file="f.cpp", line=1)
+    graph.add_edge("calls", P_LEFT, P_DST, file="f.cpp", line=2)
+    graph.add_edge("calls", P_SRC, P_SIB, file="tests/flow_test.cpp", line=9)
+    db = tmp_path / "d_test.db"
+    write_sqlite(graph, db)
+    store = GraphStore(db)
+
+    unfiltered = build_export_json(store, P_SRC, mode="path", dst=P_DST, depth=1)
+    assert unfiltered is not None
+    assert P_SIB in {n["id"] for n in unfiltered["nodes"]}  # fixture sanity
+
+    g = build_export_json(store, P_SRC, mode="path", dst=P_DST, depth=1, exclude_tests=True)
+    assert g is not None
+    assert {n["id"] for n in g["nodes"]} == {P_SRC, P_LEFT, P_DST}
+    assert {(lk["source"], lk["target"]) for lk in g["links"]} == {
+        (P_SRC, P_LEFT),
+        (P_LEFT, P_DST),
+    }
+    assert g["core_edges"] == 2

@@ -334,20 +334,25 @@ def _expand_and_cap(
     direction: str,
     limit: int,
     truncated: bool = False,
+    exclude_tests: bool = False,
 ) -> dict:
     """The shared tail of the core-and-context export modes (`mode="path"`,
     `mode="cycle"`): with `depth > 0`, union every CORE node's neighbourhood
     (the same mixed-edge-kind walk `mode="deps"` uses, `GraphStore.subgraph`,
     honouring `direction`) into the result — only the core is expanded, the
     pulled-in context is not re-expanded, or one `depth` would flood outward
-    from the whole core. Then cap the merged node count at `limit` (core-first
-    order — the actual answer survives the cut, deterministically; remaining
-    budget goes to context nodes in discovery order) and drop every edge that
-    lost an endpoint to the cut. Returns the graphify dict with the
-    `truncated`/`total`/`core_edges` metadata keys attached (`core_edges` =
-    the core's own edge count before context expansion — the MCP reports it
-    as `hops`). `truncated` comes in True when the core computation itself was
-    already a lower bound (the corridor's internal BFS cap)."""
+    from the whole core. With `exclude_tests`, test / test-support nodes the
+    expansion pulls in (and the edges touching them) are dropped — the same
+    production-only filter `mode="deps"` applies; the CORE itself is never
+    filtered by it (the caller already decided that). Then cap the merged node
+    count at `limit` (core-first order — the actual answer survives the cut,
+    deterministically; remaining budget goes to context nodes in discovery
+    order) and drop every edge that lost an endpoint to the cut. Returns the
+    graphify dict with the `truncated`/`total`/`core_edges` metadata keys
+    attached (`core_edges` = the core's own edge count before context expansion
+    — the MCP reports it as `hops`). `truncated` comes in True when the core
+    computation itself was already a lower bound (the corridor's internal BFS
+    cap)."""
     core_edges = len(edges)
 
     if depth > 0:
@@ -355,6 +360,10 @@ def _expand_and_cap(
         seen = {(e.kind, e.src, e.dst, e.file, e.line) for e in edges}
         for core in list(nodes):
             sub_nodes, sub_edges = store.subgraph(core.symbol, depth=depth, direction=direction)
+            if exclude_tests:
+                kept = {n.symbol for n in sub_nodes if not is_test_file(n.file)}
+                sub_nodes = [n for n in sub_nodes if n.symbol in kept]
+                sub_edges = [e for e in sub_edges if e.src in kept and e.dst in kept]
             for sub in sub_nodes:
                 merged.setdefault(sub.symbol, sub)
             for sub in sub_edges:
@@ -405,10 +414,12 @@ def build_export_json(
     like `symbol` itself). `dst=None` here is a programmer error and raises
     `ValueError`. Returns None if either symbol is unknown; an EMPTY graph
     (0 nodes) when both are known but no static path exists — the caller can tell
-    the two apart. In this mode `exclude_tests` is deliberately ignored: the
+    the two apart. In this mode `exclude_tests` leaves the CORE untouched (the
     chain is computed over the whole graph, and dropping a node from its middle
     would silently break the connectivity — a path either exists as computed or
-    it doesn't. Two composable knobs:
+    it doesn't) but DOES apply to the context expansion: a test-file node the
+    `depth > 0` neighbourhood walk pulls in is dropped, like everywhere else.
+    Two composable knobs:
 
     - `expand_paths=False` (default): the single shortest `calls` chain.
       `expand_paths=True`: the CORRIDOR — every node/edge lying on *some*
@@ -435,8 +446,9 @@ def build_export_json(
     here and IGNORED (never required — a cycle is found from `symbol` alone; a
     caller that passes one gets it back untouched). Like `mode="path"`: unknown
     symbol -> None; a valid symbol in no multi-member cycle -> an EMPTY graph
-    (0 nodes). `exclude_tests` is ignored here as in path mode (dropping a
-    member would silently misstate the cycle). `depth`/`limit` behave exactly
+    (0 nodes). `exclude_tests` leaves the core cycle untouched as in path mode
+    (dropping a member would silently misstate the cycle) but applies to the
+    context expansion. `depth`/`limit` behave exactly
     as in `mode="path"` (see the knob above; default depth 0 — the pure cycle).
 
     In `mode="path"`/`mode="cycle"` the returned dict carries three extra
@@ -487,6 +499,7 @@ def build_export_json(
             direction=direction,
             limit=limit,
             truncated=truncated,
+            exclude_tests=exclude_tests,
         )
     if not store.has_symbol(symbol):
         return None
@@ -494,7 +507,15 @@ def build_export_json(
         nodes, edges = store.component_containing(symbol)
         if not nodes:
             return _empty_core_graph()
-        return _expand_and_cap(store, nodes, edges, depth=depth, direction=direction, limit=limit)
+        return _expand_and_cap(
+            store,
+            nodes,
+            edges,
+            depth=depth,
+            direction=direction,
+            limit=limit,
+            exclude_tests=exclude_tests,
+        )
     if mode == "usage":
         node = store.get_node(symbol)
         refs = store.references_of(symbol)

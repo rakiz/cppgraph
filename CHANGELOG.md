@@ -52,6 +52,17 @@ on-disk store also carries its own `schema_version` for forward-compatibility.
 
 ### Fixed
 
+- **`--exclude-tests` now reaches the path/cycle context expansion** — in
+  `mode="path"`/`mode="cycle"` with `depth > 0` (`export`/`view`/MCP
+  `visualize`), the depth-hop neighbourhood unioned around the core
+  chain/corridor/cycle pulled test-file nodes in even when `exclude_tests`
+  was set (the core itself was never filtered — by design — but the expansion
+  ignored the flag). The expansion now applies the same production-only filter
+  as deps mode (`is_test_file`): test nodes and edges touching them are
+  dropped from the context, while the core stays whole. Both surfaces are
+  fixed by the one shared `build_export_json` change; the core's
+  exclude_tests exemption is unchanged (and now documented as such).
+
 - **Path/corridor mode on `export`/`view`/MCP `visualize`** — `mode="path"`
   with `--dst <target>` renders how two symbols connect: the shortest
   `calls`-edge chain between them by default, `--expand-paths`/`expand_paths`

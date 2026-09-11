@@ -2377,6 +2377,41 @@ def test_visualize_tool_cycle_mode_depth_expands_context(tmp_path: Path) -> None
     assert r["hops"] == 4  # the cycle proper, unchanged by the context union
 
 
+def test_visualize_tool_cycle_mode_depth_exclude_tests_filters_test_context(tmp_path: Path) -> None:
+    """The MCP surface gets the exclude_tests guarantee for free (it delegates
+    to `build_export_json`): a test-file caller one hop from a cycle member is
+    dropped from the depth-1 context expansion — node and edge — while the core
+    cycle stays whole."""
+    from cppgraph.mcp_server import build_server
+
+    c1 = "cxx . . $ mongo/Loop#n1(a1)."
+    c2 = "cxx . . $ mongo/Loop#n2(a2)."
+    c3 = "cxx . . $ mongo/Loop#n3(a3)."
+    test_caller = "cxx . . $ mongo/LoopTest#testCaller()."
+    graph = Graph()
+    for sym, name, line, file in [
+        (c1, "n1", 1, "loop.cpp"),
+        (c2, "n2", 2, "loop.cpp"),
+        (c3, "n3", 3, "loop.cpp"),
+        (test_caller, "testCaller", 8, "tests/loop_test.cpp"),
+    ]:
+        graph.nodes[sym] = Node(symbol=sym, display_name=name, file=file, line=line)
+    for src, dst, line in [(c1, c2, 1), (c2, c3, 2), (c3, c1, 3)]:
+        graph.add_edge("calls", src, dst, file="loop.cpp", line=line)
+    graph.add_edge("calls", test_caller, c1, file="tests/loop_test.cpp", line=8)
+    db = tmp_path / "cycle_test.db"
+    write_sqlite(graph, db)
+    server = build_server(str(db))
+    viz = server._tool_manager._tools["visualize"].fn
+
+    unfiltered = viz("n1", mode="cycle", depth=1, open_browser=False)
+    assert unfiltered["nodes"] == 4 and unfiltered["edges"] == 4  # fixture sanity
+
+    r = viz("n1", mode="cycle", depth=1, exclude_tests=True, open_browser=False)
+    assert r["nodes"] == 3 and r["edges"] == 3  # the pure cycle, test caller gone
+    assert r["hops"] == 3
+
+
 def test_visualize_tool_cycle_mode_omitted_depth_stays_pure(tmp_path: Path) -> None:
     """Backward-compatibility guard (mirrors path mode's): the deps-mode depth
     default of 2 must NOT leak into cycle mode — omitting depth keeps the pure
