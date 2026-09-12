@@ -7,7 +7,7 @@
     "rebuild": "reindex",
     "patchset_version": 6
   },
-  "latest": "0.3.1",
+  "latest": "0.4.0",
   "releases": [
     {
       "version": "0.1.0",
@@ -32,6 +32,12 @@
       "rebuild": "none",
       "notes": "Bugfixes only — no schema change (still v5), safe to update in place. Fixes a signature-attribution bug (a field could render a neighbouring function/operator's signature) and CLI/MCP crashing with a raw traceback instead of a clean error on a too-new store schema. Sharper hint on ambiguous name resolution (type vs. member vs. operator candidates). Plus regression tests closing gaps found in a migration-test audit (store schema, scip-clang binary staleness, scip.proto compatibility). Full detail in `CHANGELOG.md`.",
       "url": "https://github.com/rakiz/cppgraph/releases/tag/v0.3.1"
+    },
+    {
+      "version": "0.4.0",
+      "rebuild": "none",
+      "notes": "No schema change (still v5), safe to update in place. CLI/MCP parity work (find gains --hide-trivial/--limit/--root and overload grouping; every hyphen/underscore subcommand now answers to both spellings) plus a full read-only codebase audit's findings: a real sweep-line attribution bug (co-starting nested definitions could misattribute a call/reference to the wrong enclosing symbol), stale docs (viz/README.md's missing path/cycle/boundary-violation modes, a resolved caller false-positive still described as open), dead code removed (Graph's unused in-memory query engine), a schema-compat perf anti-pattern replaced (get_node/find/references_of no longer probe legacy schemas via exception cascades), and a context-expansion filtering gap (--exclude-tests now reaches path/cycle mode's depth expansion). Full detail in `CHANGELOG.md`.",
+      "url": "https://github.com/rakiz/cppgraph/releases/tag/v0.4.0"
     }
   ]
 }

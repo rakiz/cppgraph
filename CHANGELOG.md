@@ -6,6 +6,14 @@ on-disk store also carries its own `schema_version` for forward-compatibility.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-13
+
+CLI/MCP parity work and a full read-only codebase audit's findings: a real
+sweep-line attribution bug, stale docs, a CLI naming inconsistency, dead
+code, a schema-compat perf anti-pattern, and a context-expansion filtering
+gap. No schema change (still v5) — this release is a pure code/doc update,
+safe to update in place (no rebuild/reindex needed).
+
 ### Added
 
 - **CLI `find` reaches MCP parity** — `cppgraph find` gains the flags the MCP
