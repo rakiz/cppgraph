@@ -40,6 +40,16 @@ on-disk store also carries its own `schema_version` for forward-compatibility.
   `GraphStore.component_containing()`, which reuses the existing Tarjan
   computation and shares `call_corridor`'s induced-edges SQL via a new
   `_induced_edges()` helper.
+- **Path/corridor mode on `export`/`view`/MCP `visualize`** — `mode="path"`
+  with `--dst <target>` renders how two symbols connect: the shortest
+  `calls`-edge chain between them by default, `--expand-paths`/`expand_paths`
+  for the full corridor (every node/edge lying on *some* path between the
+  two, computed as a safe forward∩backward BFS intersection — never an
+  exponential path enumeration; the shortest chain is always inside the
+  corridor). `depth`/`direction` are repurposed in path mode as a
+  context-expansion radius (backward-compatible: they default to 0 — the
+  pure chain/corridor — unless explicitly requested), and `limit` caps the
+  merged result with `truncated`/`total` reporting when it was cut.
 - **MCP `visualize_boundary_violations`** — the visual counterpart of
   `boundary_violations`: the edges crossing your declared layering rules
   rendered as a self-contained HTML graph (nodes = every distinct endpoint
@@ -62,17 +72,6 @@ on-disk store also carries its own `schema_version` for forward-compatibility.
   dropped from the context, while the core stays whole. Both surfaces are
   fixed by the one shared `build_export_json` change; the core's
   exclude_tests exemption is unchanged (and now documented as such).
-
-- **Path/corridor mode on `export`/`view`/MCP `visualize`** — `mode="path"`
-  with `--dst <target>` renders how two symbols connect: the shortest
-  `calls`-edge chain between them by default, `--expand-paths`/`expand_paths`
-  for the full corridor (every node/edge lying on *some* path between the
-  two, computed as a safe forward∩backward BFS intersection — never an
-  exponential path enumeration; the shortest chain is always inside the
-  corridor). `depth`/`direction` are repurposed in path mode as a
-  context-expansion radius (backward-compatible: they default to 0 — the
-  pure chain/corridor — unless explicitly requested), and `limit` caps the
-  merged result with `truncated`/`total` reporting when it was cut.
 
 - **MCP `visualize` didn't resolve plain names** — the one MCP tool that bypassed
   `_resolve()` entirely, unlike every other tool and unlike the CLI's equivalent

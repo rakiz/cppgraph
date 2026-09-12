@@ -27,7 +27,7 @@ def test_reference_doc_tables_match_the_real_subparsers():
     mod = _generator()
     facts = mod.command_facts()
 
-    # the introspection sees the real command set (30 parsers, one aliased)
+    # the introspection sees the real command set (30 parsers, 12 aliased)
     assert "find" in facts and "view" in facts
     assert facts["init"].aliases == ("index",)
     assert len(facts) >= 29
