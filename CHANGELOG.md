@@ -6,7 +6,9 @@ on-disk store also carries its own `schema_version` for forward-compatibility.
 
 ## [Unreleased]
 
-### Added
+## [0.4.1] - 2026-09-16
+
+### Fixed
 
 - **CLI `update --rescope` widens the recorded index scope without a full
   rebuild** — the partial-upgrade path `update` lacked: it could only follow git

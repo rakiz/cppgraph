@@ -7,7 +7,7 @@
     "rebuild": "reindex",
     "patchset_version": 6
   },
-  "latest": "0.4.0",
+  "latest": "0.4.1",
   "releases": [
     {
       "version": "0.1.0",
@@ -38,6 +38,12 @@
       "rebuild": "none",
       "notes": "No schema change (still v5), safe to update in place. CLI/MCP parity work (find gains --hide-trivial/--limit/--root and overload grouping; every hyphen/underscore subcommand now answers to both spellings) plus a full read-only codebase audit's findings: a real sweep-line attribution bug (co-starting nested definitions could misattribute a call/reference to the wrong enclosing symbol), stale docs (viz/README.md's missing path/cycle/boundary-violation modes, a resolved caller false-positive still described as open), dead code removed (Graph's unused in-memory query engine), a schema-compat perf anti-pattern replaced (get_node/find/references_of no longer probe legacy schemas via exception cascades), and a context-expansion filtering gap (--exclude-tests now reaches path/cycle mode's depth expansion). Full detail in `CHANGELOG.md`.",
       "url": "https://github.com/rakiz/cppgraph/releases/tag/v0.4.0"
+    },
+    {
+      "version": "0.4.1",
+      "rebuild": "none",
+      "notes": "No schema change (still v5), safe to update in place. Adds `update --rescope`: widens a graph's recorded index scope (a wider subtree filter and/or turning tests on) by re-indexing only the newly in-scope translation units, instead of requiring a full `init --from-scratch` reindex. Widening only — a narrowing or an orthogonal filter change is refused with a pointer to a full rebuild. Verified end-to-end against a real scip-clang run, not just mocked unit tests. Full detail in `CHANGELOG.md`.",
+      "url": "https://github.com/rakiz/cppgraph/releases/tag/v0.4.1"
     }
   ]
 }
