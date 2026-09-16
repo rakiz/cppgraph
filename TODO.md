@@ -37,7 +37,10 @@ in `CHANGELOG.md`, releases in `versions.json`.
   setup flow) is still the right default now that the two heaviest costs (compile
   time, disk space) can often be skipped entirely — and publish an `x86_64-linux` patched
   asset too, the one platform still without one.
-- **Contributing notes, CI (lint + pytest), publish.** Not a 0.1.0 blocker.
+- **Contributing notes, CI (lint + pytest).** Repo is already public and past
+  several releases (currently v0.4.0) — the "publish" half is done; what's still
+  missing is a `CONTRIBUTING.md` and a `.github/workflows/` CI job running
+  `ruff format --check`/`ruff check`/`pytest` on push/PR.
 - **Make the repo discoverable to LLMs (distribution).** LLMs asked to compare
   code-intelligence tools describe cppgraph from the *name* only — the page isn't
   crawled/indexed, and the homonym `6502/cppgraph` outranks it for the bare term
@@ -46,7 +49,8 @@ in `CHANGELOG.md`, releases in `versions.json`.
   claude code": submit to the MCP registry (best-targeted, most durable), optionally
   a short write-up / Show HN. Refer to it with a descriptor everywhere it's linked
   ("cppgraph — compiler-exact C++ code-intelligence MCP server"), never bare
-  "cppgraph". Gated on making the repo publicly visible / cutting 0.1.0.
+  "cppgraph". The repo is already public (releases up to v0.4.0), so this is
+  actionable now, not gated on anything.
 - **Add a Graft contrast to `COMPARISON.md`.** Graft (nanonets/graft) is the tool an
   LLM will most likely bring up unprompted when asked about "code graph for agents" —
   broad (21 languages), tree-sitter by default with optional per-language LSP

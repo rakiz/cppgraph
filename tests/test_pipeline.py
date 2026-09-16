@@ -304,3 +304,376 @@ def test_run_scip_clang_nonzero_exit_still_raises_pipeline_error(
         assert "status 3" in str(e)
     else:
         raise AssertionError("expected PipelineError on nonzero scip-clang exit")
+
+
+# ---- rescope_update: widening the recorded scope without a full rebuild --------
+#
+# The fakes follow test_incremental_update_matches_status_on_dirty_fingerprints:
+# scip-clang is "present" (os.access patched) and the partial index it produces
+# carries one definition per compdb entry, named after the file stem, so tests
+# can assert exactly which TUs entered the graph.
+
+
+def _scoped_store(db: Path, *, src_filter: str, tests: str, commit: str | None = None) -> None:
+    """An empty store whose recorded scope is `src_filter` / tests `tests`."""
+    index = scip_pb2.Index(metadata=scip_pb2.Metadata(project_root="file:///repo"))
+    meta = build_provenance(
+        index,
+        source_commit=commit or "a" * 40,
+        index_filter=src_filter,
+        index_excludes_tests=tests == "excluded",
+    )
+    write_sqlite(Graph(), db, meta=meta)
+
+
+def _fake_rescope_run_scip_clang(reindexed: list[list[str]]):
+    """A run_scip_clang stand-in recording each run's compdb files and emitting a
+    partial index defining `<stem>_sym()` per entry."""
+
+    def _run(project_root, compdb_path, out_scip, *, total_tus=None, print_fn=print):
+        data = json.loads(compdb_path.read_text())
+        reindexed.append([e["file"] for e in data])
+        idx = scip_pb2.Index(metadata=scip_pb2.Metadata(project_root=f"file://{project_root}"))
+        for e in data:
+            stem = Path(e["file"]).stem
+            doc = idx.documents.add(relative_path=e["file"])
+            occ = doc.occurrences.add(
+                symbol=f"cxx . . $ {stem}_sym()",
+                symbol_roles=scip_pb2.SymbolRole.Definition,
+            )
+            occ.range.extend([0, 0, 5])
+        out_scip.write_bytes(idx.SerializeToString())
+
+    return _run
+
+
+def _rescope_env(tmp_path: Path, monkeypatch, entries: list[dict]) -> tuple[Path, list[list[str]]]:
+    """scip-clang patched to exist + the fake partial-index producer wired in.
+    Writes `entries` to a compdb in `tmp_path`; returns `(compdb_path, reindexed)`."""
+    monkeypatch.setattr(pipeline.os, "access", lambda *a, **k: True)
+    reindexed: list[list[str]] = []
+    monkeypatch.setattr(pipeline, "run_scip_clang", _fake_rescope_run_scip_clang(reindexed))
+    compdb = tmp_path / "cc.json"
+    compdb.write_text(json.dumps(entries))
+    return compdb, reindexed
+
+
+def test_rescope_widens_filter_and_indexes_only_new_tus(tmp_path: Path, monkeypatch) -> None:
+    """A valid filter widening (the new filter is a substring of the recorded one)
+    re-indexes exactly the TUs the wider scope adds — not the already-in-scope
+    ones, not the still-out-of-scope ones — and records the new scope in meta."""
+    db = tmp_path / "proj.graph.db"
+    _scoped_store(db, src_filter="src/foo/bar", tests="excluded")
+    compdb, reindexed = _rescope_env(
+        tmp_path,
+        monkeypatch,
+        [
+            {"file": "/repo/src/foo/bar/old.cpp"},  # already in scope
+            {"file": "/repo/src/foo/new.cpp"},  # newly in scope
+            {"file": "/repo/src/other/never.cpp"},  # still out of scope
+        ],
+    )
+
+    rc = pipeline.rescope_update(
+        graph_db=db,
+        compdb=compdb,
+        project_root=tmp_path,
+        new_filter="src/foo",
+        print_fn=lambda *a: None,
+    )
+    assert rc == 0
+    assert reindexed == [["/repo/src/foo/new.cpp"]]
+    store = GraphStore(db)
+    try:
+        meta = store.meta()
+        assert meta["index_filter"] == "src/foo"
+        assert store.has_symbol("cxx . . $ new_sym()")
+        assert not store.has_symbol("cxx . . $ never_sym()")
+    finally:
+        store.close()
+
+
+def test_rescope_includes_previously_excluded_tests(tmp_path: Path, monkeypatch) -> None:
+    """Tests excluded -> included widens the scope: a test TU that already matched
+    the recorded filter but was dropped by the tests state is the only newly
+    in-scope TU, and meta.index_tests flips to \"included\"."""
+    db = tmp_path / "proj.graph.db"
+    _scoped_store(db, src_filter="src", tests="excluded")
+    compdb, reindexed = _rescope_env(
+        tmp_path,
+        monkeypatch,
+        [
+            {"file": "/repo/src/a.cpp"},  # already in scope
+            {"file": "/repo/src/a_test.cpp"},  # filter-matched, tests-excluded until now
+        ],
+    )
+
+    rc = pipeline.rescope_update(
+        graph_db=db,
+        compdb=compdb,
+        project_root=tmp_path,
+        include_tests=True,
+        print_fn=lambda *a: None,
+    )
+    assert rc == 0
+    assert reindexed == [["/repo/src/a_test.cpp"]]
+    store = GraphStore(db)
+    try:
+        meta = store.meta()
+        assert meta["index_filter"] == "src"  # untouched
+        assert meta["index_tests"] == "included"
+        assert store.has_symbol("cxx . . $ a_test_sym()")
+    finally:
+        store.close()
+
+
+def test_rescope_widens_filter_and_tests_together(tmp_path: Path, monkeypatch) -> None:
+    """Both widenings in one call: the newly in-scope set is the union (wider
+    filter OR tests no longer dropped), one partial index covers it, and both
+    meta keys move."""
+    db = tmp_path / "proj.graph.db"
+    _scoped_store(db, src_filter="src/foo/bar", tests="excluded")
+    compdb, reindexed = _rescope_env(
+        tmp_path,
+        monkeypatch,
+        [
+            {"file": "/repo/src/foo/bar/old.cpp"},  # already in scope
+            {"file": "/repo/src/foo/new.cpp"},  # filter widening
+            {"file": "/repo/src/foo/b_test.cpp"},  # test TU: filter-widened AND tests
+            {"file": "/repo/src/x_test.cpp"},  # test TU outside the new filter
+        ],
+    )
+
+    rc = pipeline.rescope_update(
+        graph_db=db,
+        compdb=compdb,
+        project_root=tmp_path,
+        new_filter="src/foo",
+        include_tests=True,
+        print_fn=lambda *a: None,
+    )
+    assert rc == 0
+    assert sorted(reindexed[0]) == ["/repo/src/foo/b_test.cpp", "/repo/src/foo/new.cpp"]
+    store = GraphStore(db)
+    try:
+        meta = store.meta()
+        assert meta["index_filter"] == "src/foo"
+        assert meta["index_tests"] == "included"
+        assert store.has_symbol("cxx . . $ new_sym()")
+        assert store.has_symbol("cxx . . $ b_test_sym()")
+        assert not store.has_symbol("cxx . . $ x_test_sym()")
+    finally:
+        store.close()
+
+
+def test_rescope_records_scope_even_with_no_new_tus(tmp_path: Path, monkeypatch) -> None:
+    """A real widening the compdb can't fill (no file outside the old scope):
+    nothing is re-indexed, but the recorded scope must still move — a later
+    plain `update` filters by meta, and would keep filtering with the old one."""
+    db = tmp_path / "proj.graph.db"
+    _scoped_store(db, src_filter="src/foo/bar", tests="excluded")
+    compdb, reindexed = _rescope_env(
+        tmp_path,
+        monkeypatch,
+        [{"file": "/repo/src/foo/bar/old.cpp"}],  # nothing new under src/foo
+    )
+
+    rc = pipeline.rescope_update(
+        graph_db=db,
+        compdb=compdb,
+        project_root=tmp_path,
+        new_filter="src/foo",
+        print_fn=lambda *a: None,
+    )
+    assert rc == 0
+    assert reindexed == []  # no scip-clang run at all
+    store = GraphStore(db)
+    try:
+        assert store.meta()["index_filter"] == "src/foo"
+    finally:
+        store.close()
+
+
+def test_rescope_rejects_filter_narrowing(tmp_path: Path, monkeypatch) -> None:
+    """A new filter that is not a substring of the recorded one (a narrowing, or
+    an orthogonal change) is refused with a clear error — no re-index, meta
+    untouched — pointing at `init --from-scratch`."""
+    db = tmp_path / "proj.graph.db"
+    _scoped_store(db, src_filter="src/foo", tests="excluded")
+    compdb, reindexed = _rescope_env(
+        tmp_path,
+        monkeypatch,
+        [{"file": "/repo/src/foo/a.cpp"}, {"file": "/repo/src/foo/bar/b.cpp"}],
+    )
+
+    def quiet(*a: object) -> None:
+        pass
+
+    # narrowing: a deeper subtree
+    rc = pipeline.rescope_update(
+        graph_db=db,
+        compdb=compdb,
+        project_root=tmp_path,
+        new_filter="src/foo/bar",
+        print_fn=quiet,
+    )
+    assert rc == 1
+    # orthogonal: a different subtree
+    rc = pipeline.rescope_update(
+        graph_db=db,
+        compdb=compdb,
+        project_root=tmp_path,
+        new_filter="src/other",
+        print_fn=quiet,
+    )
+    assert rc == 1
+    # narrowing from the whole tree: any subtree filter shrinks it
+    _scoped_store(tmp_path / "whole.graph.db", src_filter="", tests="excluded")
+    rc = pipeline.rescope_update(
+        graph_db=tmp_path / "whole.graph.db",
+        compdb=compdb,
+        project_root=tmp_path,
+        new_filter="src",
+        print_fn=quiet,
+    )
+    assert rc == 1
+
+    assert reindexed == []  # never re-indexed on a refused rescope
+    store = GraphStore(db)
+    try:
+        assert store.meta()["index_filter"] == "src/foo"  # untouched
+    finally:
+        store.close()
+
+
+def test_rescope_rejects_tests_included_to_excluded(tmp_path: Path, monkeypatch) -> None:
+    """Turning tests OFF is a narrowing (already-indexed test TUs would have to be
+    removed) — refused, not attempted."""
+    db = tmp_path / "proj.graph.db"
+    _scoped_store(db, src_filter="src", tests="included")
+    compdb, reindexed = _rescope_env(tmp_path, monkeypatch, [{"file": "/repo/src/a_test.cpp"}])
+
+    rc = pipeline.rescope_update(
+        graph_db=db,
+        compdb=compdb,
+        project_root=tmp_path,
+        include_tests=False,
+        print_fn=lambda *a: None,
+    )
+    assert rc == 1
+    assert reindexed == []
+    store = GraphStore(db)
+    try:
+        assert store.meta()["index_tests"] == "included"  # untouched
+    finally:
+        store.close()
+
+
+def test_rescope_rejects_when_nothing_to_widen(tmp_path: Path, monkeypatch) -> None:
+    """A rescope that wouldn't change the scope is refused with a clear \"nothing
+    to widen\" error: no request at all, a filter identical to the recorded one,
+    or --include-tests when tests are already included."""
+    db = tmp_path / "proj.graph.db"
+    _scoped_store(db, src_filter="src", tests="excluded")
+    compdb, reindexed = _rescope_env(tmp_path, monkeypatch, [{"file": "/repo/src/a.cpp"}])
+
+    def quiet(*a: object) -> None:
+        pass
+
+    # no widening requested at all
+    assert (
+        pipeline.rescope_update(graph_db=db, compdb=compdb, project_root=tmp_path, print_fn=quiet)
+        == 1
+    )
+    # a filter identical to the recorded one is not a widening
+    assert (
+        pipeline.rescope_update(
+            graph_db=db,
+            compdb=compdb,
+            project_root=tmp_path,
+            new_filter="src",
+            print_fn=quiet,
+        )
+        == 1
+    )
+    # tests already included: asking again is not a widening
+    _scoped_store(tmp_path / "tests_in.graph.db", src_filter="src", tests="included")
+    assert (
+        pipeline.rescope_update(
+            graph_db=tmp_path / "tests_in.graph.db",
+            compdb=compdb,
+            project_root=tmp_path,
+            include_tests=True,
+            print_fn=quiet,
+        )
+        == 1
+    )
+
+    assert reindexed == []
+    store = GraphStore(db)
+    try:
+        meta = store.meta()
+        assert meta["index_filter"] == "src"
+        assert meta["index_tests"] == "excluded"
+    finally:
+        store.close()
+
+
+def test_rescope_lets_plain_update_see_new_scope(tmp_path: Path, monkeypatch) -> None:
+    """The point of the meta flip: before a rescope, plain `update` filters a
+    drifted test TU right back out; after it, the same drift is picked up."""
+
+    def git(*a: str) -> sp.CompletedProcess:
+        return sp.run(["git", "-C", str(tmp_path), *a], check=True, capture_output=True, text=True)
+
+    git("init", "-q")
+    git("config", "user.email", "t@example.com")
+    git("config", "user.name", "t")
+    src = tmp_path / "src"
+    src.mkdir()
+    main_cpp = src / "a.cpp"
+    test_cpp = src / "a_test.cpp"
+    main_cpp.write_text("int a() { return 0; }\n")
+    test_cpp.write_text("int t() { return 0; }\n")
+    git("add", "-A")
+    git("commit", "-q", "-m", "init")
+    commit = git("rev-parse", "HEAD").stdout.strip()
+
+    db = tmp_path / "proj.graph.db"
+    _scoped_store(db, src_filter="src", tests="excluded", commit=commit)
+    compdb, reindexed = _rescope_env(
+        tmp_path, monkeypatch, [{"file": str(main_cpp)}, {"file": str(test_cpp)}]
+    )
+
+    def quiet(*a: object) -> None:
+        pass
+
+    # Before the rescope: the test TU drifted, but the recorded scope (tests
+    # excluded) filters it out — plain `update` re-indexes nothing.
+    test_cpp.write_text("int t() { return 1; }\n")
+    rc = pipeline.incremental_update(
+        graph_db=db, compdb=compdb, project_root=tmp_path, print_fn=quiet
+    )
+    assert rc == 0
+    assert reindexed == []
+
+    # The rescope widens to tests-included; the drifted test TU is newly in
+    # scope and gets indexed (at its current content).
+    rc = pipeline.rescope_update(
+        graph_db=db,
+        compdb=compdb,
+        project_root=tmp_path,
+        include_tests=True,
+        print_fn=quiet,
+    )
+    assert rc == 0
+    assert reindexed == [[str(test_cpp)]]
+
+    # After the rescope: the same kind of drift is no longer filtered — plain
+    # `update` (no rescope flags) picks the test TU up.
+    test_cpp.write_text("int t() { return 2; }\n")
+    rc = pipeline.incremental_update(
+        graph_db=db, compdb=compdb, project_root=tmp_path, print_fn=quiet
+    )
+    assert rc == 0
+    assert reindexed[-1] == [str(test_cpp)]

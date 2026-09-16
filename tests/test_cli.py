@@ -890,6 +890,90 @@ def test_update_with_no_args_auto_discovers_and_runs_incremental_update(
     assert reindexed == [[str(src)]]
 
 
+def test_update_rescope_rejects_flag_combinations(tmp_path: Path) -> None:
+    """--filter/--include-tests exist only for --rescope, and --rescope never
+    combines with --scip (two distinct update modes) — both are parser errors."""
+    graph = Graph()
+    db = tmp_path / "graph.db"
+    write_sqlite(graph, db)
+
+    with pytest.raises(SystemExit) as exc:
+        main(["update", "--graph", str(db), "--filter", "src"])
+    assert exc.value.code == 2
+    with pytest.raises(SystemExit) as exc:
+        main(["update", "--graph", str(db), "--include-tests"])
+    assert exc.value.code == 2
+    with pytest.raises(SystemExit) as exc:
+        main(["update", "--graph", str(db), "--rescope", "--scip", "partial.scip"])
+    assert exc.value.code == 2
+
+
+def test_update_rescope_auto_discovers_and_widens_scope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`cppgraph update --rescope [--include-tests]` is the rescope entry point:
+    same graph + compdb auto-discovery as a plain update, then the pipeline's
+    rescope_update runs instead of incremental_update."""
+    import subprocess as sp
+
+    from cppgraph import pipeline
+    from cppgraph.store import build_provenance
+
+    def git(*a: str) -> sp.CompletedProcess:
+        return sp.run(["git", "-C", str(tmp_path), *a], check=True, capture_output=True, text=True)
+
+    git("init", "-q")
+    git("config", "user.email", "t@example.com")
+    git("config", "user.name", "t")
+    (tmp_path / "src").mkdir()
+    src = tmp_path / "src" / "a.cpp"
+    src.write_text("int a() {}\n")
+    test_src = tmp_path / "src" / "a_test.cpp"
+    test_src.write_text("int t() {}\n")
+    # Repo-relative compdb paths: the scope is a plain substring of the entry's
+    # "file", here "src".
+    (tmp_path / "compile_commands.json").write_text(
+        json.dumps([{"file": "src/a.cpp"}, {"file": "src/a_test.cpp"}])
+    )
+    git("add", "-A")
+    git("commit", "-q", "-m", "init")
+    commit = git("rev-parse", "HEAD").stdout.strip()
+
+    cpg = tmp_path / ".cppgraph"
+    cpg.mkdir()
+    index = scip_pb2.Index(metadata=scip_pb2.Metadata(project_root=f"file://{tmp_path}"))
+    meta = build_provenance(
+        index, source_commit=commit, index_filter="src", index_excludes_tests=True
+    )
+    write_sqlite(Graph(), cpg / "proj.graph.db", meta=meta)
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(pipeline.os, "access", lambda *a, **k: True)  # pretend scip-clang exists
+    reindexed: list[list[str]] = []
+
+    def _fake_run_scip_clang(
+        project_root, compdb_path, out_scip, *, total_tus=None, print_fn=print
+    ):
+        data = json.loads(compdb_path.read_text())
+        reindexed.append([e["file"] for e in data])
+        empty = scip_pb2.Index()
+        empty.metadata.project_root = f"file://{project_root}"
+        out_scip.write_bytes(empty.SerializeToString())
+
+    monkeypatch.setattr(pipeline, "run_scip_clang", _fake_run_scip_clang)
+
+    assert main(["update", "--rescope", "--include-tests"]) == 0
+    # Only the test TU is newly in scope (src/a.cpp already matched the filter).
+    assert reindexed == [["src/a_test.cpp"]]
+    store = GraphStore(cpg / "proj.graph.db")
+    try:
+        meta = store.meta()
+        assert meta["index_filter"] == "src"
+        assert meta["index_tests"] == "included"
+    finally:
+        store.close()
+
+
 def test_update_with_explicit_graph_uses_recorded_project_root(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

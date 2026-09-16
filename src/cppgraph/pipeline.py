@@ -459,3 +459,158 @@ def incremental_update(
     )
     print_fn(f"Done. {graph_db} (updated in place)")
     return 0
+
+
+def rescope_update(
+    *,
+    graph_db: Path,
+    compdb: Path,
+    project_root: Path,
+    new_filter: str | None = None,
+    include_tests: bool | None = None,
+    print_fn=print,
+) -> int:
+    """Widen the store's recorded index scope in place, indexing only the newly
+    in-scope translation units — the partial upgrade path plain `update` never
+    had (it only follows git drift *inside* the scope it was built with; widening
+    used to require `init --from-scratch`, a full reindex).
+
+    `new_filter` is the wanted subtree substring (None = keep the recorded one,
+    "" = whole tree); `include_tests` is the wanted tests state (None = keep,
+    True = include, False = exclude — refused unless the recorded state already
+    is "excluded", where it would be a no-op). Because scope is a plain
+    substring containment (`filter_compdb`), the only valid widenings are the
+    empty filter or a substring of the recorded one, and excluded→included for
+    tests; anything else (narrowing, an orthogonal change, included→excluded)
+    would mean *removing* already-indexed files from the graph, so it is refused
+    with a pointer to `init --from-scratch` instead of attempted. Widening
+    filter and tests in one call is fine.
+
+    The compdb is read whole (the project's original, not the store's filtered
+    subset) and the entries matching the NEW scope but not the OLD one are
+    re-indexed into a partial index applied via `update_store`
+    (`deleted_files` is empty — rescope only adds). The new scope is stamped
+    into `meta` (`index_filter`/`index_tests`) so subsequent plain `update`
+    calls stop filtering the newly in-scope files out. Returns a process-style
+    exit code."""
+    if not os.access(scip_clang_path(), os.X_OK):
+        print_fn(
+            "  error: rescope needs a native scip-clang to index the newly in-scope "
+            "TUs, absent on this platform. Do a full rebuild (it can reuse a "
+            "container-built .scip)."
+        )
+        return 1
+
+    store = GraphStore(graph_db)
+    try:
+        meta = store.meta()
+    finally:
+        store.close()
+    old_filter = meta.get("index_filter", "")
+    old_tests = meta.get("index_tests", "?")
+    old_excludes_tests = old_tests == "excluded"
+
+    # Widening only, in the substring-containment model `filter_compdb` uses: a
+    # file is in scope iff the filter is a substring of its path, so every path
+    # matching the old filter also matches the new one iff the new filter is ""
+    # (whole tree) or a substring of the old one (empty `in` is trivially True).
+    filter_changed = new_filter is not None and new_filter != old_filter
+    if filter_changed and new_filter not in old_filter:
+        print_fn(
+            f"  error: cannot rescope the filter from {old_filter or '<whole tree>'!r} to "
+            f"{new_filter!r}: the new filter would drop already-indexed files — it is not "
+            "a widening (a filter is a plain substring of each compdb path, so widening "
+            "means the new filter is empty or a substring of the recorded one). Narrowing "
+            "or an orthogonal change needs a full rebuild: `cppgraph init --from-scratch`."
+        )
+        return 1
+    if include_tests is False and not old_excludes_tests:
+        print_fn(
+            f"  error: cannot rescope tests from {old_tests} to excluded: that narrows "
+            "the scope (already-indexed test TUs would have to be removed from the "
+            "graph). Narrowing needs a full rebuild: `cppgraph init --from-scratch`."
+        )
+        return 1
+    tests_widened = bool(include_tests) and old_excludes_tests
+    if not filter_changed and not tests_widened:
+        print_fn(
+            f"  error: nothing to widen — the requested scope matches the recorded one "
+            f"({old_filter or '<whole tree>'}, tests {old_tests}). Pass --filter (empty "
+            "or a substring of the recorded filter) and/or --include-tests (when tests "
+            "are currently excluded)."
+        )
+        return 1
+    new_filter_final = old_filter if new_filter is None else new_filter
+    final_tests = "included" if tests_widened else old_tests
+    final_excludes_tests = final_tests == "excluded"
+
+    out_dir = prepare_out_dir(project_root)
+    name = graph_db.name
+    for suffix in (".graph.db", ".db"):
+        if name.endswith(suffix):
+            name = name[: -len(suffix)]
+            break
+    part_compdb = out_dir / f"{name}.rescope.compdb.json"
+    part_scip = out_dir / f"{name}.rescope.scip"
+
+    print_fn(
+        f"  indexed scope: {old_filter or '<whole tree>'} (tests {old_tests}) -> "
+        f"{new_filter_final or '<whole tree>'} (tests {final_tests})"
+    )
+
+    def _in_scope(file_path: str, src_filter: str, excludes_tests: bool) -> bool:
+        if src_filter and src_filter not in file_path:
+            return False
+        return not (excludes_tests and is_test_file(file_path))
+
+    print_fn("[1/3] Filtering compile_commands.json for newly in-scope TUs ...")
+    data = json.loads(compdb.read_text())
+    newly = [
+        e
+        for e in data
+        if _in_scope(e["file"], new_filter_final, final_excludes_tests)
+        and not _in_scope(e["file"], old_filter, old_excludes_tests)
+    ]
+    part_compdb.write_text(json.dumps(newly))
+    print_fn(f"  {len(newly)} newly in-scope TU(s) matched in the compdb")
+
+    print_fn(f"[2/3] Re-indexing the {len(newly)} newly in-scope TU(s) ...")
+    if newly:
+        try:
+            run_scip_clang(
+                project_root, part_compdb, part_scip, total_tus=len(newly), print_fn=print_fn
+            )
+        except PipelineError as e:
+            print_fn(f"  error: {e}")
+            return 1
+    else:
+        # A real widening the compdb can't fill (e.g. a wider filter under which
+        # no additional file exists): no TU to index, but the recorded scope must
+        # move all the same — a later `update` filters by `meta`, not by what's
+        # in the graph, so leaving the old scope would keep the files filtered out.
+        print_fn("  no new TU to index; writing an empty partial index for the scope flip.")
+        empty = scip_pb2.Index()
+        empty.metadata.project_root = f"file://{project_root}"
+        part_scip.write_bytes(empty.SerializeToString())
+
+    print_fn(f"[3/3] Applying the rescope index to {graph_db} ...")
+    partial = scip_pb2.Index()
+    with open(part_scip, "rb") as f:
+        partial.ParseFromString(f.read())
+    new_commit, new_dirty = git_head(project_root)
+    _present, variant = scip_clang_info()
+    upd_meta = build_provenance(
+        partial,
+        source_commit=new_commit,
+        source_dirty=new_dirty or None,
+        scip_variant=variant,
+        index_filter=new_filter_final,  # the widened scope, for future updates
+        index_excludes_tests=final_excludes_tests,
+    )
+    stats = update_store(graph_db, partial, deleted_files=(), meta=upd_meta)
+    print_fn(
+        f"  updated {stats.files_changed} file(s): -{stats.edges_removed}/+{stats.edges_added} "
+        f"edges -> {stats.node_count} nodes, {stats.edge_count} edges"
+    )
+    print_fn(f"Done. {graph_db} (scope widened in place)")
+    return 0

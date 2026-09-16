@@ -6,6 +6,39 @@ on-disk store also carries its own `schema_version` for forward-compatibility.
 
 ## [Unreleased]
 
+### Added
+
+- **CLI `update --rescope` widens the recorded index scope without a full
+  rebuild** — the partial-upgrade path `update` lacked: it could only follow git
+  drift *inside* the scope a graph was built with (`meta.index_filter` /
+  `meta.index_tests`), so widening a subtree filter or turning tests on required
+  `init --from-scratch`, i.e. a full reindex. The new mode re-reads the
+  project's original compdb (same `find_compdb`/`--graph` discovery as a plain
+  update), computes the entries matching the NEW scope but not the OLD one —
+  covering both widenings: a wider substring filter and/or test TUs previously
+  dropped by the recorded tests state — re-indexes only those into a
+  `.cppgraph/<name>.rescope.scip` partial (`pipeline.rescope_update`,
+  `[1/3]`-`[3/3]` progress lines), applies it via `update_store` with an empty
+  `deleted_files` (rescope only adds), and stamps the widened scope into `meta`
+  (`build_provenance(index_filter=…, index_excludes_tests=…)`) so subsequent
+  plain `update` calls stop filtering the newly in-scope files out. Widening
+  only, by construction: in the substring-containment model `filter_compdb`
+  uses, the new filter must be empty (whole tree) or a substring of the
+  recorded one, and only tests excluded→included is a valid transition — a
+  narrowing, an orthogonal change, or included→excluded is refused with a
+  pointer to `init --from-scratch` (it would mean removing already-indexed
+  files), as is a rescope that wouldn't change the scope at all ("nothing to
+  widen"). A real widening the compdb can't fill (no new entries under the new
+  scope) still flips the recorded scope via an empty partial index — a later
+  `update` filters by `meta`, not by graph contents. Flags: `--rescope` (the
+  mode), `--filter SUBSTRING` (the wanted scope, empty = whole tree),
+  `--include-tests` (excluded→included); both scope flags are parser errors
+  without `--rescope`, and `--rescope` + `--scip` is a parser error (two
+  distinct update modes). The pipeline-level `include_tests` is tri-state
+  (`None` = keep, `True` = include, `False` = exclude, the last refused unless
+  already a no-op). No MCP surface: `update` is a CLI pipeline command, not a
+  query.
+
 ## [0.4.0] - 2026-09-13
 
 CLI/MCP parity work and a full read-only codebase audit's findings: a real

@@ -754,7 +754,8 @@ def main(argv: list[str] | None = None) -> int:
         "update",
         help="refresh a graph for changed source files: with no args, auto-discovers "
         "the graph + compdb and re-indexes incrementally; with --scip, applies an "
-        "already-produced partial re-index instead",
+        "already-produced partial re-index instead; with --rescope, widens the "
+        "recorded index scope (re-indexing only the newly in-scope TUs)",
     )
     p_update.add_argument(
         "--graph",
@@ -792,6 +793,28 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="the scip-clang variant that produced the partial index (see "
         "`build --scip-variant`); refreshes the graph's recorded indexer identity",
+    )
+    p_update.add_argument(
+        "--rescope",
+        action="store_true",
+        help="widen the recorded index scope instead of refreshing git drift: "
+        "re-index only the compdb TUs the wider scope adds, then record the new "
+        "scope so later plain updates keep them. Widening only — narrowing needs "
+        "`init --from-scratch`. Incompatible with --scip",
+    )
+    p_update.add_argument(
+        "--filter",
+        default=None,
+        metavar="SUBSTRING",
+        help="with --rescope: the new subtree path-substring scope (empty = whole "
+        "tree); must widen the recorded one, i.e. be empty or a substring of it "
+        "(default: keep the recorded filter)",
+    )
+    p_update.add_argument(
+        "--include-tests",
+        action="store_true",
+        help="with --rescope: bring test TUs into the scope (valid only when the "
+        "recorded scope excludes them)",
     )
 
     p_find = sub.add_parser(
@@ -1658,9 +1681,19 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "update":
+        if args.rescope and args.scip:
+            parser.error(
+                "--rescope and --scip are two distinct update modes (widen the recorded "
+                "scope vs. apply an external partial index); use only one"
+            )
+        if not args.rescope and (args.filter is not None or args.include_tests):
+            parser.error(
+                "--filter/--include-tests describe the wanted index scope, which only "
+                "--rescope changes; pass --rescope with them"
+            )
         if args.scip is None:
             from cppgraph.init import find_compdb
-            from cppgraph.pipeline import incremental_update
+            from cppgraph.pipeline import incremental_update, rescope_update
 
             if args.graph:
                 graph_path = Path(args.graph)
@@ -1694,6 +1727,16 @@ def main(argv: list[str] | None = None) -> int:
                     "--scip to apply an already-produced partial index instead."
                 )
             try:
+                if args.rescope:
+                    return rescope_update(
+                        graph_db=graph_path,
+                        compdb=compdb_path,
+                        project_root=project_root,
+                        new_filter=args.filter,
+                        # tri-state: the flag only asks for inclusion; absent = keep
+                        include_tests=True if args.include_tests else None,
+                        print_fn=print,
+                    )
                 return incremental_update(
                     graph_db=graph_path,
                     compdb=compdb_path,
