@@ -86,13 +86,15 @@ in `CHANGELOG.md`, releases in `versions.json`.
   controlled benchmark — the closest independent evidence that this exact mechanism
   (auto-injected steering + auto-resync, not just a static `instructions` string) moves
   the needle for agent-facing code tools generally.
-- **Package as a Claude Code plugin (`.claude-plugin/`).** Install today is a two-phase
-  README ritual where the agent interviews the user and `setup.sh` runs `claude mcp add`.
-  A plugin manifest + `marketplace.json` carries the MCP server declaration, the skill,
-  slash commands and the hooks above in one `/plugin marketplace add` — removing all the
-  wiring from the install. The compute (obtain scip-clang, index a project) stays a script:
-  a plugin cannot do it. Add a `/cppgraph-index` command so the no-graph path
-  (`_NO_GRAPH`, which today only reports "not indexed here") has an exit.
+- **Simplify install/update for Claude Code + opencode — full design done, parked.**
+  Superseded by a complete proposal: **`AGENT_PACK_PROPOSAL.md`**. Read that file
+  before picking this up — every open question from the design pass (opencode
+  loading a skill folder that also carries Claude-only plugin files, `opencode
+  mcp add`'s target/merge behavior, MCP duplication risk, `${CLAUDE_PLUGIN_ROOT}`
+  substitution, what a slash command can execute) is already verified
+  empirically or via official docs, with a phased implementation plan (0:
+  foundation, 1: the pack itself, 2: update detection, 3: safety/steering
+  hooks, 4: optional marketplace listing). Not started.
 - **Per-answer staleness instead of global drift.** Drift is reported only by `status`,
   which an agent rarely calls unprompted — so answers about files edited since the index
   look authoritative. Mark files touched in-session (a `PostToolUse` hook on `Edit`/`Write`,
