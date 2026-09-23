@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from cppgraph import updates
+from cppgraph import cli, updates
 from cppgraph.cli import extract_signature, main
 from cppgraph.model import Graph, Node
 from cppgraph.proto import scip_pb2
@@ -1904,6 +1904,9 @@ def test_line_span_unavailable_returns_nonzero(
     assert exit_code == 1
     assert "unavailable" in out
     assert "#504" in out
+    # The message names the command the way the canonical (hyphenated) CLI
+    # spelling does — not the store-method/MCP-tool spelling.
+    assert "line-span" in out
 
 
 def test_no_incoming_calls_lists_zero_caller_definitions(
@@ -1940,6 +1943,7 @@ def test_no_incoming_calls_unavailable_returns_nonzero(
     assert exit_code == 1
     assert "not reliable" in out
     assert "phantom caller" in out
+    assert "no-incoming-calls" in out  # canonical CLI spelling in the message
 
 
 # --- global_init_references (attributed-refs gated) ---------------------------
@@ -1999,6 +2003,7 @@ def test_global_init_references_unavailable_returns_nonzero(
     assert exit_code == 1
     assert "unavailable" in out
     assert "--attributed-refs" in out
+    assert "global-init-references" in out  # canonical CLI spelling in the message
 
 
 def test_global_init_references_non_term_is_an_error(
@@ -2439,6 +2444,9 @@ def test_class_members_zero_members_prints_note(
     assert exit_code == 0
     assert "0 of 0 member(s)" in out
     assert "no members recorded on this type" in out
+    # the pointer names the canonical command (`references`), never a legacy spelling
+    assert "cppgraph references" in out
+    assert "cppgraph refs" not in out
 
 
 # --- strongly-connected-components -------------------------------------------
@@ -3437,33 +3445,104 @@ def test_extract_signature_unreadable_file_returns_none(tmp_path: Path) -> None:
     assert extract_signature(str(tmp_path), "nope.h", 0) is None
 
 
-# --- subcommand spelling aliases (hyphen <-> underscore) -----------------
+# --- legacy subcommand spellings (hidden: work, but are not documented) -----
 
 ALIASED_COMMANDS: list[tuple[str, str]] = [
     ("enrich-refs", "enrich_refs"),
     ("compdb-summary", "compdb_summary"),
     ("reachable-from", "reachable_from"),
     ("dependency-cost", "dependency_cost"),
-    ("line_span", "line-span"),
-    ("no_incoming_calls", "no-incoming-calls"),
-    ("global_init_references", "global-init-references"),
+    ("line-span", "line_span"),
+    ("no-incoming-calls", "no_incoming_calls"),
+    ("global-init-references", "global_init_references"),
     ("boundary-violations", "boundary_violations"),
     ("api-surface", "api_surface"),
     ("class-members", "class_members"),
     ("strongly-connected-components", "strongly_connected_components"),
+    ("init", "index"),
 ]
 
 
-@pytest.mark.parametrize(("canonical", "alias"), ALIASED_COMMANDS)
-def test_command_answers_to_both_spelling_conventions(canonical: str, alias: str) -> None:
-    """A command named with one spelling convention also answers to the other
-    (`line_span` <-> `line-span`, `api-surface` <-> `api_surface`): the alias
-    reaches its parser — whose --help action exits 0 — instead of an
-    invalid-choice rejection (exit 2)."""
-    for name in (canonical, alias):
-        with pytest.raises(SystemExit) as exc:
-            main([name, "--help"])
-        assert exc.value.code == 0
+@pytest.mark.parametrize(("canonical", "legacy"), ALIASED_COMMANDS)
+def test_command_answers_to_both_spelling_conventions(canonical: str, legacy: str) -> None:
+    """A command's legacy spelling (underscore form, or `index`) still reaches
+    its parser — rewritten to the canonical name before parsing, so --help
+    exits 0 instead of an invalid-choice rejection (exit 2). The legacy
+    spellings are deliberately NOT argparse aliases: they must never show up
+    in --help/usage."""
+    with pytest.raises(SystemExit) as exc:
+        main([canonical, "--help"])
+    assert exc.value.code == 0
+    with pytest.raises(SystemExit) as exc:
+        main([legacy, "--help"])
+    assert exc.value.code == 0
+
+
+def test_refs_is_not_a_command() -> None:
+    """`refs` was never a compat name — it is not normalized to `references`
+    and is rejected like any unknown command."""
+    with pytest.raises(SystemExit) as exc:
+        main(["refs", "--help"])
+    assert exc.value.code == 2
+
+
+def test_help_shows_only_canonical_subcommand_names(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Legacy spellings are hidden, not documented: --help/usage list only the
+    canonical (hyphenated) names — no underscore aliases, no `refs`, no
+    "(alias …)" annotations."""
+    with pytest.raises(SystemExit) as exc:
+        main(["--help"])
+    assert exc.value.code == 0
+    out = capsys.readouterr().out
+    for legacy in (
+        "enrich_refs",
+        "compdb_summary",
+        "reachable_from",
+        "dependency_cost",
+        "line_span",
+        "no_incoming_calls",
+        "global_init_references",
+        "boundary_violations",
+        "api_surface",
+        "class_members",
+        "strongly_connected_components",
+    ):
+        assert legacy not in out
+    assert "(alias" not in out
+
+
+def test_normalize_subcommand_rewrites_only_the_command_position() -> None:
+    """The argv normalizer is a small pure function: the FIRST non-flag token —
+    the subcommand position; the top-level parser has no global options — is
+    rewritten to its canonical spelling when a legacy form matches a known
+    subcommand; everything else passes through untouched."""
+    known = {"line-span", "references", "init", "find"}
+    # legacy underscore form -> canonical hyphen form
+    assert cli._normalize_subcommand(["line_span", "--graph", "g"], known) == [
+        "line-span",
+        "--graph",
+        "g",
+    ]
+    # the documented word alias
+    assert cli._normalize_subcommand(["index", "-y"], known) == ["init", "-y"]
+    # not a legacy spelling: untouched (so `refs` is never normalized)
+    assert cli._normalize_subcommand(["refs"], known) == ["refs"]
+    assert cli._normalize_subcommand(["find", "makeResumeToken"], known) == [
+        "find",
+        "makeResumeToken",
+    ]
+    # only the FIRST positional is the command; later args keep their underscores
+    assert cli._normalize_subcommand(["find", "a_b", "--x-y"], known) == ["find", "a_b", "--x-y"]
+    # unknown command: untouched (argparse rejects it)
+    assert cli._normalize_subcommand(["no_such_command", "--help"], known) == [
+        "no_such_command",
+        "--help",
+    ]
+    # flags first / empty argv: nothing to rewrite
+    assert cli._normalize_subcommand(["--help"], known) == ["--help"]
+    assert cli._normalize_subcommand([], known) == []
 
 
 def test_unknown_command_is_rejected_not_aliased() -> None:
@@ -3475,10 +3554,10 @@ def test_unknown_command_is_rejected_not_aliased() -> None:
 
 
 @pytest.mark.parametrize(
-    ("canonical", "alias", "extra_args"),
+    ("canonical", "legacy", "extra_args"),
     [
-        ("line_span", "line-span", []),
-        ("no_incoming_calls", "no-incoming-calls", []),
+        ("line-span", "line_span", []),
+        ("no-incoming-calls", "no_incoming_calls", []),
         ("api-surface", "api_surface", ["mongo"]),
         ("reachable-from", "reachable_from", ["makeResumeToken"]),
         ("dependency-cost", "dependency_cost", ["--target-path", "mongo"]),
@@ -3486,16 +3565,16 @@ def test_unknown_command_is_rejected_not_aliased() -> None:
         ("strongly-connected-components", "strongly_connected_components", []),
     ],
 )
-def test_alias_dispatches_like_the_canonical_command(
-    alias: str,
+def test_legacy_spelling_dispatches_like_the_canonical_command(
     canonical: str,
+    legacy: str,
     extra_args: list[str],
     graph_path: Path,
 ) -> None:
-    """argparse leaves the spelling AS TYPED in args.command, so the dispatcher
-    accepts both: invoking via the alias returns the same exit code as the
-    canonical name (and neither is an argparse rejection, which would raise
-    SystemExit)."""
-    alias_code = main([alias, "--graph", str(graph_path), *extra_args])
+    """A legacy spelling is rewritten to the canonical name BEFORE parsing, so
+    the dispatcher only ever sees canonical names: invoking via the legacy form
+    returns the same exit code as the canonical name (and neither is an
+    argparse rejection, which would raise SystemExit)."""
+    legacy_code = main([legacy, "--graph", str(graph_path), *extra_args])
     canonical_code = main([canonical, "--graph", str(graph_path), *extra_args])
-    assert alias_code == canonical_code
+    assert legacy_code == canonical_code

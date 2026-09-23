@@ -191,6 +191,186 @@ def test_obtain_download_patched_rejects_malformed_sha(tmp_path: Path, monkeypat
     assert any("no valid sha256" in line for line in out)
 
 
+def test_stock_download_failure_keeps_existing_binary(tmp_path: Path, monkeypatch) -> None:
+    """curl failing mid-download must NOT delete the previously working binary:
+    the download lands in a temp file, and only a verified one is moved into
+    place — a prior working install survives every failure path."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    binary = bindir / "scip-clang"
+    binary.write_text("#!/bin/sh\nold-working\n")
+    binary.chmod(0o755)
+
+    def fake_run(cmd, **kwargs):
+        if "-o" in cmd:  # like curl, leave a partial file at the -o path
+            Path(cmd[cmd.index("-o") + 1]).write_bytes(b"partial-")
+        r = type("R", (), {"returncode": 1, "stdout": ""})()
+        return r
+
+    monkeypatch.setattr(setup_cmd.subprocess, "run", fake_run)
+    p, out = _scripted_prompter([])
+    assert setup_cmd._download_scip(bindir, "scip-clang-arm64-darwin", "0.4.0", p) is False
+    assert binary.read_text() == "#!/bin/sh\nold-working\n"  # untouched
+    assert binary.stat().st_mode & 0o777 == 0o755
+    assert list(bindir.glob(".scip-clang.*")) == []  # temp cleaned up
+    assert any("failed to download" in line for line in out)
+
+
+def test_stock_sha_mismatch_keeps_existing_binary(tmp_path: Path, monkeypatch) -> None:
+    """A downloaded stock binary whose sha256 doesn't match the pinned table is
+    refused — the pre-existing binary stays, the temp file is removed."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    binary = bindir / "scip-clang"
+    binary.write_text("#!/bin/sh\nold-working\n")
+    binary.chmod(0o755)
+    monkeypatch.setattr(
+        setup_cmd, "_pinned_stock_sha256", lambda: {"scip-clang-arm64-darwin": "b" * 64}
+    )
+
+    def fake_run(cmd, **kwargs):
+        if "-o" in cmd:
+            Path(cmd[cmd.index("-o") + 1]).write_bytes(b"trojan-bytes")
+        return type("R", (), {"returncode": 0, "stdout": ""})()
+
+    monkeypatch.setattr(setup_cmd.subprocess, "run", fake_run)
+    p, out = _scripted_prompter([])
+    assert setup_cmd._download_scip(bindir, "scip-clang-arm64-darwin", "0.4.0", p) is False
+    assert binary.read_text() == "#!/bin/sh\nold-working\n"
+    assert list(bindir.glob(".scip-clang.*")) == []
+    assert any("checksum mismatch" in line for line in out)
+
+
+def test_stock_download_success_replaces_binary(tmp_path: Path, monkeypatch) -> None:
+    """The happy path: a verified download is made executable, atomically moved
+    onto the final name, and the stock sidecar is written."""
+    import hashlib
+
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    binary = bindir / "scip-clang"
+    binary.write_text("#!/bin/sh\nold\n")
+    binary.chmod(0o755)
+    payload = b"new-binary-bytes"
+    digest = hashlib.sha256(payload).hexdigest()
+    monkeypatch.setattr(
+        setup_cmd, "_pinned_stock_sha256", lambda: {"scip-clang-arm64-darwin": digest}
+    )
+
+    def fake_run(cmd, **kwargs):
+        if "-o" in cmd:
+            Path(cmd[cmd.index("-o") + 1]).write_bytes(payload)
+        return type("R", (), {"returncode": 0, "stdout": ""})()
+
+    monkeypatch.setattr(setup_cmd.subprocess, "run", fake_run)
+    p, _ = _scripted_prompter([])
+    assert setup_cmd._download_scip(bindir, "scip-clang-arm64-darwin", "0.4.0", p) is True
+    assert binary.read_bytes() == payload
+    assert binary.stat().st_mode & 0o777 == 0o755
+    assert list(bindir.glob(".scip-clang.*")) == []
+    side = json.loads((bindir / "scip-clang.json").read_text())
+    assert side["variant"] == "stock"
+    assert side["source"] == "download"
+
+
+def test_stock_download_unpinned_asset_refuses_without_download(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """No pinned sha256 for the asset (not in versions.json's table): the stock
+    download refuses BEFORE fetching — never an unverified binary, never a
+    clobbered install."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    binary = bindir / "scip-clang"
+    binary.write_text("#!/bin/sh\nold-working\n")
+    binary.chmod(0o755)
+    monkeypatch.setattr(setup_cmd, "_pinned_stock_sha256", lambda: {})
+
+    def fake_run(cmd, **kwargs):
+        raise AssertionError("must not download an asset with no pinned sha256")
+
+    monkeypatch.setattr(setup_cmd.subprocess, "run", fake_run)
+    p, out = _scripted_prompter([])
+    assert setup_cmd._download_scip(bindir, "scip-clang-arm64-darwin", "0.4.0", p) is False
+    assert binary.read_text() == "#!/bin/sh\nold-working\n"
+    assert any("sha256" in line.lower() for line in out)
+
+
+def test_patched_checksum_accepts_uppercase_sidecar(tmp_path: Path, monkeypatch) -> None:
+    """A .sha256 sidecar spelling the digest in UPPERCASE (a legal hex spelling)
+    must still verify: the expected digest is normalized to lowercase before the
+    comparison with hashlib's lowercase hexdigest."""
+    import hashlib
+
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    payload = b"fake-binary-bytes"
+    digest = hashlib.sha256(payload).hexdigest().upper()
+
+    def fake_run(cmd, **kwargs):
+        if "-o" in cmd:
+            Path(cmd[cmd.index("-o") + 1]).write_bytes(payload)
+            return type("R", (), {"returncode": 0, "stdout": ""})()
+        return type("R", (), {"returncode": 0, "stdout": f"{digest}  asset"})()
+
+    monkeypatch.setattr(setup_cmd.subprocess, "run", fake_run)
+    p, out = _scripted_prompter([])
+    assert (
+        setup_cmd._download_patched(bindir, "scip-clang-patched-arm64-darwin", "0.4.0", p) is True
+    )
+    assert (bindir / "scip-clang").read_bytes() == payload
+
+
+def test_stock_download_curl_missing_is_a_clean_failure(tmp_path: Path, monkeypatch) -> None:
+    """curl not being installed must not escape as a raw traceback: a clear
+    error is noted, the function reports failure, and a previously working
+    binary stays intact."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    binary = bindir / "scip-clang"
+    binary.write_text("#!/bin/sh\nold-working\n")
+    binary.chmod(0o755)
+
+    def fake_run(cmd, **kwargs):
+        raise FileNotFoundError("curl: not found")
+
+    monkeypatch.setattr(setup_cmd.subprocess, "run", fake_run)
+    p, out = _scripted_prompter([])
+    assert setup_cmd._download_scip(bindir, "scip-clang-arm64-darwin", "0.4.0", p) is False
+    assert binary.read_text() == "#!/bin/sh\nold-working\n"
+    assert list(bindir.glob(".scip-clang.*")) == []
+    assert any("curl" in line.lower() for line in out)
+
+
+def test_patched_download_curl_missing_is_a_clean_failure(tmp_path: Path, monkeypatch) -> None:
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    binary = bindir / "scip-clang"
+    binary.write_text("#!/bin/sh\nold-working\n")
+    binary.chmod(0o755)
+
+    def fake_run(cmd, **kwargs):
+        raise FileNotFoundError("curl: not found")
+
+    monkeypatch.setattr(setup_cmd.subprocess, "run", fake_run)
+    p, out = _scripted_prompter([])
+    assert (
+        setup_cmd._download_patched(bindir, "scip-clang-patched-arm64-darwin", "0.4.0", p) is False
+    )
+    assert binary.read_text() == "#!/bin/sh\nold-working\n"
+    assert list(bindir.glob(".scip-clang.*")) == []
+    assert any("curl" in line.lower() for line in out)
+
+
+def test_pinned_stock_sha_table_covers_native_assets() -> None:
+    """The checked-in versions.json sha256 table must cover every stock asset
+    `platform_sources` can name — otherwise that platform's stock download
+    refuses at install time (an unpinned asset is a setup bug, caught here)."""
+    table = setup_cmd._pinned_stock_sha256()
+    native, _patched, _can_build = setup_cmd.platform_sources()
+    assert native is None or native in table
+
+
 def test_obtain_download_patched_curl_failures_cleanup(tmp_path: Path, monkeypatch) -> None:
     """curl failing on the binary itself or on the .sha256 sidecar: both fail and
     no partial file is left behind."""
@@ -222,6 +402,52 @@ def test_obtain_download_patched_curl_failures_cleanup(tmp_path: Path, monkeypat
     assert not (bindir / "scip-clang").exists()
     assert attempt(binary_ok=True, sha_ok=False) == "failed"
     assert not (bindir / "scip-clang").exists()
+
+
+def test_patched_download_failure_keeps_existing_binary(tmp_path: Path, monkeypatch) -> None:
+    """Same temp-file discipline for the patched variant: a failed download
+    removes only the temp file and leaves a previously working binary intact."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    binary = bindir / "scip-clang"
+    binary.write_text("#!/bin/sh\nold-working\n")
+    binary.chmod(0o755)
+
+    def fake_run(cmd, **kwargs):
+        if "-o" in cmd:
+            Path(cmd[cmd.index("-o") + 1]).write_bytes(b"partial-")
+        return type("R", (), {"returncode": 1, "stdout": ""})()
+
+    monkeypatch.setattr(setup_cmd.subprocess, "run", fake_run)
+    p, out = _scripted_prompter([])
+    assert (
+        setup_cmd._download_patched(bindir, "scip-clang-patched-arm64-darwin", "0.4.0", p) is False
+    )
+    assert binary.read_text() == "#!/bin/sh\nold-working\n"
+    assert list(bindir.glob(".scip-clang.*")) == []
+    assert any("failed to download" in line for line in out)
+
+
+def test_patched_sha_mismatch_keeps_existing_binary(tmp_path: Path, monkeypatch) -> None:
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    binary = bindir / "scip-clang"
+    binary.write_text("#!/bin/sh\nold-working\n")
+    binary.chmod(0o755)
+
+    def fake_run(cmd, **kwargs):
+        if "-o" in cmd:
+            Path(cmd[cmd.index("-o") + 1]).write_bytes(b"fake-binary-bytes")
+        return type("R", (), {"returncode": 0, "stdout": f"{'a' * 64}  asset"})()
+
+    monkeypatch.setattr(setup_cmd.subprocess, "run", fake_run)
+    p, out = _scripted_prompter([])
+    assert (
+        setup_cmd._download_patched(bindir, "scip-clang-patched-arm64-darwin", "0.4.0", p) is False
+    )
+    assert binary.read_text() == "#!/bin/sh\nold-working\n"
+    assert list(bindir.glob(".scip-clang.*")) == []
+    assert any("checksum mismatch" in line for line in out)
 
 
 def test_obtain_interactive_menu_defaults_to_download_patched(tmp_path: Path, monkeypatch) -> None:

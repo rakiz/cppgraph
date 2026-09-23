@@ -28,6 +28,7 @@ out of the box: the checkout root is auto-discovered (the project that owns the
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -65,6 +66,18 @@ from cppgraph.updates import attributed_refs_cost_note, scip_update_advice, upda
 
 if TYPE_CHECKING:
     from cppgraph.model import Edge
+
+# The server's own diagnostics (unexpected, swallowed-recovery paths) go here —
+# stderr only. MCP answers travel on stdout, which must stay protocol-clean, so
+# the logger gets its own stderr handler and never propagates to the root
+# logger (whose config we don't own).
+_LOGGER = logging.getLogger(__name__)
+if not _LOGGER.handlers:
+    _stderr_handler = logging.StreamHandler(sys.stderr)
+    _stderr_handler.setFormatter(logging.Formatter("%(name)s: %(levelname)s: %(message)s"))
+    _LOGGER.addHandler(_stderr_handler)
+    _LOGGER.setLevel(logging.DEBUG)
+    _LOGGER.propagate = False
 
 # Default cap on any list a tool returns. Big enough to be useful for reasoning,
 # small enough that a hub symbol's callers don't blow the context budget. The
@@ -1776,6 +1789,14 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
             try:
                 result["stale"] = is_stale(s, root, SOURCE_EXTS)
             except Exception:
+                # The drift check is best-effort; a failure must neither kill
+                # the tool call nor pass silently — degrade to stale=None and
+                # log the traceback (stderr; MCP stdout stays protocol-clean).
+                _LOGGER.warning(
+                    "stale check failed for root=%r — reporting stale=None",
+                    root,
+                    exc_info=True,
+                )
                 result["stale"] = None
         return result
 

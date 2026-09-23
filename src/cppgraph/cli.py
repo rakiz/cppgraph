@@ -6,6 +6,7 @@ import argparse
 import json
 import sys
 import textwrap
+from collections.abc import Collection
 from pathlib import Path
 
 from cppgraph.builder import build_graph
@@ -566,6 +567,33 @@ def boundary_violations_graph(
     return to_graphify_graph(nodes, edges)
 
 
+# Legacy subcommand spellings that are neither an underscore form nor caught by
+# the underscore->hyphen rule — the documented word alias for `init` (which
+# `scripts/index.sh` invokes). Accepted, never shown.
+_LEGACY_SUBCOMMANDS = {"index": "init"}
+
+
+def _normalize_subcommand(argv: list[str], known: Collection[str]) -> list[str]:
+    """Rewrite a legacy subcommand spelling to its canonical name BEFORE
+    parsing, so old invocations keep working without being documented: the
+    first non-flag argv element — the subcommand position (the top-level
+    parser defines no global options) — is rewritten when it is an underscore
+    form of a known hyphenated command (`line_span` -> `line-span`) or the
+    documented word alias `index` (-> `init`). Anything else — unknown
+    commands, later positional args, `refs` (never a compat name) — passes
+    through untouched, so `--help`/usage only ever show the canonical names.
+    Pure; returns `argv` unchanged when there's nothing to rewrite."""
+    for i, token in enumerate(argv):
+        if token.startswith("-"):
+            continue
+        hyphen = token.replace("_", "-") if "_" in token else token
+        canonical = _LEGACY_SUBCOMMANDS.get(token, hyphen)
+        if canonical != token and canonical in known:
+            return [*argv[:i], canonical, *argv[i + 1 :]]
+        return argv
+    return argv
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="cppgraph",
@@ -637,7 +665,6 @@ def main(argv: list[str] | None = None) -> int:
 
     p_enrich = sub.add_parser(
         "enrich-refs",
-        aliases=["enrich_refs"],
         help="add symbol-granularity reference attribution to an existing store "
         "from a #504 .scip, without a full rebuild",
     )
@@ -653,7 +680,6 @@ def main(argv: list[str] | None = None) -> int:
 
     p_compdb = sub.add_parser(
         "compdb-summary",
-        aliases=["compdb_summary"],
         help="summarize a compile_commands.json before indexing: how many TUs, "
         "where they live, how many are tests — so the index scope is an informed choice",
     )
@@ -666,7 +692,6 @@ def main(argv: list[str] | None = None) -> int:
 
     p_init = sub.add_parser(
         "init",
-        aliases=["index"],
         help="guided onboarding: find the compdb, show what's indexable, ask the "
         "scope questions (subtree / tests / attribution) in order, then index",
     )
@@ -1002,7 +1027,6 @@ def main(argv: list[str] | None = None) -> int:
 
     p_reachable = sub.add_parser(
         "reachable-from",
-        aliases=["reachable_from"],
         help="forward reachability: everything a symbol transitively calls (a lower bound)",
     )
     p_reachable.add_argument(
@@ -1059,7 +1083,6 @@ def main(argv: list[str] | None = None) -> int:
 
     p_dep_cost = sub.add_parser(
         "dependency-cost",
-        aliases=["dependency_cost"],
         help="call-site count against a target library — 'if I replace/remove this "
         "library, how many call sites change?' (exact count of calls edges into it); "
         "the module-exposure complement: `api-surface`",
@@ -1119,8 +1142,7 @@ def main(argv: list[str] | None = None) -> int:
     _add_path_filters(p_stats)
 
     p_line_span = sub.add_parser(
-        "line_span",
-        aliases=["line-span"],
+        "line-span",
         help="rank definitions by body extent (end_line - start, largest first); "
         "needs a graph indexed with a #504-built scip-clang",
     )
@@ -1145,8 +1167,7 @@ def main(argv: list[str] | None = None) -> int:
     _add_path_filters(p_line_span)
 
     p_no_incoming = sub.add_parser(
-        "no_incoming_calls",
-        aliases=["no-incoming-calls"],
+        "no-incoming-calls",
         help="defined callables with zero incoming calls edges (a fact, not a "
         "dead-code verdict); needs a graph indexed with a #504-built scip-clang",
     )
@@ -1174,8 +1195,7 @@ def main(argv: list[str] | None = None) -> int:
     _add_path_filters(p_no_incoming)
 
     p_gir = sub.add_parser(
-        "global_init_references",
-        aliases=["global-init-references"],
+        "global-init-references",
         help="globals referenced by one global's initializer region (the fact "
         "behind the static-init-order question, not a verdict); needs a "
         "#504-built graph with --attributed-refs",
@@ -1199,7 +1219,6 @@ def main(argv: list[str] | None = None) -> int:
 
     p_boundary = sub.add_parser(
         "boundary-violations",
-        aliases=["boundary_violations"],
         help="declared-layering conformance: list calls/inherits edges that "
         "cross a rule you supply (zero false positives — each hit is a real "
         "edge); pass --out PATH to also render this as a graph",
@@ -1248,7 +1267,6 @@ def main(argv: list[str] | None = None) -> int:
 
     p_api = sub.add_parser(
         "api-surface",
-        aliases=["api_surface"],
         help="the actually-used external surface of a module: definitions "
         "inside a prefix called/referenced from outside it (the consumption "
         "complement: `dependency-cost`)",
@@ -1301,7 +1319,6 @@ def main(argv: list[str] | None = None) -> int:
 
     p_members = sub.add_parser(
         "class-members",
-        aliases=["class_members"],
         help="members declared on a class/struct (methods, fields, nested types), by line",
     )
     p_members.add_argument(
@@ -1323,7 +1340,6 @@ def main(argv: list[str] | None = None) -> int:
 
     p_scc = sub.add_parser(
         "strongly-connected-components",
-        aliases=["strongly_connected_components"],
         help="cycles in the calls graph: groups of 2+ symbols that can all "
         "reach each other (a fact, not a bad-architecture verdict); to see the "
         "shape of one as a graph, export/view a symbol with --mode cycle",
@@ -1554,7 +1570,9 @@ def main(argv: list[str] | None = None) -> int:
         help="write the HTML but don't launch the browser (just print the path)",
     )
 
-    args = parser.parse_args(argv)
+    args = parser.parse_args(
+        _normalize_subcommand(sys.argv[1:] if argv is None else argv, set(sub.choices))
+    )
 
     if args.command == "build":
         index = scip_pb2.Index()
@@ -1599,7 +1617,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"[cppgraph] source commit: {commit}{dirty}")
         return 0
 
-    if args.command in ("compdb-summary", "compdb_summary"):
+    if args.command == "compdb-summary":
         from cppgraph.compdb import format_summary, load_compdb, summarize_compdb
 
         try:
@@ -1619,7 +1637,7 @@ def main(argv: list[str] | None = None) -> int:
             assume_yes=args.assume_yes,
         )
 
-    if args.command in ("init", "index"):
+    if args.command == "init":
         from cppgraph.init import onboarding_plan, run_init
 
         if args.plan_json:
@@ -1658,7 +1676,7 @@ def main(argv: list[str] | None = None) -> int:
             prompter=make_prompter(),
         )
 
-    if args.command in ("enrich-refs", "enrich_refs"):
+    if args.command == "enrich-refs":
         index = scip_pb2.Index()
         with open(args.scip, "rb") as f:
             index.ParseFromString(f.read())
@@ -1980,7 +1998,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  ... and {len(nodes) - len(shown)} more (raise --limit to see them)")
         return 0
 
-    if args.command in ("reachable-from", "reachable_from"):
+    if args.command == "reachable-from":
         store = _open_store_checked(args, parser)
         args.symbol = _resolve_symbol(store, args.symbol, parser)
         if args.kind == "calls" and args.symbol.rstrip().endswith("#"):
@@ -2045,7 +2063,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  ... and {total - len(ranked)} more (raise --limit to see them)")
         return 0
 
-    if args.command in ("dependency-cost", "dependency_cost"):
+    if args.command == "dependency-cost":
         store = _open_store_checked(args, parser)
         # limit=None: the aggregate must sum over the full ranking, --limit
         # caps only the displayed breakdown (same shape as the MCP report).
@@ -2095,7 +2113,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  ... and {total - len(groups)} more (raise --limit to see them)")
         return 0
 
-    if args.command in ("line_span", "line-span"):
+    if args.command == "line-span":
         store = _open_store_checked(args, parser)
         result = store.line_span(
             limit=args.limit,
@@ -2105,7 +2123,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         if result is None:
             print(
-                "[cppgraph] line_span unavailable: this graph carries no definition "
+                "[cppgraph] line-span unavailable: this graph carries no definition "
                 "body extents (enclosing_range), which only a #504-built scip-clang "
                 "emits — index with one and rebuild the store to enable it"
             )
@@ -2125,7 +2143,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  ... and {total - len(ranked)} more (raise --limit to see them)")
         return 0
 
-    if args.command in ("no_incoming_calls", "no-incoming-calls"):
+    if args.command == "no-incoming-calls":
         store = _open_store_checked(args, parser)
         result = store.no_incoming_calls(
             limit=args.limit,
@@ -2135,7 +2153,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         if result is None:
             print(
-                "[cppgraph] no_incoming_calls is not reliable on this graph: a stock "
+                "[cppgraph] no-incoming-calls is not reliable on this graph: a stock "
                 "scip-clang's caller attribution (nearest-preceding definition, no "
                 "enclosing ranges) can mis-attribute a bodyless member declaration "
                 "to the preceding definition — a phantom caller that turns a real 0 "
@@ -2164,7 +2182,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  ... and {total - len(symbols)} more (raise --limit to see them)")
         return 0
 
-    if args.command in ("global_init_references", "global-init-references"):
+    if args.command == "global-init-references":
         store = _open_store_checked(args, parser)
         args.symbol = _resolve_symbol(store, args.symbol, parser)
         try:
@@ -2173,7 +2191,7 @@ def main(argv: list[str] | None = None) -> int:
             parser.error(str(e))
         if result is None:
             print(
-                "[cppgraph] global_init_references unavailable: this graph carries "
+                "[cppgraph] global-init-references unavailable: this graph carries "
                 "no attributed references — it needs a #504-built scip-clang AND "
                 "a store built with --attributed-refs (or `cppgraph enrich-refs`). "
                 "Rebuild to enable it"
@@ -2198,7 +2216,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  ... and {total - len(refs)} more (raise --limit to see them)")
         return 0
 
-    if args.command in ("boundary-violations", "boundary_violations"):
+    if args.command == "boundary-violations":
         store = _open_store_checked(args, parser)
         rules: list[tuple[str, str]] = []
         for value in args.rules:
@@ -2235,7 +2253,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  open viz/cppgraph-viz.html and load {args.out}")
         return 0
 
-    if args.command in ("api-surface", "api_surface"):
+    if args.command == "api-surface":
         store = _open_store_checked(args, parser)
         try:
             ranked, total, has_refs = store.api_surface(
@@ -2288,7 +2306,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  ... and {total - len(nodes)} more (raise --limit to see them)")
         return 0
 
-    if args.command in ("class-members", "class_members"):
+    if args.command == "class-members":
         store = _open_store_checked(args, parser)
         args.symbol = _resolve_symbol(store, args.symbol, parser)
         result = store.class_members(args.symbol, limit=args.limit)
@@ -2306,13 +2324,13 @@ def main(argv: list[str] | None = None) -> int:
             print(
                 "  note: no members recorded on this type — it may be genuinely "
                 "memberless, defined outside the indexed scope, or only "
-                "forward-declared; `cppgraph refs` shows where it is used"
+                "forward-declared; `cppgraph references` shows where it is used"
             )
         if total > len(members):
             print(f"  ... and {total - len(members)} more (raise --limit to see them)")
         return 0
 
-    if args.command in ("strongly-connected-components", "strongly_connected_components"):
+    if args.command == "strongly-connected-components":
         store = _open_store_checked(args, parser)
         try:
             components, total = store.strongly_connected_components(

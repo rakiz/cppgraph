@@ -27,9 +27,10 @@ def test_reference_doc_tables_match_the_real_subparsers():
     mod = _generator()
     facts = mod.command_facts()
 
-    # the introspection sees the real command set (30 parsers, 12 aliased)
+    # the introspection sees the real command set (30 parsers, none aliased:
+    # legacy spellings are rewritten at the argv level, never argparse aliases)
     assert "find" in facts and "view" in facts
-    assert facts["init"].aliases == ("index",)
+    assert facts["init"].aliases == ()
     assert len(facts) >= 29
 
     # every subcommand is placed in a section of the doc, and the checked-in

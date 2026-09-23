@@ -15,6 +15,7 @@ import os
 import platform
 import shutil
 import subprocess
+import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -49,6 +50,36 @@ def _pinned_patchset_version() -> int:
         return int((data.get("scip_clang") or {}).get("patchset_version"))
     except (OSError, ValueError, TypeError):
         return 1
+
+
+def _pinned_stock_sha256() -> dict[str, str]:
+    """The pinned sha256 per stock release asset (versions.json
+    `scip_clang.stock_sha256`, keyed by asset name) — the integrity check for
+    the stock download (the patched variant verifies against its release's
+    `.sha256` sidecar instead). Empty when unparseable; a MISSING asset in the
+    table is refused at download time, never fetched unverified."""
+    try:
+        data = json.loads((_repo_root() / "versions.json").read_text())
+        table = (data.get("scip_clang") or {}).get("stock_sha256") or {}
+        return {str(k): str(v).strip().lower() for k, v in table.items()}
+    except (OSError, ValueError, TypeError, AttributeError):
+        return {}
+
+
+def _curl_to_temp(url: str, dest_dir: Path) -> tuple[Path, subprocess.CompletedProcess]:
+    """curl `url` into a temp file in `dest_dir` — same filesystem as the final
+    binary so the later `os.replace` is atomic — never straight onto it. A
+    failed download then removes only the temp file, and a previously working
+    binary is never touched."""
+    fd, tmp_name = tempfile.mkstemp(prefix=".scip-clang.", dir=str(dest_dir))
+    os.close(fd)  # curl re-opens by path; keep only the file
+    tmp = Path(tmp_name)
+    try:
+        proc = subprocess.run(["curl", "-fL", "--retry", "3", "-o", str(tmp), url])
+    except OSError:
+        tmp.unlink(missing_ok=True)
+        raise
+    return tmp, proc
 
 
 def platform_sources() -> tuple[str | None, str | None, bool]:
@@ -102,16 +133,40 @@ def _write_sidecar(
 
 
 def _download_scip(bin_dir: Path, asset: str, version: str, p: Prompter) -> bool:
+    """Download the stock release asset from upstream sourcegraph/scip-clang,
+    verify its sha256 against the pinned table (`_pinned_stock_sha256`), then
+    atomically move it onto `scip-clang`. An asset with no pinned hash is
+    refused before anything is fetched, and every failure path leaves a
+    previously working binary untouched — only a verified download replaces it."""
     binary = bin_dir / "scip-clang"
+    expected = _pinned_stock_sha256().get(asset)
+    if expected is None:
+        p.note(
+            f"error: no pinned sha256 for stock asset {asset!r} (versions.json "
+            "scip_clang.stock_sha256) — refusing an unverifiable download. Pin the "
+            "asset's hash first, or choose another --scip-source."
+        )
+        return False
     tag = f"v{version}"
     url = f"https://github.com/sourcegraph/scip-clang/releases/download/{tag}/{asset}"
     p.note(f"==> Downloading scip-clang {tag} ({asset})")
-    proc = subprocess.run(["curl", "-fL", "--retry", "3", "-o", str(binary), url])
-    if proc.returncode != 0:
-        binary.unlink(missing_ok=True)
-        p.note(f"error: failed to download from {url} — check network/proxy and retry.")
+    try:
+        tmp, proc = _curl_to_temp(url, bin_dir)
+    except OSError as exc:
+        p.note(f"error: could not run curl for {url}: {exc} — is curl installed and on PATH?")
         return False
-    binary.chmod(0o755)
+    try:
+        if proc.returncode != 0:
+            p.note(f"error: failed to download from {url} — check network/proxy and retry.")
+            return False
+        actual = hashlib.sha256(tmp.read_bytes()).hexdigest()
+        if actual != expected:
+            p.note(f"error: checksum mismatch for {asset} (expected {expected}, got {actual}).")
+            return False
+        tmp.chmod(0o755)
+        os.replace(tmp, binary)
+    finally:
+        tmp.unlink(missing_ok=True)  # a no-op once os.replace has moved it
     _write_sidecar(bin_dir, version, "stock", "download")
     return True
 
@@ -121,35 +176,48 @@ def _download_patched(bin_dir: Path, asset: str, version: str, p: Prompter) -> b
     see `scip-clang-patches/README.md` for the current list)
     from this project's own GitHub releases (published by
     `scripts/publish-scip-clang-patched.sh`), verified against its `.sha256`
-    sidecar asset."""
+    sidecar asset. The download lands in a temp file and is atomically moved
+    onto `scip-clang` only after verification — every failure path removes only
+    the temp file and leaves a previously working binary untouched."""
     binary = bin_dir / "scip-clang"
     patchset = _pinned_patchset_version()
     tag = f"scip-clang-patched-v{version}-p{patchset}"
     base = f"https://github.com/{_CPPGRAPH_REPO}/releases/download/{tag}"
     p.note(f"==> Downloading scip-clang patched {tag} ({asset})")
-    proc = subprocess.run(["curl", "-fL", "--retry", "3", "-o", str(binary), f"{base}/{asset}"])
-    if proc.returncode != 0:
-        binary.unlink(missing_ok=True)
-        p.note(f"error: failed to download from {base}/{asset} — check network/proxy and retry.")
+    try:
+        tmp, proc = _curl_to_temp(f"{base}/{asset}", bin_dir)
+    except OSError as exc:
+        p.note(
+            f"error: could not run curl for {base}/{asset}: {exc} — is curl installed and on PATH?"
+        )
         return False
-    sha_proc = subprocess.run(
-        ["curl", "-fL", "--retry", "3", f"{base}/{asset}.sha256"], capture_output=True, text=True
-    )
-    if sha_proc.returncode != 0:
-        binary.unlink(missing_ok=True)
-        p.note(f"error: failed to download {asset}.sha256 — refusing an unverified binary.")
-        return False
-    expected = sha_proc.stdout.split()[0] if sha_proc.stdout.split() else ""
-    if len(expected) != 64 or any(c not in "0123456789abcdef" for c in expected.lower()):
-        binary.unlink(missing_ok=True)
-        p.note(f"error: no valid sha256 in {asset}.sha256 — refusing an unverified binary.")
-        return False
-    actual = hashlib.sha256(binary.read_bytes()).hexdigest()
-    if actual != expected:
-        binary.unlink(missing_ok=True)
-        p.note(f"error: checksum mismatch for {asset} (expected {expected}, got {actual}).")
-        return False
-    binary.chmod(0o755)
+    try:
+        if proc.returncode != 0:
+            p.note(
+                f"error: failed to download from {base}/{asset} — check network/proxy and retry."
+            )
+            return False
+        sha_proc = subprocess.run(
+            ["curl", "-fL", "--retry", "3", f"{base}/{asset}.sha256"],
+            capture_output=True,
+            text=True,
+        )
+        if sha_proc.returncode != 0:
+            p.note(f"error: failed to download {asset}.sha256 — refusing an unverified binary.")
+            return False
+        expected = sha_proc.stdout.split()[0] if sha_proc.stdout.split() else ""
+        expected = expected.lower()  # a sidecar may spell the digest in caps
+        if len(expected) != 64 or any(c not in "0123456789abcdef" for c in expected):
+            p.note(f"error: no valid sha256 in {asset}.sha256 — refusing an unverified binary.")
+            return False
+        actual = hashlib.sha256(tmp.read_bytes()).hexdigest()
+        if actual != expected:
+            p.note(f"error: checksum mismatch for {asset} (expected {expected}, got {actual}).")
+            return False
+        tmp.chmod(0o755)
+        os.replace(tmp, binary)
+    finally:
+        tmp.unlink(missing_ok=True)  # a no-op once os.replace has moved it
     _write_sidecar(
         bin_dir, version, "patched", "download-patched", patchset=_pinned_patchset_version()
     )

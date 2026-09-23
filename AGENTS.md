@@ -70,10 +70,12 @@ when you want to measure at scale; keep such paths out of the shipped code.)
   driven by the same pure functions (`cppgraph.filters`,
   `cppgraph.cli.build_export_json`) — never fork the logic into one surface only.
   When adding a flag or view, wire it through the shared function and expose it on
-  each side.
+  each side. Each surface follows its own ecosystem naming convention — CLI
+  subcommands hyphenated, MCP tools underscored (and names may differ, e.g.
+  `callers` vs `who_calls`); parity is about behaviour, not names.
 - **No `cppgraph_*` MCP tools in your context (e.g. a Task subagent that doesn't
   inherit the orchestrator's MCP servers)? Use the CLI directly.** `cppgraph
-  <cmd>` (`status`/`find`/`callers`/`callees`/`bases`/`subtypes`/`refs`/`path`/
+  <cmd>` (`status`/`find`/`callers`/`callees`/`bases`/`subtypes`/`references`/`path`/
   `impact`/`hotspots`/`explain`/`export`/`view`) has full parity with the MCP
   tools per the rule above, and auto-discovers `.cppgraph/` from the cwd the
   same way. **Never open a `.graph.db` directly with a SQLite client** to work

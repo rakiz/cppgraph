@@ -2046,6 +2046,47 @@ def test_call_attaches_stale_flag(tmp_path: Path) -> None:
     assert find_tool(query="makeResumeToken")["stale"] is True
 
 
+def test_call_logs_and_neuters_stale_check_failure(tmp_path: Path, monkeypatch) -> None:
+    """`_call`'s stale flag must not swallow a drift-check failure SILENTLY:
+    the response degrades to `stale=None` AND the exception is logged (with
+    traceback) on the module logger — stderr, never MCP stdout."""
+    import logging
+
+    from cppgraph.mcp_server import build_server
+
+    graph = Graph()
+    graph.add_node(FOO, display_name="makeResumeToken")
+    path = tmp_path / "g.db"
+    write_sqlite(graph, path, meta={"source_commit": "abc1234"})
+
+    def boom(*args: object, **kwargs: object) -> bool:
+        raise RuntimeError("git exploded")
+
+    monkeypatch.setattr(mcp_server, "is_stale", boom)
+
+    records: list[logging.LogRecord] = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(record)
+
+    server = build_server(str(path), root=str(tmp_path))
+    find_tool = server._tool_manager._tools["find"].fn
+
+    logger = logging.getLogger("cppgraph.mcp_server")
+    handler = _Capture()
+    logger.addHandler(handler)
+    try:
+        result = find_tool(query="makeResumeToken")
+    finally:
+        logger.removeHandler(handler)
+    assert result["stale"] is None
+    assert records, "the swallowed exception must be logged, not dropped silently"
+    assert records[0].exc_info is not None
+    assert records[0].levelno >= logging.WARNING
+    assert records[0].getMessage()
+
+
 def test_tool_reports_too_new_schema_as_clean_error_dict(tmp_path: Path) -> None:
     """A store written by a NEWER cppgraph: opening it raises
     `IncompatibleStoreError` at the `GraphStore` level. The tool layer must turn

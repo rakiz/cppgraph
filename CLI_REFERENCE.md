@@ -38,11 +38,11 @@ forms an agent or a script can call directly.
 | Command | Purpose (from `--help`) | Arguments |
 |---|---|---|
 | `setup` | obtain the scip-clang indexer, register the MCP server, then index this project (the interactive per-machine setup; run via scripts/setup.sh) | --scip-source, -y/--yes, --from-scratch, --no-index |
-| `init` (alias `index`) | guided onboarding: find the compdb, show what's indexable, ask the scope questions (subtree / tests / attribution) in order, then index | [<compdb>], --project-root, --name, --run, --print, -y/--non-interactive, --filter, --no-tests, --attributed-refs, --from-scratch, --plan-json |
-| `compdb-summary` (alias `compdb_summary`) | summarize a compile_commands.json before indexing: how many TUs, where they live, how many are tests — so the index scope is an informed choice | <compdb>, --filter |
+| `init` | guided onboarding: find the compdb, show what's indexable, ask the scope questions (subtree / tests / attribution) in order, then index | [<compdb>], --project-root, --name, --run, --print, -y/--non-interactive, --filter, --no-tests, --attributed-refs, --from-scratch, --plan-json |
+| `compdb-summary` | summarize a compile_commands.json before indexing: how many TUs, where they live, how many are tests — so the index scope is an informed choice | <compdb>, --filter |
 | `build` | build the graph from a SCIP index | --scip*, --out*, --source-commit, --source-dirty, --scip-variant, --index-filter, --index-no-tests, --references/--no-references, --attributed-refs |
 | `update` | refresh a graph for changed source files: with no args, auto-discovers the graph + compdb and re-indexes incrementally; with --scip, applies an already-produced partial re-index instead; with --rescope, widens the recorded index scope (re-indexing only the newly in-scope TUs) | --graph, --scip, --deleted PATH, --source-commit, --source-dirty, --scip-variant, --rescope, --filter SUBSTRING, --include-tests |
-| `enrich-refs` (alias `enrich_refs`) | add symbol-granularity reference attribution to an existing store from a #504 .scip, without a full rebuild | --graph*, --scip* |
+| `enrich-refs` | add symbol-granularity reference attribution to an existing store from a #504 .scip, without a full rebuild | --graph*, --scip* |
 | `status` | show the graph's source commit and, with --root, whether the checkout has drifted | --graph, --root |
 <!-- /cppgraph-gen -->
 
@@ -107,9 +107,9 @@ bound.
 | `callees` | list callees of a symbol | --graph, <symbol>, --limit, --exclude-tests/--no-exclude-tests, --include-path PREFIX, --exclude-path PREFIX, --full-symbols, --hide-trivial |
 | `path` | shortest call chain from one symbol to another (see it as a graph: `view <src> --dst <dst> --mode path`; `--expand-paths` widens it to the corridor) | --graph, <src>, <dst> |
 | `impact` | reverse blast-radius: everything that transitively calls a symbol | --graph, <symbol>, --depth, --kind, --limit, --exclude-tests/--no-exclude-tests, --include-path PREFIX, --exclude-path PREFIX, --full-symbols |
-| `reachable-from` (alias `reachable_from`) | forward reachability: everything a symbol transitively calls (a lower bound) | --graph, <symbol>, --depth, --kind, --limit, --exclude-tests/--no-exclude-tests, --include-path PREFIX, --exclude-path PREFIX, --full-symbols |
+| `reachable-from` | forward reachability: everything a symbol transitively calls (a lower bound) | --graph, <symbol>, --depth, --kind, --limit, --exclude-tests/--no-exclude-tests, --include-path PREFIX, --exclude-path PREFIX, --full-symbols |
 | `hotspots` | global ranking of symbols by call-edge volume | --graph, --kind, --limit, --exclude-tests/--no-exclude-tests, --full-symbols, --include-path PREFIX, --exclude-path PREFIX |
-| `dependency-cost` (alias `dependency_cost`) | call-site count against a target library — 'if I replace/remove this library, how many call sites change?' (exact count of calls edges into it); the module-exposure complement: `api-surface` | --graph, --target-path PREFIX*, --limit, --exclude-tests/--no-exclude-tests, --full-symbols, --include-path PREFIX, --exclude-path PREFIX |
+| `dependency-cost` | call-site count against a target library — 'if I replace/remove this library, how many call sites change?' (exact count of calls edges into it); the module-exposure complement: `api-surface` | --graph, --target-path PREFIX*, --limit, --exclude-tests/--no-exclude-tests, --full-symbols, --include-path PREFIX, --exclude-path PREFIX |
 <!-- /cppgraph-gen -->
 
 ```bash
@@ -132,7 +132,7 @@ declares (`class-members`), what a file defines (`outline`).
 |---|---|---|
 | `bases` | direct base classes a type inherits from (full transitive hierarchy: `reachable-from --kind inherits`) | --graph, <symbol> |
 | `subtypes` | direct subclasses of a type | --graph, <symbol> |
-| `class-members` (alias `class_members`) | members declared on a class/struct (methods, fields, nested types), by line | --graph, <symbol>, --limit, --full-symbols |
+| `class-members` | members declared on a class/struct (methods, fields, nested types), by line | --graph, <symbol>, --limit, --full-symbols |
 | `outline` | the outline of one file: every symbol defined in it, sorted by line | --graph, <file>, --limit, --full-symbols |
 <!-- /cppgraph-gen -->
 
@@ -147,44 +147,44 @@ cppgraph outline src/app.cpp
 
 The reference side — exact use sites the call graph is blind to (a type has no
 call edges). `references` lists one symbol's use sites; `api-surface` reports
-the actually-used external surface of a module; `global_init_references`
+the actually-used external surface of a module; `global-init-references`
 shows what one global's initializer touches.
 
-<!-- cppgraph-gen:references api-surface global_init_references -->
+<!-- cppgraph-gen:references api-surface global-init-references -->
 | Command | Purpose (from `--help`) | Arguments |
 |---|---|---|
 | `references` | exact use sites of a symbol (unless the graph was built --no-references); see them as a graph with `view <symbol> --mode usage` | --graph, <symbol>, --root, --context N, --limit, --access, --include-path PREFIX, --exclude-path PREFIX |
-| `api-surface` (alias `api_surface`) | the actually-used external surface of a module: definitions inside a prefix called/referenced from outside it (the consumption complement: `dependency-cost`) | --graph, <module_prefix>, --limit, --exclude-tests/--no-exclude-tests, --full-symbols |
-| `global_init_references` (alias `global-init-references`) | globals referenced by one global's initializer region (the fact behind the static-init-order question, not a verdict); needs a #504-built graph with --attributed-refs | --graph, <symbol>, --limit, --full-symbols |
+| `api-surface` | the actually-used external surface of a module: definitions inside a prefix called/referenced from outside it (the consumption complement: `dependency-cost`) | --graph, <module_prefix>, --limit, --exclude-tests/--no-exclude-tests, --full-symbols |
+| `global-init-references` | globals referenced by one global's initializer region (the fact behind the static-init-order question, not a verdict); needs a #504-built graph with --attributed-refs | --graph, <symbol>, --limit, --full-symbols |
 <!-- /cppgraph-gen -->
 
 ```bash
 cppgraph references RequestContext --root . --context 3   # use sites, with source lines
 cppgraph api-surface src/pipeline    # what of src/pipeline the rest of the code actually uses
-cppgraph global_init_references kLogVerbosity   # needs #504 + --attributed-refs
+cppgraph global-init-references kLogVerbosity   # needs #504 + --attributed-refs
 ```
 
 ## Whole-graph facts
 
 Questions that don't start from one symbol: counts per file or directory,
 biggest bodies, never-called callables, call cycles, declared-layering
-conformance. All of them report facts, not verdicts — a `no_incoming_calls`
+conformance. All of them report facts, not verdicts — a `no-incoming-calls`
 row is not a dead-code order, a cycle is not a bad-architecture finding.
 
-<!-- cppgraph-gen:stats line_span no_incoming_calls strongly-connected-components boundary-violations -->
+<!-- cppgraph-gen:stats line-span no-incoming-calls strongly-connected-components boundary-violations -->
 | Command | Purpose (from `--help`) | Arguments |
 |---|---|---|
 | `stats` | aggregate counts (symbols, call edges, refs) per file or directory | --graph, --group-by, --limit, --include-path PREFIX, --exclude-path PREFIX |
-| `line_span` (alias `line-span`) | rank definitions by body extent (end_line - start, largest first); needs a graph indexed with a #504-built scip-clang | --graph, --limit, --exclude-tests/--no-exclude-tests, --full-symbols, --include-path PREFIX, --exclude-path PREFIX |
-| `no_incoming_calls` (alias `no-incoming-calls`) | defined callables with zero incoming calls edges (a fact, not a dead-code verdict); needs a graph indexed with a #504-built scip-clang | --graph, --limit, --exclude-tests/--no-exclude-tests, --full-symbols, --include-path PREFIX, --exclude-path PREFIX |
-| `strongly-connected-components` (alias `strongly_connected_components`) | cycles in the calls graph: groups of 2+ symbols that can all reach each other (a fact, not a bad-architecture verdict); to see the shape of one as a graph, export/view a symbol with --mode cycle | --graph, --limit, --exclude-tests/--no-exclude-tests, --full-symbols, --include-path PREFIX, --exclude-path PREFIX |
-| `boundary-violations` (alias `boundary_violations`) | declared-layering conformance: list calls/inherits edges that cross a rule you supply (zero false positives — each hit is a real edge); pass --out PATH to also render this as a graph | --graph, --rule FROM:FORBIDDEN*, --kind, --limit, --full-symbols, --out PATH |
+| `line-span` | rank definitions by body extent (end_line - start, largest first); needs a graph indexed with a #504-built scip-clang | --graph, --limit, --exclude-tests/--no-exclude-tests, --full-symbols, --include-path PREFIX, --exclude-path PREFIX |
+| `no-incoming-calls` | defined callables with zero incoming calls edges (a fact, not a dead-code verdict); needs a graph indexed with a #504-built scip-clang | --graph, --limit, --exclude-tests/--no-exclude-tests, --full-symbols, --include-path PREFIX, --exclude-path PREFIX |
+| `strongly-connected-components` | cycles in the calls graph: groups of 2+ symbols that can all reach each other (a fact, not a bad-architecture verdict); to see the shape of one as a graph, export/view a symbol with --mode cycle | --graph, --limit, --exclude-tests/--no-exclude-tests, --full-symbols, --include-path PREFIX, --exclude-path PREFIX |
+| `boundary-violations` | declared-layering conformance: list calls/inherits edges that cross a rule you supply (zero false positives — each hit is a real edge); pass --out PATH to also render this as a graph | --graph, --rule FROM:FORBIDDEN*, --kind, --limit, --full-symbols, --out PATH |
 <!-- /cppgraph-gen -->
 
 ```bash
 cppgraph stats --group-by dir --limit 10
-cppgraph line_span --limit 10                       # biggest bodies; needs #504
-cppgraph no_incoming_calls --exclude-path src/third_party/
+cppgraph line-span --limit 10                       # biggest bodies; needs #504
+cppgraph no-incoming-calls --exclude-path src/third_party/
 cppgraph strongly-connected-components --limit 10
 cppgraph boundary-violations --rule src/common/:src/platform/   # common/ must not call platform/
 ```

@@ -21,12 +21,28 @@ from pathlib import Path
 _VENDOR_TAG = '<script src="./vendor/vis-network.min.js"></script>'
 
 
+def _js_safe_json(data: dict) -> str:
+    """`json.dumps` with `<`, `>`, `&` (and the JS line separators U+2028/U+2029)
+    escaped as `\\uXXXX`. The JSON is inlined into a `<script>` tag, where a raw
+    `</script>` — e.g. inside a C++ doc comment carried in a label — would close
+    the tag and let the rest of the payload be parsed as markup. The escapes are
+    valid JSON, so the payload still round-trips byte-exact through `json.loads`."""
+    return (
+        json.dumps(data)
+        .replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+        .replace("&", "\\u0026")
+        .replace("\u2028", "\\u2028")
+        .replace("\u2029", "\\u2029")
+    )
+
+
 def standalone_html(graph_json: dict, template_html: str, vendor_js: str) -> str:
     """Inline `graph_json` and the vis-network source into the viewer template.
 
     Pure (no IO) so it's unit-testable. The result references nothing external.
     """
-    data_tag = "<script>window.GRAPH = " + json.dumps(graph_json) + ";</script>"
+    data_tag = "<script>window.GRAPH = " + _js_safe_json(graph_json) + ";</script>"
     inlined_vendor = "<script>\n" + vendor_js + "\n</script>"
     # Put the data before the (now inlined) library; the template's bootstrap
     # runs render(window.GRAPH) once both are defined.

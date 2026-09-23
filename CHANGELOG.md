@@ -6,6 +6,48 @@ on-disk store also carries its own `schema_version` for forward-compatibility.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A failed scip-clang download can no longer delete a working install.**
+  `_download_scip`/`_download_patched` (`cppgraph setup`) curl'd straight onto
+  `bin/scip-clang` and `unlink()`ed it on any failure — a dropped connection or
+  a bad checksum destroyed the previously working binary. Both now download to
+  a temp file in the same directory, verify it, `chmod`, then `os.replace` it
+  onto the final name (atomic); every failure path removes only the temp file.
+- **The standalone HTML viewer can't be broken out of via its payload.**
+  `viz_html.standalone_html` inlined `json.dumps(graph_json)` raw into a
+  `<script>` tag, so a string containing `</script>` (e.g. a C++ doc comment in
+  a label) closed the tag and injected markup. `<`, `>`, `&` and
+  U+2028/U+2029 are now escaped as `\uXXXX` (valid JSON, round-trips exactly).
+- **MCP: a failed drift-check no longer fails silently.** The per-query
+  `stale` flag's `except Exception` handler now logs the traceback via the
+  module logger (`cppgraph.mcp_server`, its own stderr handler — MCP stdout
+  stays protocol-clean) while still degrading to `stale: null`.
+
+### Added
+
+- **sha256 pinning for the stock scip-clang download.** The stock variant had
+  no integrity check (the patched one verifies against its release's
+  `.sha256` sidecar). `versions.json` now pins `scip_clang.stock_sha256` per
+  asset — real hashes of the upstream `v0.4.0` release assets (`arm64-darwin`,
+  `x86_64-linux`) — and the download verifies against it, refusing any asset
+  missing from the table before fetching (never an unverified binary). Bump
+  the entries when `version` changes.
+
+### Changed
+
+- **CLI: `line-span`, `no-incoming-calls`, `global-init-references` are now
+  the canonical subcommand spellings** (hyphenated, like every other
+  subcommand). The old underscore spellings are still accepted — rewritten to
+  the canonical name before parsing — but are no longer argparse aliases, so
+  they are undocumented: `--help`/usage and the regenerated `CLI_REFERENCE.md`
+  list only the canonical names. The same hiding now applies to every other
+  underscore alias (`enrich_refs`, `compdb_summary`, `reachable_from`,
+  `dependency_cost`, `boundary_violations`, `api_surface`, `class_members`,
+  `strongly_connected_components`) and to the word alias `index` (→ `init`,
+  which `scripts/index.sh` invokes). MCP tool names are unchanged (they were
+  always underscore).
+
 ## [0.4.1] - 2026-09-16
 
 ### Fixed

@@ -98,7 +98,8 @@ invariant; some names differ (`who_calls`→`callers`, `what_it_calls`→`callee
 `dependency_cost`→`dependency-cost`, `class_members`→`class-members`,
 `strongly_connected_components`→`strongly-connected-components`,
 `reachable_from`→`reachable-from`, `boundary_violations`→`boundary-violations`,
-`visualize`→`view`). Everything else is spelled the same on both surfaces
-(`find`, `path`, `hotspots`, `stats`, `status`, `outline`, `line_span`,
-`no_incoming_calls`, `global_init_references` — underscores included).
+`line_span`→`line-span`, `no_incoming_calls`→`no-incoming-calls`,
+`global_init_references`→`global-init-references`, `visualize`→`view`).
+Everything else is spelled the same on both surfaces (`find`, `path`,
+`hotspots`, `stats`, `status`, `outline`).
 Commands auto-discover the graph from the cwd and accept plain names.
