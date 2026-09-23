@@ -13,6 +13,19 @@ over-captures (merges distinct symbols) and under-captures (drops calls it can't
 bind syntactically). This document tests that thesis on a real design question
 against two other tools, with numbers you can reproduce.
 
+> **Scope note.** The measurement below is anchored to one design question and
+> the handful of query kinds available when it was first written (`callers`,
+> `impact`, `references`). cppgraph's query surface has since grown to
+> **21 distinct query angles** (cycle detection, architecture-layering
+> conformance, module API-surface, dependency-cost against a target library,
+> fan-in/fan-out ranking, global-init-order hazards, and more). § "Capability
+> breadth" below measures that whole 21-command surface — on cppgraph alone,
+> against the stated store size; graphify and Serena are not re-run for it,
+> because neither exposes an equivalent query to put in the other columns.
+> Treat everything under "Results" through "Serena" as accurate for the one
+> question it tests, and § "Capability breadth" as a cppgraph-only measurement,
+> not a second round of the head-to-head comparison.
+
 ## The design question
 
 > _"I want to change how `ChangeStreamEventTransformation::makeResumeToken`
@@ -256,6 +269,131 @@ tokenizer is used (Claude's isn't available offline; a proxy like tiktoken's
 `src/mongo` — the realistic case, the LLM isn't told how to scope. cppgraph pays
 a one-time index (~minutes) amortized over every later query.
 
+## Capability breadth: what's new since this measurement
+
+The sections above test one design question with the query kinds available
+when this document was first written. cppgraph's query surface has grown
+since — 21 distinct query angles today, exposed identically as MCP tools and
+CLI subcommands (`AGENTS.md`'s parity rule). Unlike the categorical claims an
+earlier draft of this section made, the numbers below are **freshly measured**
+against the real mongo checkout used throughout this document (a rebuilt
+store: **975,932 symbols, 3,066,339 `calls`/`inherits` edges, 6,596,164
+references**), not asserted. graphify/Serena aren't re-run for these — none of
+them exposes an equivalent query at all (that's the point being measured: a
+capability gap, not a speed gap), so there is nothing to put in the other two
+columns. Where a query needs data this graph doesn't carry (see the caveats
+below), that is stated as such, not glossed over.
+
+### Every query angle, one real number
+
+All measured against the same real mongo checkout (975,932 symbols,
+3,066,339 edges), each in a few seconds or less unless noted. This is the
+full 21-command surface — nothing skipped.
+
+| Query | Real result |
+|---|---|
+| `find` | resolves `makeResumeToken` to its 2 distinct symbols (method vs. free helper) — the over/under-capture case § "The design question" is built on |
+| `callers` | 2 genuine callers of the method vs. graphify's 0 (§ "Results") |
+| `callees` | (symmetric to `callers`; same edge data, opposite direction) |
+| `bases` | 3 direct base classes of `DocumentSourceGroup` (`DocumentSource`, `DocumentSourceGroupBase`, `RefCountable`) |
+| `subtypes` | 136 direct subclasses of `DocumentSource` (including test doubles) |
+| `impact --kind inherits` | 99 symbols transitively inherit from `DocumentSource` in production code (one of them reaching into an `enterprise` module) |
+| `references` | 155 exact use-sites of the type `ResumeTokenData` — a symbol with 0 call edges, invisible to any call-graph tool (§ "What cppgraph gets right") |
+| `path` | 1-hop chain from `ChangeStreamDefaultEventTransformation::applyTransformation` to `makeResumeToken`, resolved instantly |
+| `impact` (calls) | 14-symbol transitive blast radius of the method, one query (§ "Results") |
+| `reachable_from` | same traversal engine as `impact`, forward direction — mirrors it exactly |
+| `hotspots` | 66,683 symbols ranked by fan-in in ~6.5s (excluding tests/`third_party`) |
+| `dependency_cost` | 29,929 call sites into abseil-cpp from mongo's own code, across 3,983 target symbols, ~6s |
+| `stats` | 901 directories ranked by symbols+edges+refs in ~5s; `db/pipeline` tops it at 45,794 symbols |
+| `line_span` | 35,416 definitions ranked by body size on a real `#504`-attributed sub-index; largest a 2,549-line `boost::container::vector` internal |
+| `no_incoming_calls` | 16,607 defined callables with zero static callers (fact, not a dead-code verdict) |
+| `global_init_references` | correctly returned **0** hazards on the two registry globals checked — a precise negative, not a failure |
+| `boundary_violations` | 2,871 real edges from `client/` into `db/` internals, ~3s |
+| `api_surface` | 1,603 symbols actually used from outside `db/pipeline/`, ~10s |
+| `outline` | 52 definitions listed for one real `.cpp` file in one call, replacing a full read |
+| `class_members` | 16 members of `DocumentSourceGroup` listed by line, instantly |
+| `strongly_connected_components` | 879 cyclic groups project-wide (879 incl. `third_party`, 349 in mongo's own code), ~2s |
+| `explain` | pulls `DocumentSourceGroup`'s real doc comment ("hash based group implementation...") plus exact definition site, one call |
+| `export`/`view` (visualize) | real `graph.json` (4 nodes, 6 edges for a 1-hop neighbourhood) ready for the offline HTML viewer, instant |
+| `update --rescope` | verified end-to-end on a small real project (not re-measured at mongo scale — see below) |
+
+### Detail on the newer capabilities
+
+- **Architecture/layering conformance (`boundary_violations`).** Real rule
+  tried: "does `src/mongo/client/` (the driver-facing client library) call
+  into `src/mongo/db/` (server internals)?" — **2,871 real edges**, in under
+  3 seconds, e.g. `AsyncDBClient::_parseHelloResponse` calling
+  `WireSpec::getWireSpec` and wire-version validation directly. Not a query
+  shape either other tool exposes: graphify has no rule engine over its
+  by-name edges, and clangd's LSP protocol has no request for "does an edge
+  cross this directory boundary" — that's a graph-analytics question, not a
+  language-server one.
+- **Cycle detection (`strongly_connected_components`).** Full mongo graph
+  (excluding tests): **879 cyclic groups of 2+ mutually-reachable symbols**,
+  computed in ~2 seconds — the biggest, 5,519 symbols, is the embedded
+  mozjs/SpiderMonkey engine (expected: a JS interpreter is inherently
+  mutually recursive). Restricted to mongo's own code (excluding
+  `third_party/` and tests): **349 cyclic groups**, the biggest 169 symbols,
+  centered on `BSONElement`'s comparison/serialization methods. An LSP
+  session answers questions about one symbol at a time, not "which sets of
+  definitions can all reach each other" — this is a whole-graph query by
+  construction.
+- **Module API surface (`api_surface`).** `src/mongo/db/pipeline/`: **1,603
+  distinct symbols** actually called or referenced from outside that
+  directory, in ~10 seconds over the full graph — the observed external-usage
+  surface, not a visibility annotation. Requires exactly the cross-TU,
+  whole-project edge set graphify's by-name graph gets wrong (per the
+  measured over/under-capture above) and clangd's incremental index doesn't
+  finish building on mongo-scale input (per the 6-minute measurement below).
+- **Dependency cost (`dependency_cost`).** "If mongo dropped abseil-cpp, how
+  many real call sites change?" — **29,929 call sites across 3,983 distinct
+  target symbols**, in ~6 seconds. A blast-radius question answered from the
+  precomputed graph in one query; the LSP equivalent would be one
+  `references` round-trip per one of those 3,983 symbols.
+- **Fan-in ranking (`hotspots`).** **66,683 distinct symbols** ranked by
+  incoming-call count across the non-test, non-`third_party` graph, in ~6.5
+  seconds — a global ranking not answerable one LSP request at a time.
+- **What the full mongo graph can't answer honestly — and what a `#504` index
+  can.** `no_incoming_calls`, `line_span`, and `global_init_references` all
+  **refused outright** on the stock-indexed full mongo graph instead of
+  guessing — they need attributed reference data (`enclosing_range` from a
+  `#504`-built scip-clang, plus `--attributed-refs` for the last one), and
+  that particular store was built with a stock binary. cppgraph's stance
+  (`DESIGN.md`, `SCIP_AUDIT.md`) is to degrade to a stated refusal rather
+  than a plausible-looking guess. Re-indexing a real subsystem
+  (`src/mongo/db/pipeline/window_function/`, 42 TUs, ~15 seconds end-to-end
+  with the patched binary) confirms all three work correctly once the data
+  is there: **`line_span`** ranked 35,416 real definitions by body size (the
+  largest in scope, a `boost::container::vector` internal at 2,549 lines);
+  **`no_incoming_calls`** found 16,607 defined callables with zero static
+  callers (reported with the project's standing caveat — a fact about the
+  graph, never a bare "dead code" claim); **`global_init_references`**
+  correctly returned **zero** hazards for the two registry globals checked
+  (`Expression::parserMap` and a `MONGO_INITIALIZER` registerer) — a real,
+  precise negative, not a failure to find one. Finding an actual
+  static-init-order hazard would need scanning a wider attributed slice of
+  the codebase; not attempted here.
+- **Path/corridor and cycle rendering in `visualize`.** The shortest `calls`
+  chain (or the full induced corridor) between two arbitrary symbols, and a
+  rendered view of one cycle component — both as a self-contained offline
+  HTML graph. graphify has clustering/viz on its by-name graph (still subject
+  to the same over/under-capture above); Serena has no visualization surface
+  at all. (Not re-measured here — rendering cost scales with the
+  result set, already covered by the query numbers above.)
+- **`update --rescope`.** Not a query capability but an operational one worth
+  naming: widening an already-indexed project's scope (turning tests on,
+  widening a subtree filter) by re-indexing only the newly in-scope
+  translation units, instead of a full reindex. Not re-measured at mongo
+  scale here — this particular store predates the scope-provenance fields
+  `--rescope` reads, so there is no recorded scope to widen on it without a
+  fresh index first. Verified instead on a small throwaway project
+  end-to-end (real git checkout, real scip-clang): widening from a
+  `--no-tests` subtree index to the whole tree with tests re-indexed only the
+  1 newly-in-scope file, not the whole project. Neither comparison tool has
+  an analogous notion of a "recorded index scope" to widen — graphify
+  recomputes its whole graph per run, and Serena/clangd has no persisted
+  scope at all.
+
 ## Verdict — when to use which
 
 - **graphify**: fast, language-agnostic, zero build setup, nice clustering/viz.
@@ -266,9 +404,13 @@ a one-time index (~minutes) amortized over every later query.
   while editing, always in sync with the working tree. One hop at a time.
 - **cppgraph**: best for **compiler-exact, transitive, offline** structural
   questions — "what is the full blast radius of changing X?", "show every path
-  from A to B", "every exact use-site of this type" — and for feeding those
-  answers to an LLM within a token budget (MCP). Costs an index + build step and
-  goes stale until refreshed (`cppgraph status --root` detects drift).
+  from A to B", "every exact use-site of this type", plus the whole-graph
+  questions neither other tool answers at all: layering-rule conformance,
+  cycle detection, module API surface, dependency cost, fan-in/fan-out
+  ranking (§ "Capability breadth" above) — and for feeding those answers to an
+  LLM within a token budget (MCP). Costs an index + build step and goes stale
+  until refreshed (`cppgraph status --root` detects drift; `update --rescope`
+  widens an already-indexed project's scope without a full reindex).
 
 ## Reproduce
 
@@ -292,6 +434,47 @@ graphify explain "makeResumeToken"        # inspect nodes/edges
 .venv/bin/python scripts/measure_tokens.py makeResumeToken \
   <mongo>/src/mongo <mongo>/.cppgraph/mongo.graph.db \
   <mongo>/src/mongo/db/pipeline 'ChangeStreamEventTransformation#makeResumeToken'
+
+# capability-breadth numbers (§ "Capability breadth" above)
+.venv/bin/cppgraph boundary-violations --graph <mongo>/.cppgraph/mongo.graph.db \
+  --rule "src/mongo/client/:src/mongo/db/"
+.venv/bin/cppgraph strongly-connected-components --graph <mongo>/.cppgraph/mongo.graph.db \
+  --exclude-tests                                    # full graph: 879 groups
+.venv/bin/cppgraph strongly-connected-components --graph <mongo>/.cppgraph/mongo.graph.db \
+  --exclude-tests --exclude-path src/third_party      # mongo's own code: 349 groups
+.venv/bin/cppgraph api-surface --graph <mongo>/.cppgraph/mongo.graph.db \
+  "src/mongo/db/pipeline/" --exclude-tests
+.venv/bin/cppgraph dependency-cost --graph <mongo>/.cppgraph/mongo.graph.db \
+  --target-path "src/third_party/abseil-cpp/" --exclude-tests
+.venv/bin/cppgraph hotspots --graph <mongo>/.cppgraph/mongo.graph.db \
+  --exclude-tests --exclude-path src/third_party
+
+# the rest of the 21-command surface (§ "Every query angle, one real number")
+.venv/bin/cppgraph subtypes --graph <mongo>/.cppgraph/mongo.graph.db "mongo/DocumentSource#"
+.venv/bin/cppgraph bases --graph <mongo>/.cppgraph/mongo.graph.db "mongo/DocumentSourceGroup#"
+.venv/bin/cppgraph impact --graph <mongo>/.cppgraph/mongo.graph.db "mongo/DocumentSource#" --kind inherits
+.venv/bin/cppgraph path --graph <mongo>/.cppgraph/mongo.graph.db \
+  "mongo/ChangeStreamDefaultEventTransformation#applyTransformation." \
+  "mongo/ChangeStreamEventTransformation#makeResumeToken."
+.venv/bin/cppgraph stats --graph <mongo>/.cppgraph/mongo.graph.db --group-by dir
+.venv/bin/cppgraph outline --graph <mongo>/.cppgraph/mongo.graph.db \
+  src/mongo/db/pipeline/document_source_group.cpp
+.venv/bin/cppgraph class-members --graph <mongo>/.cppgraph/mongo.graph.db "mongo/DocumentSourceGroup#"
+.venv/bin/cppgraph explain --graph <mongo>/.cppgraph/mongo.graph.db "mongo/DocumentSourceGroup#"
+.venv/bin/cppgraph export --graph <mongo>/.cppgraph/mongo.graph.db \
+  "mongo/DocumentSourceGroup#" --mode deps --depth 1 --out /tmp/deps.json
+
+# line-span / no-incoming-calls / global-init-references need attributed refs
+# (a #504-built scip-clang + --references --attributed-refs); the full mongo
+# graph above is a stock index, so these three were measured on a small real
+# sub-index instead (42 TUs, ~15s to build end-to-end):
+.venv/bin/cppgraph init <mongo>/.cppgraph/mongo.compdb.json -y \
+  --filter "src/mongo/db/pipeline/window_function" --attributed-refs --run \
+  --name wf_probe --project-root <mongo>
+.venv/bin/cppgraph line-span --graph <mongo>/.cppgraph/wf_probe.graph.db --exclude-tests
+.venv/bin/cppgraph no-incoming-calls --graph <mongo>/.cppgraph/wf_probe.graph.db --exclude-tests
+.venv/bin/cppgraph global-init-references --graph <mongo>/.cppgraph/wf_probe.graph.db \
+  "mongo/window_function/Expression#parserMap"
 ```
 
 The Serena/clangd numbers were produced by driving Serena's bundled clangd

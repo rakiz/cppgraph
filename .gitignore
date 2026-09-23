@@ -8,6 +8,7 @@ dist/
 build/
 .pytest_cache/
 
+.DS_Store
 .serena/
 .claude/
 
@@ -21,6 +22,7 @@ compile_commands.json
 graph.db
 graph.sqlite
 scratch/
+brag-*/
 # per-project outputs land in the target's .cppgraph/ (self-ignored there via a
 # dropped-in .gitignore); also ignore it here in case a run targets this repo.
 .cppgraph/
