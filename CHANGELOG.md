@@ -6,6 +6,8 @@ on-disk store also carries its own `schema_version` for forward-compatibility.
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-09-23
+
 ### Fixed
 
 - **A failed scip-clang download can no longer delete a working install.**

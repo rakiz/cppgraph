@@ -11,7 +11,7 @@
       "scip-clang-x86_64-linux": "06fd18c576f979a726c651594644ec4a35db4f471f2160b3f72eb89fa6001784"
     }
   },
-  "latest": "0.4.1",
+  "latest": "0.4.2",
   "releases": [
     {
       "version": "0.1.0",
@@ -48,6 +48,12 @@
       "rebuild": "none",
       "notes": "No schema change (still v5), safe to update in place. Adds `update --rescope`: widens a graph's recorded index scope (a wider subtree filter and/or turning tests on) by re-indexing only the newly in-scope translation units, instead of requiring a full `init --from-scratch` reindex. Widening only — a narrowing or an orthogonal filter change is refused with a pointer to a full rebuild. Verified end-to-end against a real scip-clang run, not just mocked unit tests. Full detail in `CHANGELOG.md`.",
       "url": "https://github.com/rakiz/cppgraph/releases/tag/v0.4.1"
+    },
+    {
+      "version": "0.4.2",
+      "rebuild": "none",
+      "notes": "No schema change (still v5), safe to update in place. Hardening release: scip-clang downloads are now atomic (a failed or unverified download no longer deletes a working binary) and the stock variant is verified against pinned sha256s; the standalone HTML viewer escapes its inlined JSON (no </script> breakout); the MCP stale-check logs failures to stderr instead of swallowing them. CLI: line-span / no-incoming-calls / global-init-references are the canonical subcommand names; underscore spellings still work but are no longer listed in --help. Full detail in `CHANGELOG.md`.",
+      "url": "https://github.com/rakiz/cppgraph/releases/tag/v0.4.2"
     }
   ]
 }
