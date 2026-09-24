@@ -29,6 +29,7 @@ from cppgraph.filters import (
 from cppgraph.model import Edge, Node
 from cppgraph.proto import scip_pb2
 from cppgraph.queries import extract_signature, find_symbols, read_source_snippet
+from cppgraph.queries import label as _node_label  # aliased: main() has local `label`s
 from cppgraph.store import (
     GraphStore,
     IncompatibleStoreError,
@@ -76,7 +77,7 @@ def _print_node(node: Node, *, full_symbols: bool = True, external: bool = False
     # (False) and unknown (None) results stay unmarked.
     marker = "  [out-of-project]" if external else ""
     if full_symbols:
-        print(f"  {node.symbol}  ({node.display_name or '?'} @ {loc}){kind}{marker}")
+        print(f"  {node.symbol}  ({_node_label(node.symbol, node) or '?'} @ {loc}){kind}{marker}")
     else:
         print(f"  {node.display_name or short_label(node.symbol)}  ({loc}){kind}{marker}")
 
@@ -304,7 +305,13 @@ def _resolve_symbol(
             if node.file is not None and node.line is not None
             else "?"
         )
-        print(f"    {node.symbol}  ({node.display_name or '?'} @ {loc})", file=sys.stderr)
+        # Same derived-label fallback as `_print_node`: scip-clang leaves
+        # display_name empty on all symbols, so this printed `( ? @ ...)`
+        # regardless of the candidate.
+        print(
+            f"    {node.symbol}  ({_node_label(node.symbol, node) or '?'} @ {loc})",
+            file=sys.stderr,
+        )
     if len(candidates) > 10:
         print(f"    ... and {len(candidates) - 10} more", file=sys.stderr)
     extra = ambiguous_candidate_hint(query, candidates)
@@ -647,7 +654,7 @@ def main(argv: list[str] | None = None) -> int:
         help="build the exact reference-location index (every non-local use of "
         "a symbol as file:line) — answers 'where is this type/symbol used?', the "
         "dependency the call graph is blind to. On by default; pass "
-        "--no-references for a leaner store (measured ~+45% size on a large index).",
+        "--no-references for a leaner store (measured ~+45%% size on a large index).",
     )
     p_build.add_argument(
         "--attributed-refs",
@@ -2557,7 +2564,10 @@ def main(argv: list[str] | None = None) -> int:
             else "?"
         )
         print(f"[cppgraph] {node.symbol}")
-        print(f"  name:       {node.display_name or '?'}")
+        # Derived-label fallback (like `_print_node`/every other surface):
+        # scip-clang leaves `SymbolInformation.display_name` empty on all
+        # symbols (0% on the mongo index) — without it a class prints `?`.
+        print(f"  name:       {_node_label(node.symbol, node) or '?'}")
         print(f"  defined at: {loc}")
         if node.scip_kind is not None:
             # Fine-grained SCIP kind from a kind-patched binary

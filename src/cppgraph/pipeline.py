@@ -19,6 +19,7 @@ import json
 import multiprocessing
 import os
 import re
+import shlex
 import subprocess
 import sys
 import time
@@ -101,6 +102,80 @@ def filter_compdb(
         )
     out_compdb.write_text(json.dumps(filtered))
     return len(filtered), len(data), dropped
+
+
+# The pre-index include-dir check (see `missing_include_dirs`): sample this many
+# compdb entries — never all of them, the check must stay cheap on a 40k-entry
+# compdb — and warn when at least this fraction of the sampled include
+# directories does not exist. One stale dir among hundreds is noise (an
+# optional/generated path); a deleted build tree (e.g. a regenerated bazel
+# output_base) takes out MOST of them. scip-clang then silently indexes TUs
+# only partially — each run still exits 0 ("0 errored TUs") — and the graph
+# comes out missing thousands of symbols while the pipeline reports success.
+_INCLUDE_DIR_SAMPLE = 200
+_MISSING_INCLUDE_WARN_FRACTION = 0.1
+
+# The include-directory flags parsed out of each sampled TU's command (see
+# `missing_include_dirs`).
+_INCLUDE_FLAGS = ("-I", "-isystem", "-iquote", "-isysroot")
+
+
+def missing_include_dirs(
+    compdb: Path, sample: int = _INCLUDE_DIR_SAMPLE
+) -> tuple[int, int, list[str]]:
+    """Sample `sample` entries of `compdb` and check their include directories.
+
+    Returns `(checked, missing, examples)`: the number of DISTINCT include
+    directories found in the sample, how many do not exist on disk, and up to
+    three example missing paths (for the warning text). Directories come from
+    the `-I`/`-isystem`/`-iquote`/`-isysroot` flags (joined or separate form)
+    of both compdb command spellings (`command` string, `arguments` list), and
+    are resolved against the entry's `directory` field — where the compiler
+    actually runs — falling back to the compdb's own directory: relative
+    includes (`-I../include`, `-I.`) are the norm in CMake compdbs, and testing
+    them against the process cwd would false-positive on every normal one.
+    `(0, 0, [])` when the sample carries no include flags at all — nothing to
+    judge, never a warning."""
+    checked: set[str] = set()
+    for entry in json.loads(compdb.read_text())[:sample]:
+        argv = entry.get("arguments") or shlex.split(entry.get("command", ""))
+        base = Path(entry.get("directory") or compdb.parent)
+        for i, flag in enumerate(argv):
+            # Both spellings per flag: joined (`-I<dir>`) and separate
+            # (`-isystem <dir>`). The four names never prefix-collide
+            # (case-sensitive: `-I` vs `-i...`).
+            for name in _INCLUDE_FLAGS:
+                if flag == name and i + 1 < len(argv):
+                    raw = argv[i + 1]
+                elif flag.startswith(name) and len(flag) > len(name):
+                    raw = flag[len(name) :]
+                else:
+                    continue
+                d = Path(raw)
+                checked.add(str(d if d.is_absolute() else base / d))
+    missing = sorted(d for d in checked if not Path(d).exists())
+    return len(checked), len(missing), missing[:3]
+
+
+def warn_missing_include_dirs(compdb: Path, print_fn=print) -> None:
+    """The pre-index guard: warn (never fail) when a significant fraction of the
+    compdb's sampled include directories is missing — the signature of a stale
+    compile_commands.json whose build directory was regenerated (e.g. a deleted
+    bazel output_base). scip-clang handles such an index by silently indexing
+    TUs partially and reporting success, so without this warning the only
+    symptom is a graph quietly missing thousands of symbols."""
+    checked, missing, examples = missing_include_dirs(compdb)
+    if not checked or missing / checked < _MISSING_INCLUDE_WARN_FRACTION:
+        return
+    print_fn(
+        f"  WARNING: {missing} of {checked} sampled include directories do not exist"
+        + (f" (e.g. {', '.join(examples)})" if examples else "")
+        + ". scip-clang silently indexes TUs partially when headers are missing "
+        "(the run still reports success), so the graph can come out missing "
+        "thousands of symbols. The compile_commands.json is likely stale — its "
+        "build directory was moved or regenerated (e.g. a deleted bazel "
+        "output_base). Regenerate it and re-index."
+    )
 
 
 def git_head(project_root: Path) -> tuple[str | None, bool]:
@@ -322,6 +397,9 @@ def full_build(
         print_fn(f"[2/3] Reusing existing index: {out_scip}")
     else:
         print_fn("[2/3] Running scip-clang ...")
+        # Pre-index guard: a stale compdb (build dir regenerated/moved) makes
+        # scip-clang silently index TUs partially — warning, never failing.
+        warn_missing_include_dirs(out_compdb, print_fn=print_fn)
         try:
             run_scip_clang(project_root, out_compdb, out_scip, total_tus=kept, print_fn=print_fn)
         except PipelineError as e:

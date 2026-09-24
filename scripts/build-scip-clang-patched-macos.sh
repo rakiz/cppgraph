@@ -125,7 +125,7 @@ else
 fi
 
 # Apply the ForwardDefinition bit fix (applied here after enclosing_range
-# purely for build consistency — all six patches are actually order-independent,
+# purely for build consistency — patches 1-6 are mutually order-independent,
 # see scip-clang-patches/README.md).
 FWD_PATCH="$(pwd)/scip-clang-patches/forward-definition-on-v0.4.0.patch"
 [ -f "$FWD_PATCH" ] || die "patch not found at $FWD_PATCH"
@@ -139,7 +139,7 @@ else
 fi
 
 # Apply the ReadAccess/WriteAccess syntactic classifier (applied here after
-# the three patches above purely for build consistency — all six patches are
+# the three patches above purely for build consistency — patches 1-6 are
 # actually order-independent, see scip-clang-patches/README.md). Tags
 # symbol_roles with WriteAccess (ReadAccess alongside it on read-modify-write
 # sites) based on the syntactic AST parent of the reference site.
@@ -155,7 +155,7 @@ else
 fi
 
 # Apply the SymbolInformation.kind syntactic classifier (applied here after
-# the three patches above purely for build consistency — all six patches are
+# the three patches above purely for build consistency — patches 1-6 are
 # actually order-independent, see scip-clang-patches/README.md). Fills SCIP's
 # SymbolInformation.kind (upstream leaves it at UnspecifiedKind on 100% of
 # symbols) by mapping the clang::Decl at each SymbolInformation-creating site
@@ -192,7 +192,7 @@ else
 fi
 
 # Apply the Relationship.is_type_definition emitter (applied here after the
-# five patches above purely for build consistency — all six patches are
+# five patches above purely for build consistency — patches 1-6 are
 # actually order-independent, see scip-clang-patches/README.md). Fills SCIP's
 # Relationship.is_type_definition ("go to type definition", upstream never
 # sets it): a syntactic type resolver attaches a {symbol: <type>,
@@ -207,6 +207,24 @@ else
   git -C "$BUILD_ROOT" apply --verbose "$TYPEDBY_PATCH"
   grep -q 'saveTypeDefinitionRelationship' "$BUILD_ROOT/indexer/Indexer.cc" \
     || die "patch applied but grep for 'saveTypeDefinitionRelationship' still failed — patch may be a no-op"
+fi
+
+# Apply the macro-enclosing-range fix (applied here last purely for build
+# consistency — it only requires the #504 patch above, and is order-free with
+# respect to the other five; see scip-clang-patches/README.md). Emits an
+# enclosing_range for definitions introduced through a macro (a gtest
+# TEST()/TEST_F() body, a function with a leading macro like
+# MONGO_COMPILER_ALWAYS_INLINE) by falling back to the body extent when the
+# declaration range is cross-file.
+MACRO_ER_PATCH="$(pwd)/scip-clang-patches/enclosing-range-macro-on-v0.4.0.patch"
+[ -f "$MACRO_ER_PATCH" ] || die "patch not found at $MACRO_ER_PATCH"
+if grep -q 'isSingleFileSourceRange' "$BUILD_ROOT/indexer/Indexer.cc" 2>/dev/null; then
+  echo "  already patched (isSingleFileSourceRange present) — skipping git apply"
+else
+  echo "==> Applying macro enclosing_range patch"
+  git -C "$BUILD_ROOT" apply --verbose "$MACRO_ER_PATCH"
+  grep -q 'isSingleFileSourceRange' "$BUILD_ROOT/indexer/Indexer.cc" \
+    || die "patch applied but grep for 'isSingleFileSourceRange' still failed — patch may be a no-op"
 fi
 
 # scip-clang v0.4.0 hardcodes a full-Xcode.app SDK path in setup_llvm.bzl, which

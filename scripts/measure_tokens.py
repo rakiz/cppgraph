@@ -175,7 +175,11 @@ def measure(
     whole_ctx_c = len(_run("grep", "-rn", "-C", str(GREP_VERIFY_CONTEXT), name, src_root))
     sub_c = len(_run("grep", "-rn", name, subtree)) if subtree else None
 
-    find_result = mcp_server.find_symbols(store, name)
+    # Cap `find` exactly like the MCP tool does (limit=DEFAULT_LIMIT): this
+    # measurement must mirror the tool's real payload — an uncapped call returns
+    # hundreds of groups on a broad name and inflates the cppgraph column
+    # (observed up to x50 vs the tool's real 40-capped answer).
+    find_result = mcp_server.find_symbols(store, name, limit=mcp_server.DEFAULT_LIMIT)
     syms = [r["symbol"] for r in find_result["results"]]
     find_c = _json_chars(find_result)
 

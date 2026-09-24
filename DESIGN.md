@@ -283,6 +283,32 @@ This is where semantic identity still pays off even with the fallback: the
 callee is the *exact* symbol, so the two `makeResumeToken` never mix,
 independent of how the caller is attributed.
 
+4. Historic limitation, **fixed by patchset 7**
+   (`scip-clang-patches/enclosing-range-macro-on-v0.4.0.patch`), measured
+   2026-09-23 on a full `src/mongo` #504 index: **scip-clang emitted no
+   `enclosing_range` for a definition introduced through a macro** (a gtest
+   `TEST(...)`/`TEST_F(...)` body, or a function carrying a leading macro like
+   `MONGO_COMPILER_ALWAYS_INLINE`), so every call inside such a definition was
+   uncontained and dropped (`callable_intervals` non-empty → no fallback, per
+   point 3). Measured cases before the fix: a gtest test body (callers of the
+   free test helper fell to **1** where its `references` are exactly **122**) and
+   `MONGO_COMPILER_ALWAYS_INLINE static void Ordering::verifyCardinality`
+   (`bson/ordering.h:137` — **0** callees where the stock-attribute graph had 8);
+   net on `src/mongo`, both endpoints in scope, test-side `calls` edges −72 %,
+   production-side −7 %. The pre-#504 nearest-preceding fallback did *not* solve
+   this — it attributed to an arbitrary sibling of the generated definition (for
+   a gtest `TEST`, a method of the generated class such as its destructor), which
+   is the phantom-caller class the forward-definition patch removed. The fix is a
+   follow-on to the #504 patch (it requires #504 and nothing else in our bundle):
+   when a declaration's
+   `getSourceRange()` is cross-file (its begin is the macro's spelling location),
+   fall back to the function **body** extent, which lives where the definition is
+   and is therefore single-file. After the fix, the helper again has **122**
+   callers — attributed to the correct generated `TestBody`, not a sibling — and
+   `verifyCardinality` again has **8** callees. See `TODO.md`'s scip-clang
+   section; when a graph predates patchset 7, answer "which tests use X" with
+   `references` (exact), not `callers`.
+
 ## Store
 
 The graph is an **interned SQLite** store. The design principle: **keep the hot

@@ -1,0 +1,125 @@
+# enclosing_range for macro-introduced definitions.
+#
+# Requires: enclosing_range-on-v0.4.0.patch
+#
+# PR #504's enclosing_range is skipped for a definition introduced through a
+# macro: the definition's declaration range is cross-file (its begin is the
+# macro's spelling location), so the same-file guard drops it. getEnclosingRange
+# falls back to the function body extent — written where the definition is, so
+# single-file; anything still cross-file yields an empty range (no
+# enclosing_range, an optional field).
+#
+# Applicability: requires enclosing_range-on-v0.4.0.patch (PR #504), whose
+# saveDefinition(...) arguments it rewrites; order-independent with respect to
+# the other five patches in this directory (it touches no line any of them
+# touches) and generated with minimal diff context (`-U1`). See
+# scip-clang-patches/README.md's "Independence" section.
+diff --git a/indexer/Indexer.cc b/indexer/Indexer.cc
+index c63040b..b6f47ae 100644
+--- a/indexer/Indexer.cc
++++ b/indexer/Indexer.cc
+@@ -457,3 +457,3 @@
+   this->saveDefinition(optSymbol.value(), bindingDecl.getLocation(),
+-                       std::nullopt, 0, bindingDecl.getSourceRange());
++                       std::nullopt, 0, this->getEnclosingRange(bindingDecl));
+ }
+@@ -479,3 +479,3 @@
+                        std::move(symbolInfo), 0,
+-                       enumConstantDecl.getSourceRange());
++                       this->getEnclosingRange(enumConstantDecl));
+ }
+@@ -517,3 +517,3 @@
+   this->saveDefinition(optSymbol.value(), fieldDecl.getLocation(), symbolInfo,
+-                       0, fieldDecl.getSourceRange());
++                       0, this->getEnclosingRange(fieldDecl));
+ }
+@@ -563,3 +563,3 @@
+                          std::move(symbolInfo), 0,
+-                         functionDecl.getSourceRange());
++                         this->getEnclosingRange(functionDecl));
+   } else {
+@@ -618,3 +618,3 @@
+   this->saveDefinition(symbol, startLoc, std::move(symbolInfo), 0,
+-                       namespaceDecl.getSourceRange());
++                       this->getEnclosingRange(namespaceDecl));
+ }
+@@ -794,3 +794,3 @@
+   this->saveDefinition(symbol, tagDecl.getLocation(), std::move(symbolInfo), 0,
+-                       tagDecl.getSourceRange());
++                       this->getEnclosingRange(tagDecl));
+ }
+@@ -812,3 +812,3 @@
+       this->saveDefinition(*optSymbol, decl.getLocation(), std::nullopt, 0, \
+-                           decl.getSourceRange());                          \
++                           this->getEnclosingRange(decl));                  \
+     }                                                                       \
+@@ -901,3 +901,3 @@
+                        std::move(symbolInfo), 0,
+-                       typedefNameDecl.getSourceRange());
++                       this->getEnclosingRange(typedefNameDecl));
+ }
+@@ -913,3 +913,3 @@
+                            std::move(symbolInfo), 0,
+-                           usingShadowDecl.getSourceRange());
++                           this->getEnclosingRange(usingShadowDecl));
+     }
+@@ -949,3 +949,3 @@
+     this->saveDefinition(*optSymbol, loc, std::nullopt, 0,
+-                         varDecl.getSourceRange());
++                         this->getEnclosingRange(varDecl));
+   }
+@@ -957,3 +957,3 @@
+     this->saveDefinition(*optSymbol, loc, symbolInfo, 0,
+-                         varDecl.getSourceRange());
++                         this->getEnclosingRange(varDecl));
+   }
+@@ -1226,2 +1226,36 @@
+ 
++bool TuIndexer::isSingleFileSourceRange(clang::SourceRange range) const {
++  if (!range.isValid()) {
++    return false;
++  }
++  auto begin = range.getBegin();
++  auto end = range.getEnd();
++  if (!begin.isValid() || !end.isValid()) {
++    return false;
++  }
++  return this->sourceManager.getFileID(begin)
++         == this->sourceManager.getFileID(end);
++}
++
++clang::SourceRange TuIndexer::getEnclosingRange(const clang::Decl &decl) const {
++  clang::SourceRange range = decl.getSourceRange();
++  if (this->isSingleFileSourceRange(range)) {
++    return range;
++  }
++  // Macro-decorated declaration ranges are cross-file, so use the body instead.
++  if (const auto *fn = llvm::dyn_cast<clang::FunctionDecl>(&decl)) {
++    // getBody() follows redeclarations; require this declaration to own the body.
++    if (fn->doesThisDeclarationHaveABody()) {
++      if (const clang::Stmt *body = fn->getBody()) {
++        clang::SourceRange bodyRange = body->getSourceRange();
++        if (this->isSingleFileSourceRange(bodyRange)) {
++          return bodyRange;
++        }
++      }
++    }
++  }
++  // No single-file extent: record none; the field is optional.
++  return {};
++}
++
+ PartialDocument &TuIndexer::saveOccurrence(SymbolNameRef symbol,
+diff --git a/indexer/Indexer.h b/indexer/Indexer.h
+index 22133cb..b0a111a 100644
+--- a/indexer/Indexer.h
++++ b/indexer/Indexer.h
+@@ -407,2 +407,8 @@
+                                       FileLocalSourceRange enclosingRange = {});
++
++  /// True iff both endpoints of \p range resolve to the same file.
++  bool isSingleFileSourceRange(clang::SourceRange range) const;
++
++  /// \p decl's single-file enclosing range; empty when none exists.
++  clang::SourceRange getEnclosingRange(const clang::Decl &decl) const;
+ 

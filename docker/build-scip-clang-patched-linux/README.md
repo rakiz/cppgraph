@@ -1,7 +1,7 @@
 # build-scip-clang-patched-linux — compile scip-clang natively, with our patches on top of v0.4.0
 
 Builds a `scip-clang` binary **from source, for the host's own CPU architecture**,
-carrying six patches stacked on the `v0.4.0` tag:
+carrying seven patches stacked on the `v0.4.0` tag:
 
 1. `enclosing_range` ([PR #504](https://github.com/sourcegraph/scip-clang/pull/504))
 2. the `ForwardDefinition` bit on bodyless-declaration occurrences (our own fix,
@@ -25,9 +25,18 @@ carrying six patches stacked on the `v0.4.0` tag:
    not yet upstreamed — see `typed-by-on-v0.4.0.patch`). Tags a field/variable's
    own `SymbolInformation` with a relationship to its declared type, powering
    cppgraph's `typed-by` edge kind.
+7. an `enclosing_range` fallback for **macro-introduced definitions** (our own
+   fix, not yet upstreamed — see `enclosing-range-macro-on-v0.4.0.patch`). #504
+   reads a definition's extent from `decl.getSourceRange()`, whose begin is the
+   macro's spelling location for a macro-decorated definition (a gtest
+   `TEST`/`TEST_F` body, or a leading macro like `MONGO_COMPILER_ALWAYS_INLINE`),
+   so the range is cross-file and #504 skips it — and calls inside are dropped
+   downstream. The fallback uses the function **body** extent instead. It
+   requires #504 and is applied after it (the six others stay order-independent).
 
-All six patches are bundled into one binary deliberately — there's no un-patched
-variant shipped, so every consumer of the patched binary gets all six fixes.
+All seven patches are bundled into one binary deliberately — there's no
+un-patched variant shipped, so every consumer of the patched binary gets all
+seven fixes.
 
 ## Why this exists
 

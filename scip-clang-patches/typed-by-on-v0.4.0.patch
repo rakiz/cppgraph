@@ -260,3 +260,58 @@ index 9814ea0..9d0a77e 100644
 +  }
  }
  
+diff --git a/test/index/aliases/aliases.snapshot.cc b/test/index/aliases/aliases.snapshot.cc
+index 1304f35..0e28254 100644
+--- a/test/index/aliases/aliases.snapshot.cc
++++ b/test/index/aliases/aliases.snapshot.cc
+@@ -155,2 +155,3 @@
+ //      ^ definition [..] z/W#v.
++//      relation type_definition [..] z/V#
+   
+diff --git a/test/index/functions/enable_if_templates.snapshot.cc b/test/index/functions/enable_if_templates.snapshot.cc
+index 9613b35..056502c 100644
+--- a/test/index/functions/enable_if_templates.snapshot.cc
++++ b/test/index/functions/enable_if_templates.snapshot.cc
+@@ -117,2 +117,3 @@
+ //                  ^^^^^^^ definition [..] ThreadPool#mThread.
++//                  relation type_definition [..] Ptr#
+   
+diff --git a/test/index/functions/operators.snapshot.cc b/test/index/functions/operators.snapshot.cc
+index e55579f..d3bb3c1 100644
+--- a/test/index/functions/operators.snapshot.cc
++++ b/test/index/functions/operators.snapshot.cc
+@@ -28,4 +28,6 @@
+ //                     ^ definition [..] IntPair#x.
++//                     relation type_definition [..] Int#
+ //                        ^^^ reference [..] Int#
+ //                            ^ definition [..] IntPair#y.
++//                            relation type_definition [..] Int#
+   
+@@ -79,2 +81,3 @@
+ //         ^ definition [..] TablePtr#t.
++//         relation type_definition [..] Table#
+     Table *operator->() { return t; }
+diff --git a/test/index/types/types.snapshot.cc b/test/index/types/types.snapshot.cc
+index c1d0161..7ef84d1 100644
+--- a/test/index/types/types.snapshot.cc
++++ b/test/index/types/types.snapshot.cc
+@@ -105,2 +105,3 @@
+ //    | No documentation available.
++//    relation type_definition [..] has_anon_enum/$anonymous_type_9a8b4e83cf46cb05_1#
+ //        ^^ reference [..] has_anon_enum/F1.
+@@ -128,2 +129,3 @@
+ //                 | No documentation available.
++//                 relation type_definition [..] F1#$anonymous_type_2#
+     enum { ANON2 = ANON1 } anon2;
+@@ -139,2 +141,3 @@
+ //                         | No documentation available.
++//                         relation type_definition [..] F1#$anonymous_type_3#
+   };
+diff --git a/test/index/types/types.snapshot.h b/test/index/types/types.snapshot.h
+index 71a3855..8c43e77 100644
+--- a/test/index/types/types.snapshot.h
++++ b/test/index/types/types.snapshot.h
+@@ -9,2 +9,3 @@
+ //                  ^ definition [..] has_anon_enum/e.
++//                  relation type_definition [..] has_anon_enum/$anonymous_type_a58c49fe3a7ec9aa_0#
+ //                      ^^ reference [..] has_anon_enum/E1.

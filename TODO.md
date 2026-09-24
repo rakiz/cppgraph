@@ -204,8 +204,8 @@ in `CHANGELOG.md`, releases in `versions.json`.
 cppgraph is downstream of scip-clang: some features are blocked not by our code but by
 what the indexer emits. Items here are gaps in scip-clang itself — candidates to advocate
 upstream (sourcegraph/scip-clang) or, if it comes to it, to patch in our own clone (we
-already carry the #504 `enclosing_range` patch, and six syntactic-classifier patches, that
-way). Check `SCIP_AUDIT.md` (measured against `scratch/mongo_src_tests.scip` + a #504
+already carry the #504 `enclosing_range` patch, a macro-introduced-definition
+`enclosing_range` fallback, and five syntactic-classifier patches, that way). Check `SCIP_AUDIT.md` (measured against `scratch/mongo_src_tests.scip` + a #504
 fixture, exhaustive counts, not sampling) before assuming a field is or isn't populated —
 that document is the field-by-field ground truth; this list is only the still-open asks.
 
@@ -219,6 +219,14 @@ that document is the field-by-field ground truth; this list is only the still-op
   relies on). So *we* have the feature, scip-clang doesn't — the ask upstream is to land
   #504 so a stock binary carries it and the local compile step goes away. → unblocks (stock,
   no patch) ref attribution, `line_span`, `global_init_references`.
+- **`enclosing_range` for macro-introduced definitions — fixed locally (patchset 7).**
+  Our patchset 7 (`scip-clang-patches/enclosing-range-macro-on-v0.4.0.patch`) adds a
+  body-extent fallback when a declaration's `getSourceRange()` is cross-file, so gtest
+  `TEST`/`TEST_F` bodies and `MONGO_COMPILER_ALWAYS_INLINE` inlines get an
+  `enclosing_range` again (measured: helper callers 1 → 122, `verifyCardinality`
+  callees 0 → 8). The remaining ask is **upstream**: the same fallback should land in
+  PR #504 so a stock patched binary carries it. See `DESIGN.md` § "Building calls from
+  SCIP" known-limitation 4.
 - **No `aarch64-linux` release asset.** scip-clang publishes no Linux ARM binary, forcing a
   local compile there. Verified on v0.4.0 (Feb 2026): the release ships only
   `x86_64-linux`, `dev-x86_64-linux`, `arm64-darwin` — their only ARM runner is macOS. The

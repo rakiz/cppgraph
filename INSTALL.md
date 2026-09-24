@@ -155,7 +155,7 @@ patch list) is published on
 *this project's* GitHub releases instead of upstream's — different tag, different
 asset names (see `scripts/publish-scip-clang-patched.sh`): tag
 `scip-clang-patched-v<scip-clang version>-p<patchset>` (e.g.
-`scip-clang-patched-v0.4.0-p6` — the current patchset pin is
+`scip-clang-patched-v0.4.0-p7` — the current patchset pin is
 `versions.json`'s `scip_clang.patchset_version`), asset `scip-clang-patched-<platform>` plus a
 `.sha256` sibling, for the platforms published so far:
 
@@ -166,7 +166,7 @@ asset names (see `scripts/publish-scip-clang-patched.sh`): tag
 
 ```bash
 curl -fL --retry 3 -o "$BIN_DIR/scip-clang" \
-  https://github.com/rakiz/cppgraph/releases/download/scip-clang-patched-v0.4.0-p6/scip-clang-patched-arm64-darwin
+  https://github.com/rakiz/cppgraph/releases/download/scip-clang-patched-v0.4.0-p7/scip-clang-patched-arm64-darwin
 chmod +x "$BIN_DIR/scip-clang"   # verify against the matching .sha256 asset
 ```
 

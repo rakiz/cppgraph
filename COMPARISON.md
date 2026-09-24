@@ -2,8 +2,9 @@
 
 A case study on a large real-world C++ codebase. cppgraph is
 project-agnostic; to measure at scale we use **MongoDB** as the example target —
-specifically the `src/mongo/db/pipeline` subsystem (~770 C++ files), because it
-contains a clean instance of the over/under-capture problem. Nothing here is
+specifically the `src/mongo` tree, because it contains a clean instance of the
+over/under-capture problem (`ChangeStreamEventTransformation::makeResumeToken`,
+a method that shares its name with free test helpers). Nothing here is
 MongoDB-specific; any large C++ project with name collisions and virtual
 dispatch shows the same effects.
 
@@ -13,18 +14,30 @@ over-captures (merges distinct symbols) and under-captures (drops calls it can't
 bind syntactically). This document tests that thesis on a real design question
 against two other tools, with numbers you can reproduce.
 
-> **Scope note.** The measurement below is anchored to one design question and
-> the handful of query kinds available when it was first written (`callers`,
-> `impact`, `references`). cppgraph's query surface has since grown to
-> **21 distinct query angles** (cycle detection, architecture-layering
-> conformance, module API-surface, dependency-cost against a target library,
-> fan-in/fan-out ranking, global-init-order hazards, and more). § "Capability
-> breadth" below measures that whole 21-command surface — on cppgraph alone,
-> against the stated store size; graphify and Serena are not re-run for it,
-> because neither exposes an equivalent query to put in the other columns.
-> Treat everything under "Results" through "Serena" as accurate for the one
-> question it tests, and § "Capability breadth" as a cppgraph-only measurement,
-> not a second round of the head-to-head comparison.
+> **This revision (2026-09-23) is a full re-measurement, not an update of the
+> old numbers.** Three things changed. (1) Two claims in the previous document
+> were wrong and are corrected here: it described its cppgraph graph as
+> "`src/mongo`, 5416 TUs" while that graph actually covered the *whole* tree
+> including `src/third_party` (~7600 TUs) — every count below is stated with its
+> exact scope; and it concluded clangd's index "never finishes in interactive
+> time" — measured properly, it reaches **99 % in ~75 minutes**. (2) The audit
+> found a real cppgraph **under-capture** (calls in macro-introduced definitions
+> were dropped); it is **fixed in this revision** by a new scip-clang patch
+> (patchset 7), and § "Where cppgraph is wrong too" reports it with before/after
+> numbers. (3) clangd is now measured both cold and warm.
+
+## Versions compared (all measured 2026-09-23)
+
+| Tool | Version | Released | Basis |
+|---|---|---|---|
+| **cppgraph** (this repo) | 0.4.3 | 2026-09-23 | SCIP compiler index (`scip-clang` 0.4.0, patched, patchset 7) |
+| **graphify** | 0.9.66 | 2026-09-22 | tree-sitter AST, no compiler |
+| **Serena** | 1.7.0 | 2026-08-09 | clangd 19.1.2 Language Server (live) |
+
+Target: MongoDB `d2afb4f` (checkout dated 2026-06-29), `compile_commands.json`
+regenerated from the current build graph. Nothing in `src/mongo` changed between
+the previous measurement and this one, so the deltas below come from the tools,
+not the code.
 
 ## The design question
 
@@ -32,453 +45,344 @@ against two other tools, with numbers you can reproduce.
 > builds resume tokens. **What calls this method** — and only this method, not
 > the identically-named test helper? And what's the transitive blast radius?"_
 
-This is a canonical over/under-capture case: `makeResumeToken` is really **two
-distinct symbols** — a class method and a free test-helper function — that share
-a name.
-
-## The three tools
-
-| Tool | Basis | How it answers "what calls X?" |
-|---|---|---|
-| **graphify** 0.9.16 | tree-sitter AST, symbols keyed **by name** | precomputed `graph.json`, by-name edges |
-| **cppgraph** (this repo) | SCIP compiler index (`scip-clang` 0.4.0), symbols keyed by **USR / mangled id** | precomputed SQLite graph, compiler-exact edges + transitive queries |
-| **Serena** (LSP) | clangd Language Server (v19.1.2), live | live `find_referencing_symbols`, one hop — index-permitting |
+This is a canonical over/under-capture case: `makeResumeToken` is really
+**four distinct symbols** across `src/mongo` — the class method, a free
+test-helper function, a second helper (`makeResumeTokenWithEventId`), and an
+anonymous-namespace test function — three of which share the name.
 
 ## Results
 
+cppgraph graph for this measurement: **814,073 nodes, 2,677,348 `calls`/
+`inherits` edges, 5,284,223 references** (scope: `src/mongo`, 5416 TUs, tests
+included, plus the bazel-generated sources and the handful of third-party TUs
+the tree reaches; `src/third_party` otherwise excluded). Built in **~27 minutes**
+in one pass on 14 cores; store 592 MB (from an 864 MB `.scip`).
+
 | Query | graphify | cppgraph | Serena / clangd |
 |---|---|---|---|
-| callers of the **method** `ChangeStreamEventTransformation::makeResumeToken` | **0** call edges | **2** real callers (the earlier stock-binary graph reported a 3rd, a decl false-positive — since fixed, see below) | **1** same-TU call site (see below) |
-| callers of the **free helper** `change_stream_test_helper::makeResumeToken` | **0** call edges | **122** (test code) | needs whole-repo index (never completed in 6 min) |
-| the two `makeResumeToken` kept distinct? | yes (file+class id) but with no call edges | **yes**, with correct separate caller sets | yes (compiler-grade) |
-| `Value` (common nested type) | **431** unrelated calls collapsed onto **one** node | hundreds of distinct `Value` symbols kept separate | distinct |
-| type `ResumeTokenData` usage | name-collisioned | 0 callers (it's a type) + **155 exact use-sites** via the reference index | refs, one hop, index-permitting |
-| transitive blast-radius of the method | not supported | **14 symbols** in one query | N sequential LSP round-trips |
-| latency to first cross-TU answer | instant (precomputed) | instant (precomputed) | **>6 min and counting** (background index) |
+| `find` splits the name | no (by-name) | **4 distinct symbols** | resolves one at a time, live |
+| callers of the **method** | **0** call edges | **2** real callers | **1** (same-TU only; stays 1 even fully indexed) |
+| callers of the **free helper** | **0** call edges | **122** (attributed to the generated test `TestBody`) | needs the whole-repo index; never the full set |
+| the two `makeResumeToken` kept distinct? | yes (file+class id), but no call edges | **yes**, with correct separate caller sets | yes (compiler-grade) |
+| `Value` (ubiquitous nested type) | **collapsed** — see below | distinct symbols, keyed by USR | distinct |
+| type `ResumeTokenData` usage | 35 `references` edges on one node | 0 callers (it's a type) + **177 exact use-sites** | **182** references once fully indexed (12 before) |
+| transitive blast-radius of the method | `affected` finds **nothing** | **2** symbols, one query | N sequential LSP round-trips |
+| latency to first cross-TU answer | instant (precomputed) | instant (precomputed) | >70 min to index; instant **after** that (warm) |
 
-## What graphify got wrong (measured, not assumed)
+## graphify — measured, not assumed
 
-graphify's graph on this subsystem: **17,789 nodes / 43,405 edges** (3,201 of
-them `calls`). Two concrete failures:
+graphify 0.9.66 has grown a lot since the previous measurement (path, affected,
+god-nodes, communities, exports, hooks, watch). Its basis has not changed: it
+parses C++ with **tree-sitter** (`tree_sitter_cpp` 0.23.4), with **no compiler
+integration** — a grep for `libclang`/`compile_commands`/`clangd` in the package
+returns nothing, and its SCIP-JSON ingest module is explicitly "not wired to the
+CLI".
+
+On a copy of `src/mongo/db/pipeline` (the previous document's scope), graphify
+builds **18,847 nodes / 43,461 edges** in ~20 s (2,778 of them `calls`):
 
 1. **Under-capture — real calls dropped.** The method
    `ChangeStreamEventTransformation::makeResumeToken` has **zero** incoming
    `calls` edges; the free helper likewise. graphify sees the *definitions*
    (`contains`/`defines` edges) but never binds the actual call sites to them.
-   For the design question, graphify's answer to "what calls this method?" is
-   **"nothing"** — the two genuine `applyTransformation` overrides and the 122
-   test call sites are simply absent.
+   For the design question, its answer is **"nothing"**. `graphify affected
+   makeResumeToken` reports "No affected nodes found", and `graphify path
+   applyTransformation makeResumeToken` finds no directed path.
 
-2. **Over-capture — hundreds of distinct sites merged.** The single node
-   `Value` (labelled from `document_source_tee_consumer.h:59`) has **431
-   incoming `calls` edges** — every `.getValue()`, `serialize() → Value`,
-   `parse() → Value` across the whole subsystem got attributed to one arbitrary
-   `Value` node, because they all mention "Value" by name. `Value` is one of the
-   most common types in MongoDB; a by-name graph collapses them all.
+2. **Over-capture — distinct sites merged into one node.** The single
+   `Value` node (labelled from `document_source_tee_consumer.h`) carries
+   **102 incoming `calls` edges**, 699 `references` and 237 `imports` — every
+   `.getValue()`, `serialize() → Value`, `parse() → Value` in the subsystem
+   attributed to one arbitrary node, because they all mention "Value" by name.
+   `Value` is one of the most common types in MongoDB.
 
-These are not bugs in graphify — they are the **inherent limit of keying a graph
-by name from a syntactic AST**, which is exactly what this project set out to
-avoid.
+graphify does try to type member calls via a **per-file `var → ClassName`
+table**, and it guards against god-nodes: a receiver type that doesn't resolve
+to exactly one definition produces **no edge** ("a false call edge is worse
+than a missing one"). Free calls fall back to a lowercased bare-name lookup
+with tie-breakers, then no edge. That is a reasonable design for a syntax-only
+tool — but it is still by-name, so `makeResumeToken` resolves to nothing
+(ambiguous) and `Value` collapses.
 
-## What cppgraph gets right
+On the **full `src/mongo` tree** (10,089 source files, `.inl`/`.ipp` skipped),
+graphify builds **222,221 nodes / 550,268 edges** in **~112 s**, no LLM, no
+network. The `Value` collapse is worse there, not better: **583 distinct nodes
+labelled `Value`**, each carrying a handful of unrelated `references`. The
+"most connected nodes" it reports are `unique_ptr` (4,391 edges),
+`NamespaceString()` (3,735), `ExpressionContext()` (2,064) — generic names, as
+expected for a by-name graph.
 
-Because edges come from the compiler's resolved symbol (USR), the two
-`makeResumeToken` symbols carry **separate, correct caller sets** (2 vs 122 —
-the original stock-binary measurement saw 3, the decl false-positive fixed
-below), `Value` stays hundreds of distinct symbols, and the transitive blast-radius
-(`impact`) is one query returning 14 symbols. cppgraph also records **155 exact
-use-sites** for the *type* `ResumeTokenData` — a symbol with **zero** call
-edges, invisible to any call-graph, that a by-name tool collapses with every
-other `ResumeTokenData` mention.
+## Serena (clangd / LSP) — measured, not assumed, and measured both ways
 
-The one caveat we *owned*: the original measurement reported **3** method
-callers where **2** are genuine — the third was a false-positive from the
-nearest-preceding attribution heuristic against a member's in-class
-declaration. It sat in the *safe* direction (over-, never under-report on real
-function-body calls), and it is **fixed**: our scip-clang patch
-`forward-definition-on-v0.4.0.patch` tags bodyless in-class declarations with
-SCIP's `ForwardDefinition` role so the builder drops them from the callable
-candidates — the graph now isolates exactly the **2** real callers. (A #504
-binary's `enclosing_range` protects the same case; a stock *official* binary,
-lacking both signals, keeps the over-capture.) See `DESIGN.md` § "Building
-calls".
+Serena is **not** a by-name tool: it drives clangd (a Language Server), so
+where it answers, it answers with compiler precision. graphify is the outlier,
+not Serena. The previous document measured only the first six minutes of
+clangd's background index and concluded it was unusable. We measured it
+properly, in both states, because a tool's *first-run* behaviour matters as much
+as its best case.
 
-## Serena (clangd / LSP) — measured, not assumed
+We drove **Serena's bundled clangd 19.1.2** directly against the MongoDB
+checkout (the same engine Serena's `find_referencing_symbols` uses), with
+mongo's `compile_commands.json`, `--background-index`, 14 workers, from a cold
+index:
 
-Serena is **not** a by-name tool: it drives clangd (a Language Server), so on
-*precision* it is compiler-grade like cppgraph — where it answers, it answers
-correctly. graphify is the outlier, not Serena. But the LSP **query model** costs
-you on a codebase this size, and we measured it.
+- **Cold, first use (t = 0).** The first query returns in **~2.5 s** — Serena
+  sets `server_ready` immediately and waits a fixed 2 s, once, before the first
+  cross-file request; it does **not** wait for the index and does **not** say
+  the answer is incomplete. Measured: **1** caller of the method (the same-TU
+  call site) and **12** references of `ResumeTokenData` — against cppgraph's
+  **2** and **177**. This is the real first-run experience: confident,
+  immediate, incomplete.
+- **Indexing.** clangd indexes 7,587 files, reaching **99 % only at ~74
+  minutes**. Throughout, `textDocument/references` on `ResumeTokenData` climbs
+  (12 → 55 → 179 → **182**); `callHierarchy/incomingCalls` on the method stays
+  at **1** the entire time (the cross-TU virtual-dispatch callers are never
+  returned by clangd's call hierarchy here).
+- **Essentially complete (99 %).** References converge to **182** for `ResumeTokenData` —
+  essentially matching cppgraph's **177**. So on *references*, clangd is
+  correct once warm; the old document, stopping at six minutes, understated it.
+  Callers of the method: still **1**.
+- **Warm restart.** clangd caches its index under `.cache/clangd`. On the next
+  start, references are complete within **~0.5 s** (12 → 182 on the first poll).
+  So the cold-index cost is paid **once per checkout**, and only when clangd's
+  fingerprint still matches (it includes the md5 of `compile_commands.json`); a
+  regenerated compdb or a `git pull` invalidates it.
 
-We drove **Serena's own bundled clangd (v19.1.2)** directly against the MongoDB
-checkout (same engine Serena's `find_referencing_symbols` uses), with mongo's
-`compile_commands.json` and `--background-index`:
+Two structural facts follow, independent of timing:
 
-- **`callHierarchy/incomingCalls` on the method** returned in **~2.7 s** — but
-  with **1** caller: the direct, same-translation-unit call site. The full
-  override / virtual-dispatch caller set that cppgraph gives (the **2** genuine
-  ones) lives in *other* TUs and needs the whole-project index.
-- **`textDocument/references`**, polled over a **6-minute** background-index
-  warmup, stayed at **1 reference, 0 cross-TU** the entire time. clangd indexes
-  MongoDB's ~6000 TUs lazily in the background; that index simply does not finish
-  in interactive time, so cross-file / whole-program answers never arrive within
-  a usable budget.
+- **Serena exposes no call hierarchy.** `serena tools list` has
+  `find_referencing_symbols` (→ `textDocument/references`) but nothing that
+  consumes `callHierarchy/incomingCalls`/`outgoingCalls`. Transitive questions
+  ("everything that transitively calls X", shortest call path, blast radius)
+  mean the caller drives the recursion with N sequential LSP round-trips.
+- **`find_symbol` is a whole-project `documentSymbol` walk**, not a
+  `workspace/symbol` query — slow on a large tree.
 
-> This matches the maintainer's lived experience ("Serena on mongo — I use it,
-> but it's not very useful"): great for the file you're in, weak for
-> whole-program structure on a large C++ tree, because the LSP index is the
-> bottleneck.
+Serena's real strength is elsewhere, and cppgraph has no equivalent: it is an
+**editing** toolkit bound to the live working tree — `rename_symbol`,
+`replace_symbol_body`, `safe_delete_symbol`, `find_implementations`,
+diagnostics — always in sync with your unsaved edits. cppgraph is a read-only
+snapshot; Serena is a live editor.
 
-So the real cppgraph-vs-Serena axis is the **query model**:
+## Where cppgraph is wrong too
 
-- **Serena = live, one-hop navigation** over a running clangd + the full source
-  checkout. Excellent for "what's around the symbol I'm editing, right now, in
-  sync with my edits". But *transitive* questions ("everything that transitively
-  calls / derives from X", shortest call path, full blast radius) mean the caller
-  drives the recursion with N sequential LSP round-trips — each waiting on an
-  index that, on mongo, isn't there.
-- **cppgraph = a precomputed, portable graph artifact.** The whole-project index
-  is built **once** (full mongo: ~40 s incl. references), then transitive
-  traversal, shortest-path and blast-radius are **first-class single queries**
-  served instantly off B-tree indexes; responses are **token-budgeted** for an
-  LLM loop; the graph is a self-contained file you can ship, diff, and query
-  **offline** without clangd or the source tree; and it carries **reference
-  locations for types** that have no call edges at all.
+This project's whole premise is "measure, don't guess", so the audit cuts both
+ways. Re-indexing with the patched (#504) binary exposed a real
+**under-capture**, and a scope/attribution change between the previous
+measurement and this one:
 
-The trade-off cppgraph pays for that: the graph is a snapshot and goes stale
-until refreshed (`cppgraph status --root` detects drift against the indexed
-commit and points at an incremental update). Serena is always in sync with the
-working tree.
+**1. Calls inside macro-generated definitions *were* dropped — fixed this
+revision.** scip-clang emits `enclosing_range` (each definition's body extent),
+and cppgraph attributes a call to the innermost callable definition whose
+extent contains it. The #504 patch records that extent from
+`decl.getSourceRange()` — but for a definition introduced through a macro (a
+gtest `TEST`/`TEST_F` body, or a function carrying a leading macro like
+`MONGO_COMPILER_ALWAYS_INLINE`) that range's *begin* is the macro's spelling
+location, in the macro's own file. The range is cross-file, so #504's same-file
+guard skipped it, and every call inside the definition was dropped. Measured on
+the pre-fix graph: callers of the free helper
+`change_stream_test_helper::makeResumeToken` = **1** (its 122 *references* were
+already exact), and `MONGO_COMPILER_ALWAYS_INLINE static void
+Ordering::verifyCardinality` (`bson/ordering.h:137`) = **0** callees instead of
+8. Net on `src/mongo`: test-side `calls` edges **763,800 → 217,039 (−72 %)**,
+production-side **−7 %**.
+
+The old (stock) behaviour masked this by attributing to the *nearest preceding*
+callable — a caller was produced, but often the **wrong** one (for a gtest
+`TEST`, an arbitrary sibling method of the generated class, e.g. its
+destructor); cppgraph's `ForwardDefinition` patch had removed exactly those
+phantoms, so the #504 graph chose to drop rather than re-fabricate.
+
+**Fixed in patchset 7** (`scip-clang-patches/enclosing-range-macro-on-v0.4.0.patch`):
+when a declaration's `getSourceRange()` is cross-file, fall back to the function
+**body** extent — written where the definition is, so single-file. Same graph,
+after: the helper again has **122** callers, now attributed to the **correct**
+generated `TestBody` (`..._Test#TestBody`), and `verifyCardinality` again has
+**8** callees. Test-side `calls` edges recover to **713,554**; the residual
+**−6 %** versus stock (production 587,031 → 550,717) is the intended removal of
+the declaration-site/sibling phantoms — a smaller, safer graph, not a loss.
+
+**2. `impact` follows `calls` edges, not virtual dispatch.** The blast radius of
+`makeResumeToken` (a virtual override) is reported as **2** callers; clangd's
+call hierarchy likewise returns **1**. The base-class virtual call sites
+(`ChangeStreamEventTransformer::applyTransformation` → the virtual override) are
+reached over a vtable, which no static call graph — cppgraph's, graphify's, or
+clangd's — resolves here. The graph is a *lower bound* on runtime reachability.
+
+**3. Scope honesty.** The previous graph's node/edge counts (975,932 / 3,066,339)
+were for the **whole tree**; this measurement's (814,073 / 2,677,348) are for
+`src/mongo`. Every number in this document carries its scope; do not compare
+counts across the two documents without checking it.
 
 ## Token cost: cppgraph vs a grep-and-read loop
 
-The tool an LLM actually reaches for first isn't graphify or Serena — it's
-`grep`. So the most practical comparison is: how many **tokens** does it cost to
-answer *"who calls X?"* each way? (Fewer tokens ingested = cheaper, faster, and
-more room left in the context window.)
+The tool an LLM actually reaches for first is `grep`. So the practical question
+is: how many **tokens** does it cost to answer *"who calls X?"* each way?
 
-The honest grep cost is **not the raw match dump.** grep can't tell a call from
-a declaration, a comment, a string, or a *different* symbol that happens to share
-the name — so to actually answer the question it has to **read around every hit**
-to judge it. The raw dump is only a floor; the real cost is grep + that reading
-(modelled as `grep -C 10`, deliberately conservative — real disambiguation often
-needs the whole enclosing function). cppgraph's cost is the **MCP tool JSON** the
-LLM ingests: `find` (splits the name into its distinct compiler symbols, which
-grep cannot) + `who_calls` on the one you mean — exact, nothing left to filter.
-
-**What was indexed.** MongoDB `src/mongo` at commit `d2afb4f`, **tests
-included** — 5,416 translation units (1,963 of them tests), 821k symbols. Tests
-are in the index *on purpose*: grep scans every file, tests among them, so for
-the comparison to be fair cppgraph must have seen those files too. (`who_calls`
-still filters test *callers* out of the answer by default — that's a cppgraph
-feature, and grep's test matches are counted as noise for the production
-question.) The resulting store is **577 MB** on disk (from a ~1.0 GB `.scip`),
-built once (minutes to hours — see the pipeline table in the README) and reused
-for every query: all the wins below are *after* that one-time cost.
+The honest grep cost is **not the raw match dump** — grep can't tell a call from
+a declaration, a comment, a string, or a different symbol sharing the name, so
+to answer it must **read around every hit** (`grep -C 10`, conservative).
+cppgraph's cost is the **MCP tool JSON** the LLM ingests: `find` (which splits
+the name into distinct compiler symbols) + `who_calls` on the one you mean.
 
 One question across the whole spectrum, reproducible with
-`scripts/measure_tokens.py --suite`:
+`scripts/measure_tokens.py --suite` (which now mirrors the tool's 40-result
+`find` cap — the previous numbers were inflated by comparing an uncapped `find`
+against the capped tool):
 
 | Regime | Symbol (`who calls …?`) | grep raw | grep + read | cppgraph | grep noise | Verdict\*\* |
 |---|---|---:|---:|---:|:---:|:---:|
-| **Rare unique name** — grep's best case | `setBlockNewUserShardedDDL` | 94 | 1,836 | 232 | 0% | grep wins raw; **8× loss** on read |
-| | `_amIFreshEnoughForPriorityTakeover` | 105 | 1,976 | 197 | 33% | **10×** |
-| **Real method** (worked example below) | `ChangeStreamEventTransformation::makeResumeToken` | 6,635 | 110,857 | 408 | 98% | **272×** |
-| **Real class / method** | `ResumeToken::parse` | 68,651 | 598,711 | 3,122 | 96% | **192×†** |
-| | `PlanExecutor::getPostBatchResumeToken` | 43,145 | 419,162 | 2,756 | 100% | **152×†** |
-| | `BSONObjBuilder::obj` (4000+ callers) | 281,594 | 4,037,937 | 7,961 | 99% | **507×†** |
-| **Ubiquitous type name** | `NamespaceString::NamespaceString` | 717,673 | 8,015,288 | 5,365 | 98% | **1,494×†** |
-| | `OperationContext::getClient` | 973,323 | 11,952,684 | 6,281 | 100% | **1,903×†** |
+| **Rare unique name** — grep's best case | `setBlockNewUserShardedDDL` | 94 | 1,836 | 254 | 0 % | grep wins raw; **7× loss** on read |
+| | `_amIFreshEnoughForPriorityTakeover` | 105 | 1,976 | 184 | 67 % | **11×** |
+| **Real method** | `ChangeStreamEventTransformation::makeResumeToken` | 6,635 | 110,857 | 432 | 98 % | **257×** |
+| **Real class / method** | `ResumeToken::parse` | 68,651 | 598,711 | 2,724 | 99 % | **220×†** |
+| | `PlanExecutor::getPostBatchResumeToken` | 43,145 | 419,162 | 3,025 | 100 % | **139×†** |
+| | `BSONObjBuilder::obj` (4000+ callers) | 281,594 | 4,037,937 | 9,515 | 99 % | **424×†** |
+| **Ubiquitous type name** | `NamespaceString::NamespaceString` | 717,673 | 8,015,288 | 8,203 | 98 % | **977×†** |
+| | `OperationContext::getClient` (873 callers) | 973,323 | 11,952,684 | 6,245 | 100 % | **1,914×†** |
 
 **†** = theoretical multiplier: grep + read exceeds one context (~200k tok), so
-nobody ingests it. The number shows the **scale** of what grep would need to
-answer completely; in practice grep has to **cut** the dump to what fits and
-answer from that partial view — so the result is **neither correct** (unverified
-matches, name-collisions, comments/decls counted as calls) **nor complete**
-(silently missing call sites), with no signal that anything was dropped. The
+nobody ingests it; the number shows the **scale** of what grep would need. In
+practice grep truncates the dump and answers from a partial, unverified view —
+**neither correct nor complete**, with no signal that anything was dropped. The
 rare-name rows (no †) are real, ingestible costs.
 
-**Latency, too.** Per query (best of 3, warm cache): `grep -rn` scans `src/mongo`
-in **~1.2 s**; cppgraph's `find` + `who_calls` returns in **~0.15 s** off the
-prebuilt store — ~8× faster, and that's *excluding* the one-time index build.
-Neither figure counts the time the LLM then spends *consuming* the returned
-tokens — but that time is **proportional to the token columns above**, so the
-same ratios carry straight over to end-to-end latency: grep isn't just costlier
-on a hot symbol, it's slow enough that the agent truncates.
+**Latency.** Per query (best of 3, warm cache): `grep -rn` scans `src/mongo` in
+**~1.7 s**; cppgraph's `find` + `who_calls` returns in **~0.15 s** off the
+prebuilt store (in-process, what the MCP path pays; the CLI adds ~0.8 s of
+Python startup, still ~2× faster than grep end-to-end). Neither counts the time
+the LLM spends *consuming* the returned tokens, which is proportional to the
+token columns above.
 
-Reading the spectrum:
+**Worked example — `makeResumeToken`.** The method resolves to **4** distinct
+symbols. grep dumps **156 lines / ~6,635 tokens**, of which **2** are real call
+sites (**98.7 % noise**); reading around all 156 to trust those 2 costs
+**~110,857 tokens**. cppgraph: `find` (304 tok) + `who_calls` on the method
+(128 tok) = **~432 tokens**, exactly the 2 callers. **257× leaner, and exact
+where grep is ambiguous.**
 
-- **grep's best case is a rare, uniquely-named symbol** — a private helper it
-  pins in ~2 lines. There its *raw* dump (94 tok) is cheaper than cppgraph's
-  ~200-token scaffolding. But the moment grep reads those lines to confirm
-  they're real calls (which it must, to be correct), it costs **~8–10× more**.
-  And these are the symbols you'd never reach for a graph anyway — grep already
-  works. So grep wins only the queries you wouldn't ask cppgraph.
-- **The common case — any real class or method you'd navigate — grep answers,
-  but incompletely.** Its output is 95–100% noise (comments, decls, and every
-  same-named symbol), and reading enough to disambiguate blows past a whole
-  context window. grep doesn't fail loudly: the agent truncates the dump to what
-  fits and answers from a partial, unverified view — **silently missing call
-  sites**, with no signal it's incomplete. cppgraph answers in a few thousand
-  tokens, exact and complete.
-- **On a hot type name** (`OperationContext`, `NamespaceString`) the raw grep
-  dump *alone* is ~700k–970k tokens — it overflows the context before any
-  reading. The 8–12M "grep + read" figure is a theoretical ceiling nobody
-  ingests; in practice the agent truncates hard, so the answer is **incomplete
-  and unreliable** — which is worse than a loud failure, because it looks done.
-  cppgraph: ~5–6k, exact and complete.
+**Method.** tokens ≈ **characters ÷ 4** (`scripts/measure_tokens.py`, tunable) —
+conservative for code (SCIP strings tokenize denser, so true counts are higher
+on both sides; ratios are stable). grep is scoped to all of `src/mongo`.
+cppgraph pays a one-time index (~27 min) amortized over every later query.
 
-**Worked example — `makeResumeToken`, tying back to over/under-capture.** The
-method resolves to **four** distinct symbols across `src/mongo` (the method, two
-test-helper free functions, an anonymous-namespace test symbol) — the same
-name-collision that sinks a tree-sitter tool. grep dumps **156 lines / ~6,635
-tokens**, of which **3** are real call sites: **98% noise.** To trust those 3 you
-read around each of the 156 → **~110,857 tokens.** cppgraph: `find` (255 tok,
-splits the four apart) + `who_calls` on the method (153 tok) = **~408 tokens**,
-exactly the callers (measured on the stock-binary graph: 3, incl. the decl
-false-positive above — since fixed, the graph returns exactly the **2** real
-ones, a few tokens fewer). **272× leaner, and exact where grep is ambiguous.**
+## Capability matrix — what each tool can actually do
 
-**Where cppgraph's own tokens go — the token-lean defaults.** Each fan-out hit
-could carry the raw 150-250-char SCIP symbol string; instead the tools ship a
-readable label derived from it (`full_symbols=True` to opt out) and drop test
-callers (`exclude_tests=False` to keep them). On a hub symbol the two compound —
-`who_calls(ResumeToken::parse)`:
+cppgraph exposes its query surface identically as CLI subcommands and MCP tools
+(`AGENTS.md`'s parity rule): 23 query commands + 7 operational ones on the CLI,
+24 MCP tools. `graphify` and `Serena` are each strong in a different place.
 
-| who_calls payload | ≈ Tokens | |
-|---|---:|---|
-| raw SCIP strings + test callers kept (pre-optimisation) | ~5,055 | 73 callers |
-| + drop test callers | ~1,050 | 14 production callers (−79%) |
-| + derive labels from SCIP (**default**) | ~555 | −47% again |
+| Capability | cppgraph | graphify 0.9.66 | Serena 1.7.0 |
+|---|:---:|:---:|:---:|
+| Compiler-exact caller/callee (`calls`) | **yes** | by-name, drops/mis-binds | via `references` only |
+| Exact use-sites of a **type** (`references`) | **yes** | noisy (`references` edges) | yes (warm) |
+| Callees / callers, one hop | yes | partial | one hop |
+| Transitive impact / forward reachability | **yes, one query** | `affected` (CLI only) | N round-trips |
+| Shortest call path A→B | **yes** | `path` (by-name) | no |
+| Fan-in / fan-out ranking (`hotspots`) | **yes** | `god-nodes` | no |
+| Cycle detection (`strongly-connected-components`) | **yes** | no | no |
+| Architecture / layering conformance | **yes** | no | no |
+| Module API surface (external uses) | **yes** | no | no |
+| Dependency cost (call sites into a library) | **yes** | no | no |
+| Global-init-order hazards | **yes** | no | no |
+| Largest bodies (`line-span`), zero-caller defs | **yes** | no | no |
+| Class members / base / subclasses | **yes** | partial | partial (`find_symbol`) |
+| File outline / symbol search | `find`, `outline` | `query`, `explain` | `find_symbol` |
+| Documentation in the graph | yes (docstrings) | no | no (reads source) |
+| Editing (`rename`, body replace, safe delete) | **no** | no | **yes** |
+| Live working-tree sync | no (snapshot) | via `watch`/hooks | **yes** |
+| Visualisation / export | 1 HTML viewer | **html, svg, graphml, obsidian, wiki, neo4j…** | no |
+| Offline, no server needed | **yes** | yes | no (runs clangd) |
+| Token-budgeted LLM output | **yes (MCP)** | yes (MCP) | tool results |
 
-The flip side, kept honest: a symbol with many *genuine* production callers costs
-more in cppgraph than a trivial one — but that *is* the complete, attributed
-answer, and `find` is capped at 40 symbols so even the most ambiguous name stays
-bounded. grep's dump never contains an attributed caller list at all.
+### Detail on cppgraph's whole-graph queries (all on the 814k-node graph)
 
-\*\* **Verdict** is the grep + read / cppgraph multiplier. It's a real,
-ingestible ratio while grep + read fits one context (~200k tok); past that
-(marked **†**) it's theoretical — the scale of what grep would need, not what an
-agent ingests, so grep truncates and its answer is incomplete (see the † note
-above). **Method:** tokens ≈ **characters ÷ 4** (`scripts/measure_tokens.py`,
-tunable) — the rough rule for prose; code and SCIP strings (punctuation, hex
-hashes, paths) tokenize *denser* (~3–3.5 chars/token), so true counts are
-**higher on both sides** — deliberately conservative, ratios stable. No exact
-tokenizer is used (Claude's isn't available offline; a proxy like tiktoken's
-`o200k_base` would shift both sides similarly). grep is scoped to all of
-`src/mongo` — the realistic case, the LLM isn't told how to scope. cppgraph pays
-a one-time index (~minutes) amortized over every later query.
-
-## Capability breadth: what's new since this measurement
-
-The sections above test one design question with the query kinds available
-when this document was first written. cppgraph's query surface has grown
-since — 21 distinct query angles today, exposed identically as MCP tools and
-CLI subcommands (`AGENTS.md`'s parity rule). Unlike the categorical claims an
-earlier draft of this section made, the numbers below are **freshly measured**
-against the real mongo checkout used throughout this document (a rebuilt
-store: **975,932 symbols, 3,066,339 `calls`/`inherits` edges, 6,596,164
-references**), not asserted. graphify/Serena aren't re-run for these — none of
-them exposes an equivalent query at all (that's the point being measured: a
-capability gap, not a speed gap), so there is nothing to put in the other two
-columns. Where a query needs data this graph doesn't carry (see the caveats
-below), that is stated as such, not glossed over.
-
-### Every query angle, one real number
-
-All measured against the same real mongo checkout (975,932 symbols,
-3,066,339 edges), each in a few seconds or less unless noted. This is the
-full 21-command surface — nothing skipped.
-
-| Query | Real result |
-|---|---|
-| `find` | resolves `makeResumeToken` to its 2 distinct symbols (method vs. free helper) — the over/under-capture case § "The design question" is built on |
-| `callers` | 2 genuine callers of the method vs. graphify's 0 (§ "Results") |
-| `callees` | (symmetric to `callers`; same edge data, opposite direction) |
-| `bases` | 3 direct base classes of `DocumentSourceGroup` (`DocumentSource`, `DocumentSourceGroupBase`, `RefCountable`) |
-| `subtypes` | 136 direct subclasses of `DocumentSource` (including test doubles) |
-| `impact --kind inherits` | 99 symbols transitively inherit from `DocumentSource` in production code (one of them reaching into an `enterprise` module) |
-| `references` | 155 exact use-sites of the type `ResumeTokenData` — a symbol with 0 call edges, invisible to any call-graph tool (§ "What cppgraph gets right") |
-| `path` | 1-hop chain from `ChangeStreamDefaultEventTransformation::applyTransformation` to `makeResumeToken`, resolved instantly |
-| `impact` (calls) | 14-symbol transitive blast radius of the method, one query (§ "Results") |
-| `reachable_from` | same traversal engine as `impact`, forward direction — mirrors it exactly |
-| `hotspots` | 66,683 symbols ranked by fan-in in ~6.5s (excluding tests/`third_party`) |
-| `dependency_cost` | 29,929 call sites into abseil-cpp from mongo's own code, across 3,983 target symbols, ~6s |
-| `stats` | 901 directories ranked by symbols+edges+refs in ~5s; `db/pipeline` tops it at 45,794 symbols |
-| `line_span` | 35,416 definitions ranked by body size on a real `#504`-attributed sub-index; largest a 2,549-line `boost::container::vector` internal |
-| `no_incoming_calls` | 16,607 defined callables with zero static callers (fact, not a dead-code verdict) |
-| `global_init_references` | correctly returned **0** hazards on the two registry globals checked — a precise negative, not a failure |
-| `boundary_violations` | 2,871 real edges from `client/` into `db/` internals, ~3s |
-| `api_surface` | 1,603 symbols actually used from outside `db/pipeline/`, ~10s |
-| `outline` | 52 definitions listed for one real `.cpp` file in one call, replacing a full read |
-| `class_members` | 16 members of `DocumentSourceGroup` listed by line, instantly |
-| `strongly_connected_components` | 879 cyclic groups project-wide (879 incl. `third_party`, 349 in mongo's own code), ~2s |
-| `explain` | pulls `DocumentSourceGroup`'s real doc comment ("hash based group implementation...") plus exact definition site, one call |
-| `export`/`view` (visualize) | real `graph.json` (4 nodes, 6 edges for a 1-hop neighbourhood) ready for the offline HTML viewer, instant |
-| `update --rescope` | verified end-to-end on a small real project (not re-measured at mongo scale — see below) |
-
-### Detail on the newer capabilities
-
-- **Architecture/layering conformance (`boundary_violations`).** Real rule
-  tried: "does `src/mongo/client/` (the driver-facing client library) call
-  into `src/mongo/db/` (server internals)?" — **2,871 real edges**, in under
-  3 seconds, e.g. `AsyncDBClient::_parseHelloResponse` calling
-  `WireSpec::getWireSpec` and wire-version validation directly. Not a query
-  shape either other tool exposes: graphify has no rule engine over its
-  by-name edges, and clangd's LSP protocol has no request for "does an edge
-  cross this directory boundary" — that's a graph-analytics question, not a
-  language-server one.
-- **Cycle detection (`strongly_connected_components`).** Full mongo graph
-  (excluding tests): **879 cyclic groups of 2+ mutually-reachable symbols**,
-  computed in ~2 seconds — the biggest, 5,519 symbols, is the embedded
-  mozjs/SpiderMonkey engine (expected: a JS interpreter is inherently
-  mutually recursive). Restricted to mongo's own code (excluding
-  `third_party/` and tests): **349 cyclic groups**, the biggest 169 symbols,
-  centered on `BSONElement`'s comparison/serialization methods. An LSP
-  session answers questions about one symbol at a time, not "which sets of
-  definitions can all reach each other" — this is a whole-graph query by
-  construction.
-- **Module API surface (`api_surface`).** `src/mongo/db/pipeline/`: **1,603
-  distinct symbols** actually called or referenced from outside that
-  directory, in ~10 seconds over the full graph — the observed external-usage
-  surface, not a visibility annotation. Requires exactly the cross-TU,
-  whole-project edge set graphify's by-name graph gets wrong (per the
-  measured over/under-capture above) and clangd's incremental index doesn't
-  finish building on mongo-scale input (per the 6-minute measurement below).
-- **Dependency cost (`dependency_cost`).** "If mongo dropped abseil-cpp, how
-  many real call sites change?" — **29,929 call sites across 3,983 distinct
-  target symbols**, in ~6 seconds. A blast-radius question answered from the
-  precomputed graph in one query; the LSP equivalent would be one
-  `references` round-trip per one of those 3,983 symbols.
-- **Fan-in ranking (`hotspots`).** **66,683 distinct symbols** ranked by
-  incoming-call count across the non-test, non-`third_party` graph, in ~6.5
-  seconds — a global ranking not answerable one LSP request at a time.
-- **What the full mongo graph can't answer honestly — and what a `#504` index
-  can.** `no_incoming_calls`, `line_span`, and `global_init_references` all
-  **refused outright** on the stock-indexed full mongo graph instead of
-  guessing — they need attributed reference data (`enclosing_range` from a
-  `#504`-built scip-clang, plus `--attributed-refs` for the last one), and
-  that particular store was built with a stock binary. cppgraph's stance
-  (`DESIGN.md`, `SCIP_AUDIT.md`) is to degrade to a stated refusal rather
-  than a plausible-looking guess. Re-indexing a real subsystem
-  (`src/mongo/db/pipeline/window_function/`, 42 TUs, ~15 seconds end-to-end
-  with the patched binary) confirms all three work correctly once the data
-  is there: **`line_span`** ranked 35,416 real definitions by body size (the
-  largest in scope, a `boost::container::vector` internal at 2,549 lines);
-  **`no_incoming_calls`** found 16,607 defined callables with zero static
-  callers (reported with the project's standing caveat — a fact about the
-  graph, never a bare "dead code" claim); **`global_init_references`**
-  correctly returned **zero** hazards for the two registry globals checked
-  (`Expression::parserMap` and a `MONGO_INITIALIZER` registerer) — a real,
-  precise negative, not a failure to find one. Finding an actual
-  static-init-order hazard would need scanning a wider attributed slice of
-  the codebase; not attempted here.
-- **Path/corridor and cycle rendering in `visualize`.** The shortest `calls`
-  chain (or the full induced corridor) between two arbitrary symbols, and a
-  rendered view of one cycle component — both as a self-contained offline
-  HTML graph. graphify has clustering/viz on its by-name graph (still subject
-  to the same over/under-capture above); Serena has no visualization surface
-  at all. (Not re-measured here — rendering cost scales with the
-  result set, already covered by the query numbers above.)
-- **`update --rescope`.** Not a query capability but an operational one worth
-  naming: widening an already-indexed project's scope (turning tests on,
-  widening a subtree filter) by re-indexing only the newly in-scope
-  translation units, instead of a full reindex. Not re-measured at mongo
-  scale here — this particular store predates the scope-provenance fields
-  `--rescope` reads, so there is no recorded scope to widen on it without a
-  fresh index first. Verified instead on a small throwaway project
-  end-to-end (real git checkout, real scip-clang): widening from a
-  `--no-tests` subtree index to the whole tree with tests re-indexed only the
-  1 newly-in-scope file, not the whole project. Neither comparison tool has
-  an analogous notion of a "recorded index scope" to widen — graphify
-  recomputes its whole graph per run, and Serena/clangd has no persisted
-  scope at all.
+- **Layering (`boundary-violations`)**: 2,867 real edges from
+  `src/mongo/client/` into `src/mongo/db/`, ~1.5 s — a rule engine over exact
+  edges neither other tool has.
+- **Cycles (`strongly-connected-components`)**: 130 groups in mongo's own
+  code (excluding `third_party` and tests), ~1 s. A whole-graph query by construction;
+  LSP answers one symbol at a time.
+- **API surface (`api-surface`)**: 1,602 symbols actually used from outside
+  `src/mongo/db/pipeline/`, ~5.6 s — the *observed* external surface.
+- **Dependency cost (`dependency-cost`)**: 14,630 call sites into abseil-cpp
+  from 1,643 target symbols, ~3.5 s.
+- **Fan-in (`hotspots`)**: 45,529 symbols ranked in ~4 s (excluding tests and
+  `third_party`).
+- **Body size / dead-ish code**: `line-span` ranks 176,510 definitions (largest
+  5,480 lines); `no-incoming-calls` reports 108,265 defined callables with zero
+  *static* callers — a graph fact with a standing caveat, never a bare
+  dead-code verdict.
+- **Global-init hazards (`global-init-references`)**: correctly returned **0**
+  for `Expression::parserMap` — a precise negative, not a failure to find one
+  (and, per finding 1 above, it would miss reads inside macro-wrapped
+  initializers).
 
 ## Verdict — when to use which
 
-- **graphify**: fast, language-agnostic, zero build setup, nice clustering/viz.
-  Good for a rough map. **Not** trustworthy for "exactly what calls this symbol"
-  in a large C++ codebase with name collisions — it will both miss real edges
-  and invent merged ones.
-- **Serena / LSP**: best for **live, interactive** navigation and refactoring
-  while editing, always in sync with the working tree. One hop at a time.
+- **graphify**: fast, language-agnostic, zero build setup, and a rich
+  visualisation/export surface. Good for a rough map and for non-C++ corpora.
+  **Not** trustworthy for "exactly what calls this symbol" in a large C++
+  codebase with name collisions — it both misses real edges and merges
+  same-named ones.
+- **Serena / clangd**: best for **live, interactive** navigation and
+  refactoring **while editing**, always in sync with the working tree, and the
+  only one of the three that edits code (`rename_symbol`, `replace_symbol_body`,
+  `safe_delete_symbol`). On a large tree, its first-run answers are fast and
+  **silently incomplete** until the background index finishes (~75 min raw,
+  then cached); it exposes no call hierarchy, so transitive questions cost N
+  round-trips.
 - **cppgraph**: best for **compiler-exact, transitive, offline** structural
   questions — "what is the full blast radius of changing X?", "show every path
   from A to B", "every exact use-site of this type", plus the whole-graph
-  questions neither other tool answers at all: layering-rule conformance,
-  cycle detection, module API surface, dependency cost, fan-in/fan-out
-  ranking (§ "Capability breadth" above) — and for feeding those answers to an
-  LLM within a token budget (MCP). Costs an index + build step and goes stale
-  until refreshed (`cppgraph status --root` detects drift; `update --rescope`
-  widens an already-indexed project's scope without a full reindex).
+  questions neither other tool answers at all (layering conformance, cycles,
+  API surface, dependency cost, fan-in ranking). Costs a one-time index
+  (~27 min for `src/mongo`) and is a snapshot that goes stale until refreshed
+  (`cppgraph status --root` detects drift; `update --rescope` widens scope
+  without a full reindex). Its own limitations: calls in macro-generated bodies
+  (gtest `TEST`, macro-decorated inlines) are dropped, and `impact` does not
+  follow virtual dispatch.
 
 ## Reproduce
 
 ```sh
-# cppgraph (full src/mongo graph, tests included; <mongo>/.cppgraph/mongo.graph.db)
-.venv/bin/cppgraph find makeResumeToken --graph <mongo>/.cppgraph/mongo.graph.db
-.venv/bin/cppgraph callers '<method symbol>' --graph <mongo>/.cppgraph/mongo.graph.db
-.venv/bin/cppgraph impact  '<method symbol>' --graph <mongo>/.cppgraph/mongo.graph.db
-.venv/bin/cppgraph references '<ResumeTokenData# symbol>' --graph <mongo>/.cppgraph/mongo.graph.db
+# cppgraph (from the indexed checkout's parent; graph auto-discovered)
+cppgraph init <mongo>/compile_commands.json -y --filter src/mongo \
+  --attributed-refs --run --name mongo_p7 --project-root <mongo>
+cppgraph status                              # scope, schema, usage view
+cppgraph find makeResumeToken
+cppgraph callers 'ChangeStreamEventTransformation::makeResumeToken'
+cppgraph references 'ResumeTokenData'        # 177 exact use-sites
 
-# graphify (on a copy of the sources, outside the mongo repo — it writes graphify-out/)
+# token cost — whole spectrum (grep raw / grep+read / cppgraph), one table
+python scripts/measure_tokens.py --suite <mongo>/src/mongo \
+  <mongo>/.cppgraph/mongo_p7.graph.db
+
+# whole-graph queries (§ "Detail on cppgraph's whole-graph queries")
+cppgraph boundary-violations --rule src/mongo/client/:src/mongo/db/
+cppgraph strongly-connected-components --exclude-tests --exclude-path src/third_party
+cppgraph api-surface src/mongo/db/pipeline/ --exclude-tests
+cppgraph dependency-cost --target-path src/third_party/abseil-cpp/ --exclude-tests
+
+# graphify (on a copy outside the mongo repo — it writes graphify-out/)
 cp -R <mongo>/src/mongo/db/pipeline /tmp/gp && cd /tmp/gp
-graphify update . --no-cluster            # → graphify-out/graph.json
-graphify explain "makeResumeToken"        # inspect nodes/edges
+graphify update . --no-cluster               # → graphify-out/graph.json
+graphify explain makeResumeToken             # inspect nodes/edges
+graphify affected makeResumeToken            # reverse traversal
+graphify path applyTransformation makeResumeToken
+# full tree: cp -R <mongo>/src/mongo /tmp/gm && cd /tmp/gm && graphify update . --no-cluster
 
-# token cost — the whole spectrum (grep raw / grep+read / cppgraph) in one table
-.venv/bin/python scripts/measure_tokens.py --suite \
-  <mongo>/src/mongo <mongo>/.cppgraph/mongo.graph.db
-
-# or a detailed single-symbol breakdown (where every token goes)
-.venv/bin/python scripts/measure_tokens.py makeResumeToken \
-  <mongo>/src/mongo <mongo>/.cppgraph/mongo.graph.db \
-  <mongo>/src/mongo/db/pipeline 'ChangeStreamEventTransformation#makeResumeToken'
-
-# capability-breadth numbers (§ "Capability breadth" above)
-.venv/bin/cppgraph boundary-violations --graph <mongo>/.cppgraph/mongo.graph.db \
-  --rule "src/mongo/client/:src/mongo/db/"
-.venv/bin/cppgraph strongly-connected-components --graph <mongo>/.cppgraph/mongo.graph.db \
-  --exclude-tests                                    # full graph: 879 groups
-.venv/bin/cppgraph strongly-connected-components --graph <mongo>/.cppgraph/mongo.graph.db \
-  --exclude-tests --exclude-path src/third_party      # mongo's own code: 349 groups
-.venv/bin/cppgraph api-surface --graph <mongo>/.cppgraph/mongo.graph.db \
-  "src/mongo/db/pipeline/" --exclude-tests
-.venv/bin/cppgraph dependency-cost --graph <mongo>/.cppgraph/mongo.graph.db \
-  --target-path "src/third_party/abseil-cpp/" --exclude-tests
-.venv/bin/cppgraph hotspots --graph <mongo>/.cppgraph/mongo.graph.db \
-  --exclude-tests --exclude-path src/third_party
-
-# the rest of the 21-command surface (§ "Every query angle, one real number")
-.venv/bin/cppgraph subtypes --graph <mongo>/.cppgraph/mongo.graph.db "mongo/DocumentSource#"
-.venv/bin/cppgraph bases --graph <mongo>/.cppgraph/mongo.graph.db "mongo/DocumentSourceGroup#"
-.venv/bin/cppgraph impact --graph <mongo>/.cppgraph/mongo.graph.db "mongo/DocumentSource#" --kind inherits
-.venv/bin/cppgraph path --graph <mongo>/.cppgraph/mongo.graph.db \
-  "mongo/ChangeStreamDefaultEventTransformation#applyTransformation." \
-  "mongo/ChangeStreamEventTransformation#makeResumeToken."
-.venv/bin/cppgraph stats --graph <mongo>/.cppgraph/mongo.graph.db --group-by dir
-.venv/bin/cppgraph outline --graph <mongo>/.cppgraph/mongo.graph.db \
-  src/mongo/db/pipeline/document_source_group.cpp
-.venv/bin/cppgraph class-members --graph <mongo>/.cppgraph/mongo.graph.db "mongo/DocumentSourceGroup#"
-.venv/bin/cppgraph explain --graph <mongo>/.cppgraph/mongo.graph.db "mongo/DocumentSourceGroup#"
-.venv/bin/cppgraph export --graph <mongo>/.cppgraph/mongo.graph.db \
-  "mongo/DocumentSourceGroup#" --mode deps --depth 1 --out /tmp/deps.json
-
-# line-span / no-incoming-calls / global-init-references need attributed refs
-# (a #504-built scip-clang + --references --attributed-refs); the full mongo
-# graph above is a stock index, so these three were measured on a small real
-# sub-index instead (42 TUs, ~15s to build end-to-end):
-.venv/bin/cppgraph init <mongo>/.cppgraph/mongo.compdb.json -y \
-  --filter "src/mongo/db/pipeline/window_function" --attributed-refs --run \
-  --name wf_probe --project-root <mongo>
-.venv/bin/cppgraph line-span --graph <mongo>/.cppgraph/wf_probe.graph.db --exclude-tests
-.venv/bin/cppgraph no-incoming-calls --graph <mongo>/.cppgraph/wf_probe.graph.db --exclude-tests
-.venv/bin/cppgraph global-init-references --graph <mongo>/.cppgraph/wf_probe.graph.db \
-  "mongo/window_function/Expression#parserMap"
+# Serena / clangd — drive the bundled clangd 19.1.2 over stdio LSP, or via Serena
+clangd --compile-commands-dir=<mongo> --background-index   # then
+#   textDocument/references on ResumeTokenData  (12 cold → 182 fully indexed)
+#   textDocument/prepareCallHierarchy + callHierarchy/incomingCalls on the method
+#   (Serena itself exposes only find_referencing_symbols → references; no call hierarchy)
 ```
 
-The Serena/clangd numbers were produced by driving Serena's bundled clangd
-(`~/.serena/language_servers/.../clangd_19.1.2`) over stdio LSP against mongo's
-`compile_commands.json` — `callHierarchy/incomingCalls` and
-`textDocument/references` on the method, polled during background indexing. The
-throwaway probe scripts live under the job tmp dir, not committed.
+The Serena/clangd numbers were produced by driving clangd 19.1.2 over stdio LSP
+against mongo's `compile_commands.json` with `--background-index -j=14`, polling
+`callHierarchy/incomingCalls` and `textDocument/references` once a minute until
+the index reached 99 %, then again from a cold restart against the warm cache.
+graphify's numbers are its own CLI on copies of `db/pipeline` and of the full
+`src/mongo` tree. The throwaway probe scripts live under the job tmp dir, not
+committed.

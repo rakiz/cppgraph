@@ -3578,3 +3578,60 @@ def test_legacy_spelling_dispatches_like_the_canonical_command(
     legacy_code = main([legacy, "--graph", str(graph_path), *extra_args])
     canonical_code = main([canonical, "--graph", str(graph_path), *extra_args])
     assert legacy_code == canonical_code
+
+
+def test_build_help_renders_percent_without_format_error(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A bare `%` in the --references help string made argparse raise ValueError
+    (unsupported format character) instead of printing help — argparse runs
+    %-interpolation over every help string, so a literal % must be escaped as
+    %%."""
+    with pytest.raises(SystemExit) as exc_info:
+        main(["build", "--help"])
+    assert exc_info.value.code == 0
+    # argparse wraps help text across lines — normalize whitespace before
+    # matching the rendered sentence.
+    out = " ".join(capsys.readouterr().out.split())
+    assert "--no-references" in out
+    # The escaped %% renders as a single % — the unescaped variant corrupts the
+    # help text (argparse %-formats it: "% s" is a valid spec, so the params
+    # dict is spliced into the output, e.g. "~+45{'option_strings': ...}ize").
+    assert "45% size on a large index" in out
+    assert "option_strings" not in out  # no interpolated-params dump
+
+
+def test_explain_prints_derived_name_when_display_name_empty(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """scip-clang never fills SymbolInformation.display_name (0% on the mongo
+    index), so `cppgraph explain` on a class used to print `name: ?`. The name
+    must fall back to the label derived from the SCIP string."""
+    graph = Graph()
+    node = graph.add_node("cxx . . $ mongo/Widget#")
+    node.file = "src/widget.h"
+    node.line = 40
+    path = tmp_path / "graph.db"
+    write_sqlite(graph, path)
+    assert main(["explain", "--graph", str(path), "cxx . . $ mongo/Widget#"]) == 0
+    out = capsys.readouterr().out
+    assert "name:       mongo/Widget#" in out
+    assert "name:       ?" not in out
+
+
+def test_ambiguous_candidates_show_derived_names_when_display_name_empty(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The ambiguity candidate list must use the same derived-label fallback as
+    every other display path: scip-clang leaves display_name empty on all
+    symbols, and the candidates printed `( ? @ ...)` regardless."""
+    graph = Graph()
+    for sym in ("cxx . . $ a/Widget#", "cxx . . $ b/Widget#"):
+        graph.nodes[sym] = Node(symbol=sym, file="w.h", line=1)
+    path = tmp_path / "graph.db"
+    write_sqlite(graph, path)
+    with pytest.raises(SystemExit):
+        main(["callers", "--graph", str(path), "Widget#"])  # two classes -> ambiguous
+    err = capsys.readouterr().err
+    assert "(a/Widget# @ w.h:2)" in err  # derived from the SCIP string...
+    assert "(?" not in err  # ...never the bare '?' placeholder

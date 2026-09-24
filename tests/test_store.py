@@ -3213,3 +3213,82 @@ def test_resolve_scip_symbol_with_colons_not_treated_as_file_line(tmp_path: Path
     graph.nodes[ANON_SYM] = Node(symbol=ANON_SYM, file="src/app.cpp", line=13)
     store = _store(tmp_path, graph)
     assert store.resolve(ANON_SYM) == (ANON_SYM, [])
+
+
+# --- build_provenance: which version is recorded ------------------------------
+
+
+def test_build_provenance_records_running_version(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`cppgraph_version` must come from `cppgraph.__version__` — the version of
+    the code actually running — not from installed-package metadata, which goes
+    stale after a plain `git checkout` without reinstall (observed: a graph
+    built by v0.4.2 recorded `cppgraph 0.2.0`)."""
+    import cppgraph
+
+    monkeypatch.setattr("importlib.metadata.version", lambda _name: "0.2.0-stale")
+    meta = build_provenance(scip_pb2.Index())
+    assert meta["cppgraph_version"] == cppgraph.__version__
+
+
+def test_build_provenance_metadata_is_only_a_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Without the module constant, the installed-package metadata is still the
+    fallback — never a crash, never a missing key when metadata exists."""
+    import cppgraph
+
+    monkeypatch.setattr(cppgraph, "__version__", None)
+    monkeypatch.setattr("importlib.metadata.version", lambda _name: "9.9.9")
+    meta = build_provenance(scip_pb2.Index())
+    assert meta["cppgraph_version"] == "9.9.9"
+
+
+def test_build_provenance_without_any_version_source(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No `__version__` and no installed metadata: the key is omitted (provenance
+    is best-effort), never an error."""
+    import importlib.metadata
+
+    import cppgraph
+
+    monkeypatch.delattr(cppgraph, "__version__")
+
+    def _missing(_name: str) -> str:
+        raise importlib.metadata.PackageNotFoundError
+
+    monkeypatch.setattr("importlib.metadata.version", _missing)
+    meta = build_provenance(scip_pb2.Index())
+    assert "cppgraph_version" not in meta
+
+
+# --- resolve: an exact-type name resolves the class, not its members ----------
+
+
+def test_resolve_exact_type_name_resolves_the_class(tmp_path: Path) -> None:
+    """`mongo/Widget#` (an exact-type name, trailing `#`) used to substring-match
+    the class AND every member whose SCIP string contains it (19 candidates for
+    a real class) and error as ambiguous, forcing the caller to paste the full
+    SCIP string. Resolution must prefer the match whose symbol IS the query —
+    the class ends with the type descriptor; member strings extend past it."""
+    cls = "cxx . . $ mongo/Widget#"
+    member = "cxx . . $ mongo/Widget#draw(a1)."
+    field = "cxx . . $ mongo/Widget#count."
+    graph = Graph()
+    for sym in (cls, member, field):
+        graph.nodes[sym] = Node(symbol=sym, file="widget.h", line=1)
+    store = _store(tmp_path, graph)
+    assert store.resolve("mongo/Widget#") == (cls, [])
+    assert store.resolve(cls) == (cls, [])  # the full SCIP string, as before
+
+
+def test_resolve_exact_type_name_still_ambiguous_across_packages(tmp_path: Path) -> None:
+    """Two packages defining the same class name are GENUINELY ambiguous — but
+    the candidates must be the exact type matches only, not every member of
+    every class sharing the substring."""
+    a_cls = "cxx . . $ a/Widget#"
+    b_cls = "cxx . . $ b/Widget#"
+    a_member = "cxx . . $ a/Widget#draw(a1)."
+    graph = Graph()
+    for sym in (a_cls, b_cls, a_member):
+        graph.nodes[sym] = Node(symbol=sym, file="widget.h", line=1)
+    store = _store(tmp_path, graph)
+    resolved, candidates = store.resolve("Widget#")
+    assert resolved is None
+    assert {n.symbol for n in candidates} == {a_cls, b_cls}

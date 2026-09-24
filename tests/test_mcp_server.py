@@ -2866,3 +2866,53 @@ def test_resolve_ambiguous_hint_plural_when_several_types_match(tmp_path: Path) 
 def test_resolve_unknown_name_errors(store: GraphStore) -> None:
     r = mcp_server.callers(store, "does_not_exist")
     assert "error" in r
+
+
+# --- explain: display of classes and members when display_name is empty -------
+
+
+def test_explain_shows_class_name_and_member_files(tmp_path: Path) -> None:
+    """scip-clang leaves `SymbolInformation.display_name` empty on every symbol
+    (SCIP_AUDIT: 0/810,919 on the mongo index), so a class used to explain as
+    `name: ?`. The display must fall back to the label derived from the SCIP
+    string — the same fallback every other tool uses. A member defined
+    out-of-line in a cpp carries that file; a member with NO definition
+    occurrence in the index stays file-less (honest absence — e.g. an
+    out-of-project overload arm), never a fabricated site."""
+    from cppgraph.builder import build_graph
+
+    cls = "cxx . . $ mongo/Widget#"
+    member = "cxx . . $ mongo/Widget#draw(a1)."
+    decl_only = "cxx . . $ mongo/Widget#phantom(a2)."
+
+    def _occ(symbol: str, line: int, *, roles: int = 0) -> scip_pb2.Occurrence:
+        occ = scip_pb2.Occurrence(symbol=symbol, symbol_roles=roles)
+        occ.range.extend([line, 0, 10])
+        return occ
+
+    header = scip_pb2.Document(relative_path="src/widget.h")
+    # display_name left empty — exactly what scip-clang emits.
+    header.symbols.append(scip_pb2.SymbolInformation(symbol=cls))
+    header.occurrences.append(_occ(cls, 5, roles=scip_pb2.SymbolRole.Definition))
+
+    cpp = scip_pb2.Document(relative_path="src/widget.cpp")
+    cpp.symbols.append(scip_pb2.SymbolInformation(symbol=decl_only))
+    cpp.occurrences.append(_occ(member, 9, roles=scip_pb2.SymbolRole.Definition))
+    cpp.occurrences.append(_occ(decl_only, 3))  # a plain use, no definition anywhere
+
+    graph = build_graph(scip_pb2.Index(documents=[header, cpp]))
+    path = tmp_path / "graph.db"
+    write_sqlite(graph, path)
+    store = GraphStore(path)
+
+    explained = mcp_server.explain(store, cls)
+    assert explained["name"] == "mongo/Widget#"  # derived, never '?' / None
+    assert explained["defined_at"]["file"] == "src/widget.h"
+
+    explained_member = mcp_server.explain(store, member)
+    assert explained_member["defined_at"]["file"] == "src/widget.cpp"
+
+    members, _total = store.class_members(cls)
+    by_symbol = {m.symbol: m for m in members}
+    assert by_symbol[member].file == "src/widget.cpp"  # the index has one -> carried
+    assert by_symbol[decl_only].file is None  # none in the index -> honest absence

@@ -6,6 +6,91 @@ on-disk store also carries its own `schema_version` for forward-compatibility.
 
 ## [Unreleased]
 
+## [0.4.3] - 2026-09-24
+
+### Fixed
+
+- **`scripts/measure_tokens.py` measured `find` uncapped.** The cppgraph column
+  called `mcp_server.find_symbols(store, name)` with no `limit`, so a broad
+  name returned hundreds of groups — up to ×29 the tool's real payload on
+  `OperationContext` (573k vs 20k chars). It now passes
+  `limit=mcp_server.DEFAULT_LIMIT`, mirroring the MCP `find` tool's real
+  40-capped answer (the measurement must measure what the tool sends).
+- **A bare `%` in `build --references`' help corrupted `--help`.** argparse
+  %-formats every help string, and `"% size"` is a *valid* format spec (space =
+  flag), so `cppgraph build --help` spliced the argparse params dict into the
+  rendered text (older Pythons raise). The literal is escaped as `%%` like its
+  `--attributed-refs` sibling.
+- **A graph build could record a stale `cppgraph` version.** `build_provenance`
+  read `importlib.metadata.version("cppgraph")` — installed-package metadata,
+  which goes stale after a plain `git checkout` (no reinstall): a graph built
+  by v0.4.2 recorded `cppgraph 0.2.0`. `cppgraph.__version__` (the running
+  code) is now the source of truth; metadata remains only as a fallback.
+- **`explain` on a class printed `name: ?`.** scip-clang leaves
+  `SymbolInformation.display_name` empty on every symbol (0/810,919 on the
+  mongo index — SCIP_AUDIT.md), so `explain` (MCP and CLI) and `_print_node`'s
+  full-symbols line showed `?`/null. They now fall back to the label derived
+  from the SCIP string — the same fallback every other surface already uses.
+  (Members "with no file" were verified honest data: those nodes have no
+  definition occurrence anywhere in the index — e.g. an out-of-project
+  overload arm — and stay file-less; members with a definition site carry it.)
+- **An exact-type name resolved as ambiguous.** `mongo/DocumentSourceGroup#`
+  substring-matched the class AND all 18 members, erroring ambiguous and
+  forcing callers to paste the full SCIP string. `GraphStore.resolve` now
+  prefers the match whose symbol *ends with* the query (the class itself);
+  a same-named class in two packages stays genuinely ambiguous — among the
+  exact matches only, never the member noise.
+- **A stale compile_commands.json silently produced a holey graph.** When the
+  compdb's include directories no longer exist (e.g. a deleted bazel
+  output_base), scip-clang indexes TUs partially yet still reports success
+  ("0 errored TUs") — the graph comes out missing thousands of symbols with no
+  complaint. `full_build` now samples include dirs (200 entries, both command
+  spellings, `-I`/`-isystem`/`-iquote`/`-isysroot`) before indexing and prints
+  a WARNING when ≥10% are missing, naming the likely cause (regenerate the
+  compdb and re-index). Dirs resolve against the entry's own `directory` field
+  (falling back to the compdb's directory) — relative includes (`-I../inc`,
+  `-I.`), the norm in CMake compdbs, are not cwd-dependent false positives. It
+  warns, never fails, and scip-clang's invocation is unchanged.
+
+### Added
+
+- **scip-clang patchset 7: `enclosing_range` for macro-introduced definitions.**
+  New patch `scip-clang-patches/enclosing-range-macro-on-v0.4.0.patch` (a
+  follow-on to the #504 patch: it requires #504, whose `saveDefinition(...)`
+  arguments it rewrites, and nothing else — it is order-free with respect to the
+  other five patches in the bundle, verified across all 720 orderings and all
+  112 subset/position combinations, and builds + passes scip-clang's full
+  snapshot suite on `v0.4.0 + #504` alone). #504 records
+  `decl.getSourceRange()` as a definition's enclosing range; for a definition
+  introduced through a macro (a gtest `TEST`/`TEST_F` body, a function carrying a
+  leading macro like `MONGO_COMPILER_ALWAYS_INLINE`) that range's begin lies in
+  the macro's own file, so it is cross-file and #504's same-file guard drops it —
+  and cppgraph then drops every call inside. The patch falls back to the function
+  **body** extent when the declaration range is cross-file (only for a
+  declaration which itself carries the body, so a bodyless one can't borrow an
+  out-of-line definition's extent); an ordinary single-file declaration range is
+  passed through byte-identically. Measured on
+  `src/mongo`: callers of a gtest-called test helper **1 → 122** (attributed to
+  the correct generated `TestBody`, not the arbitrary sibling the pre-#504
+  heuristic produced), and `Ordering::verifyCardinality` callees **0 → 8**.
+  `versions.json`'s `patchset_version` is bumped to 7; the patched binary must be
+  rebuilt/published for a graph to carry it.
+- **scip-clang patch bundle: the seventh patch's dependency on #504 is now
+  explicit (`# Requires:` header) and CI-enforced** (tests/test_scip_clang_patches.py
+  checks declared requirements exist/are acyclic, every patch is wired into both
+  build paths, and application order respects each requirement).
+
+
+### Changed
+
+- **`COMPARISON.md` re-measured end to end (2026-09-23).** Full rewrite against
+  current tool versions (cppgraph 0.4.3, graphify 0.9.66, Serena 1.7.0 / clangd
+  19.1.2) on a fresh `src/mongo` #504 index. Corrects two claims in the old
+  document (its cppgraph graph actually covered the whole tree, not "5416 TUs";
+  clangd's index *does* finish, ~75 min) and adds a new, measured cppgraph
+  under-capture (macro-introduced definitions carry no `enclosing_range`, so
+  their calls are dropped — see `DESIGN.md` known-limitation 4 and `TODO.md`).
+
 ## [0.4.2] - 2026-09-23
 
 ### Fixed

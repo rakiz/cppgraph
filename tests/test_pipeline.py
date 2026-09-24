@@ -677,3 +677,218 @@ def test_rescope_lets_plain_update_see_new_scope(tmp_path: Path, monkeypatch) ->
     )
     assert rc == 0
     assert reindexed[-1] == [str(test_cpp)]
+
+
+# --- pre-index check: stale compdb include directories ------------------------
+
+
+def _include_compdb(path: Path, dirs: list[str]) -> Path:
+    """A two-entry compdb whose entries include the given directories (one flag
+    per entry via `command`, one via `arguments` — both compdb spellings)."""
+    entries = [
+        {
+            "directory": "/repo",
+            "file": "/repo/src/a.cpp",
+            "command": f"clang++ -I{dirs[0]} -c a.cpp",
+        },
+        {
+            "directory": "/repo",
+            "file": "/repo/src/b.cpp",
+            "arguments": ["clang++", "-isystem", dirs[1], "-c", "b.cpp"],
+        },
+    ]
+    path.write_text(json.dumps(entries))
+    return path
+
+
+def test_missing_include_dirs_counts_sampled_dirs(tmp_path: Path) -> None:
+    good = tmp_path / "good"
+    good.mkdir()
+    compdb = _include_compdb(tmp_path / "cc.json", [str(good), "/gone-a"])
+    checked, missing, examples = pipeline.missing_include_dirs(compdb)
+    assert checked == 2  # deduped across entries and spellings
+    assert missing == 1
+    assert examples == ["/gone-a"]
+
+
+def test_missing_include_dirs_samples_not_all(tmp_path: Path) -> None:
+    """Only the first `sample` entries are read — the check stays cheap on a
+    40k-entry compdb."""
+    entries = [
+        {
+            "directory": "/repo",
+            "file": f"/repo/src/t{i}.cpp",
+            "command": f"clang++ -I/gone-{i} -c t{i}.cpp",
+        }
+        for i in range(10)
+    ]
+    compdb = tmp_path / "cc.json"
+    compdb.write_text(json.dumps(entries))
+    checked, missing, _examples = pipeline.missing_include_dirs(compdb, sample=3)
+    assert checked == 3
+    assert missing == 3
+
+
+def test_missing_include_dirs_no_flags_or_empty(tmp_path: Path) -> None:
+    """No include flags (or no entries) -> nothing checked, no examples —
+    never a crash and never a warning."""
+    compdb = tmp_path / "cc.json"
+    compdb.write_text(
+        json.dumps([{"directory": "/repo", "file": "a.cpp", "command": "clang++ -c a.cpp"}])
+    )
+    assert pipeline.missing_include_dirs(compdb) == (0, 0, [])
+    empty = tmp_path / "empty.json"
+    empty.write_text("[]")
+    assert pipeline.missing_include_dirs(empty) == (0, 0, [])
+
+
+def test_warn_missing_include_dirs_fires_above_threshold(tmp_path: Path) -> None:
+    """Most sampled include dirs gone (a deleted build tree, e.g. a stale bazel
+    output_base) -> a WARNING naming the fraction, examples and the likely
+    cause — but never an exception: the check warns, it does not fail."""
+    compdb = _include_compdb(tmp_path / "cc.json", ["/gone-a", "/gone-b"])
+    lines: list[str] = []
+    pipeline.warn_missing_include_dirs(compdb, print_fn=lines.append)
+    warning = "\n".join(lines)
+    assert "WARNING" in warning
+    assert "2 of 2" in warning
+    assert "/gone-a" in warning
+    assert "stale" in warning
+
+
+def test_warn_missing_include_dirs_silent_below_threshold(tmp_path: Path) -> None:
+    compdb = _include_compdb(tmp_path / "cc.json", ["/gone-a", "/gone-b"])
+    compdb.write_text(
+        json.dumps(
+            [
+                {"directory": "/repo", "file": "/repo/src/a.cpp", "command": "clang++ -c a.cpp"},
+                {"directory": "/repo", "file": "/repo/src/b.cpp", "command": "clang++ -c b.cpp"},
+            ]
+        )
+    )
+    lines: list[str] = []
+    pipeline.warn_missing_include_dirs(compdb, print_fn=lines.append)
+    assert lines == []  # nothing missing at all -> no output
+
+
+def test_warn_missing_include_dirs_silent_on_minor_missing(tmp_path: Path) -> None:
+    """One stale dir among many is noise (an optional/generated path) — below
+    the warn fraction the check stays quiet. Distinct dirs per entry: the
+    sample dedups, so a shared dir would collapse the denominator."""
+    compdb = tmp_path / "cc.json"
+    good_roots = [tmp_path / f"good{i}" for i in range(19)]
+    for g in good_roots:
+        g.mkdir()
+    compdb.write_text(
+        json.dumps(
+            [
+                {
+                    "directory": "/repo",
+                    "file": f"/repo/src/t{i}.cpp",
+                    "command": f"clang++ -I{good_roots[i]} -c t{i}.cpp",
+                }
+                for i in range(19)
+            ]
+            + [
+                {
+                    "directory": "/repo",
+                    "file": "/repo/src/gone.cpp",
+                    "command": "clang++ -I/gone -c gone.cpp",
+                }
+            ]
+        )
+    )
+    lines: list[str] = []
+    pipeline.warn_missing_include_dirs(compdb, print_fn=lines.append)
+    assert lines == []
+
+
+def test_full_build_warns_when_include_dirs_missing(tmp_path: Path, monkeypatch) -> None:
+    """full_build runs the check before invoking scip-clang, on its own output
+    channel (print_fn) — the wizard/CLI path shows the warning."""
+    compdb = _include_compdb(tmp_path / "cc.json", ["/gone-a", "/gone-b"])
+
+    def _boom(*_a: object, **_k: object) -> None:
+        raise pipeline.PipelineError("stop here — the check must run BEFORE indexing")
+
+    monkeypatch.setattr(pipeline, "run_scip_clang", _boom)
+    lines: list[str] = []
+    rc = pipeline.full_build(
+        compdb=compdb,
+        project_root=tmp_path,
+        name="proj",
+        src_filter="",
+        no_tests=False,
+        attributed_refs=False,
+        recompute_scip=True,
+        rebuild_graph=True,
+        print_fn=lines.append,
+    )
+    assert rc == 1
+    assert any("WARNING" in ln and "include director" in ln for ln in lines)
+
+
+def test_missing_include_dirs_resolve_relative_to_entry_directory(
+    tmp_path: Path,
+) -> None:
+    """Relative include dirs (`-I../include`, `-I.`) are the norm in CMake
+    compdbs: they resolve against the entry's `directory` field (where the
+    compiler runs), never against the process cwd — testing them raw made
+    every normal compdb with relative includes warn spuriously. Missing
+    examples come back resolved (absolute), for the warning text."""
+    proj = tmp_path / "proj"
+    (proj / "inc").mkdir(parents=True)  # exists, relative to the build dir
+    (proj / "build").mkdir()  # the entry directory must exist for `..` traversal
+    compdb = tmp_path / "cc.json"
+    compdb.write_text(
+        json.dumps(
+            [
+                {
+                    # CMake records the BUILD dir as the entry's directory; the
+                    # source's own `inc/` is then `-I../inc` from it.
+                    "directory": str(proj / "build"),
+                    "file": str(proj / "src/a.cpp"),
+                    "command": "clang++ -I../inc -I./gone_rel -c a.cpp",
+                }
+            ]
+        )
+    )
+    checked, missing, examples = pipeline.missing_include_dirs(compdb)
+    assert checked == 2
+    assert missing == 1
+    assert examples == [str(proj / "build" / "gone_rel")]
+
+
+def test_missing_include_dirs_relative_falls_back_to_compdb_parent(
+    tmp_path: Path,
+) -> None:
+    """An entry without a `directory` field resolves relative dirs against the
+    compdb's own directory — the compdb lives with the build tree it describes."""
+    (tmp_path / "inc").mkdir()
+    compdb = tmp_path / "cc.json"
+    compdb.write_text(json.dumps([{"file": "a.cpp", "command": "clang++ -Iinc -c a.cpp"}]))
+    assert pipeline.missing_include_dirs(compdb) == (1, 0, [])
+
+
+def test_warn_missing_include_dirs_relative_not_a_false_positive(tmp_path: Path) -> None:
+    """End to end: a healthy CMake-style compdb (relative includes, all present
+    relative to their entries' directories) must not warn — no matter what the
+    process cwd is."""
+    proj = tmp_path / "proj"
+    (proj / "inc").mkdir(parents=True)
+    (proj / "build").mkdir()
+    compdb = tmp_path / "cc.json"
+    compdb.write_text(
+        json.dumps(
+            [
+                {
+                    "directory": str(proj / "build"),
+                    "file": str(proj / "src/a.cpp"),
+                    "command": "clang++ -I../inc -I. -c a.cpp",
+                }
+            ]
+        )
+    )
+    lines: list[str] = []
+    pipeline.warn_missing_include_dirs(compdb, print_fn=lines.append)
+    assert lines == []

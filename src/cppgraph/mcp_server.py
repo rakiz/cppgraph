@@ -1247,8 +1247,9 @@ def class_members_report(
     Named `class_members`, not `public_api`, because SCIP doesn't encode C++
     visibility — this lists members that *exist* (a fact), not a
     public/private claim. `symbol` is a name or an exact SCIP string (a unique
-    name resolves automatically; note a bare class name typically also matches
-    its own members, so the exact `#`-terminated string is the reliable input).
+    name resolves automatically; a bare class name typically also matches its
+    own members, but a `#`-terminated name — e.g. `mongo/Foo#` — now resolves
+    to the class itself, preferentially over those member substring matches).
     Unknown symbol → the shared error/candidates convention; a known non-type
     symbol → an error dict — bad input, never an empty list that would read
     as "memberless class". `limit` caps the list (default 40); `total` always
@@ -1428,7 +1429,11 @@ def explain(
 
     result: dict[str, Any] = {
         "symbol": node.symbol,
-        "name": node.display_name or None,
+        # `label` (like every other tool) falls back to the SCIP-derived name:
+        # scip-clang leaves `SymbolInformation.display_name` empty on all
+        # symbols (0% on the mongo index), so a class otherwise explains as
+        # `name: ?`.
+        "name": _label(node.symbol, node) or None,
         "defined_at": {"file": node.file, "line": _line1(node.line)},
         "excluded_tests": exclude_tests,
         "callers": callers_block,

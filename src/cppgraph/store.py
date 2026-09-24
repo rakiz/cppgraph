@@ -32,6 +32,7 @@ from importlib import metadata as importlib_metadata
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import cppgraph
 from cppgraph.builder import (
     _gc_disabled,
     _is_direct_member,
@@ -443,10 +444,19 @@ def build_provenance(
             meta["dirty_fingerprints"] = json.dumps(fingerprints)
 
     meta["built_at"] = datetime.now(UTC).isoformat(timespec="seconds")
-    try:
-        meta["cppgraph_version"] = importlib_metadata.version("cppgraph")
-    except importlib_metadata.PackageNotFoundError:
-        pass
+    # `cppgraph.__version__` is the source of truth: it is the version of the
+    # code actually running. Installed-package metadata goes stale after a
+    # plain `git checkout` (no reinstall) — a graph build then recorded e.g.
+    # `cppgraph 0.2.0` while v0.4.2 ran. Metadata stays only as a fallback for
+    # a layout without the constant.
+    version: str | None = getattr(cppgraph, "__version__", None)
+    if version is None:
+        try:
+            version = importlib_metadata.version("cppgraph")
+        except importlib_metadata.PackageNotFoundError:
+            version = None
+    if version:
+        meta["cppgraph_version"] = version
     return meta
 
 
@@ -1131,7 +1141,10 @@ class GraphStore:
         Otherwise an exact symbol string is returned as-is, and `query` is a
         name: a plain substring match, then — if that misses —
         `Class::method` normalized to SCIP's `Class#method`, then a
-        case/separator-insensitive fuzzy match. The three outcomes are encoded
+        case/separator-insensitive fuzzy match. A query that already ends in
+        SCIP's type descriptor (`Class#`) prefers the exact match — the class
+        whose symbol ends with the query — over the substring members, when the
+        substring sweep matches both. The three outcomes are encoded
         in the return:
 
         - `(symbol, [])`     — exact hit, or a name/location matching exactly
@@ -1154,6 +1167,19 @@ class GraphStore:
             matches = self.find(query.replace("::", "#"))
         if not matches:
             matches = self.find(query, fuzzy=True)
+        if matches and query.endswith("#"):
+            # An exact-TYPE name (trailing `#`, the SCIP type descriptor): the
+            # plain substring `find` above matches the class AND every member
+            # whose symbol string contains it (19 candidates for a real class),
+            # erroring as ambiguous and forcing the caller to paste the full
+            # SCIP string. The class itself is the match whose symbol ENDS with
+            # the query — member strings extend past it (`Class#method.`,
+            # `Class#Inner#`). Narrow to those exact matches; if more than one
+            # survives (the same class name in two packages), it stays
+            # genuinely ambiguous — among the exact matches only.
+            exact = [n for n in matches if n.symbol.endswith(query)]
+            if exact:
+                matches = exact
         distinct: list[Node] = []
         seen: set[str] = set()
         for n in matches:
