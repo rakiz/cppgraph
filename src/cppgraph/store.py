@@ -375,6 +375,7 @@ def build_provenance(
     source_commit: str | None = None,
     source_dirty: bool | None = None,
     scip_variant: str | None = None,
+    scip_patchset: int | None = None,
     index_filter: str | None = None,
     index_excludes_tests: bool | None = None,
 ) -> dict[str, str]:
@@ -413,6 +414,14 @@ def build_provenance(
     # sidecar). Lets `cppgraph status` tell when a graph is stale for the pin.
     if scip_variant:
         meta["index_tool_variant"] = scip_variant
+    # The patch bundle number (`patchset_version` in the sidecar, patched-family
+    # binaries only — a stock binary has no patch bundle, hence no key): unlike
+    # the version, a patchset bump changes scip-clang's output for EVERY
+    # translation unit, so `status`/`update` compare it to the installed binary
+    # to recommend a full re-index. None (stock, or a sidecar predating the
+    # field) writes no key — never a guessed default.
+    if scip_patchset is not None:
+        meta["index_tool_patchset"] = str(scip_patchset)
 
     # Index scope: recorded even when the filter is empty (whole tree), so a
     # scoped graph is distinguishable from a legacy one that never stored a scope.

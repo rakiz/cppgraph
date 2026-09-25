@@ -1503,7 +1503,13 @@ def status_report(
 
     Also reports `tool` advice (unless `check_updates=False`): whether a newer
     cppgraph is published and — crucially — whether adopting it, or the version
-    already installed, needs a full graph rebuild. Best-effort and cached; `force`
+    already installed, needs a full graph rebuild. `scip_clang` covers the
+    indexer the same way, including a patchset gap: a graph indexed with an
+    older scip-clang patchset than the installed binary (a pre-recording
+    graph's patchset is deduced from its `cppgraph_version`) carries
+    `reindex_recommended` + a message saying the graph needs a FULL re-index
+    (a patchset changes the indexer's output for every TU, and `cppgraph
+    update` will ask for consent). Best-effort and cached; `force`
     bypasses the cache. See `cppgraph.updates`.
     """
     m = store.meta()
@@ -1519,6 +1525,7 @@ def status_report(
                 v for v in (m.get("index_tool"), m.get("index_tool_version")) if v
             )
             or None,
+            "index_tool_patchset": m.get("index_tool_patchset"),
             "index_filter": m.get("index_filter"),
             "index_scope": (
                 None if m.get("index_filter") is None else (m.get("index_filter") or "whole tree")
@@ -1571,7 +1578,12 @@ def status_report(
     if check_updates:
         result["tool"] = update_advice(m.get("cppgraph_version"), force=force)
         result["scip_clang"] = scip_update_advice(
-            {"version": m.get("index_tool_version"), "variant": m.get("index_tool_variant")},
+            {
+                "version": m.get("index_tool_version"),
+                "variant": m.get("index_tool_variant"),
+                "patchset": m.get("index_tool_patchset"),
+                "cppgraph_version": m.get("cppgraph_version"),
+            },
             force=force,
         )
     if root is None or not commit:

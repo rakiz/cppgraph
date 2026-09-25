@@ -2732,6 +2732,24 @@ def test_build_provenance_omits_index_scope_when_not_given() -> None:
     assert "index_tests" not in meta
 
 
+def test_build_provenance_records_scip_patchset() -> None:
+    """A patched-family binary carries a patchset number (its sidecar's
+    `patchset_version`); the graph must record it so a later patchset bump —
+    which changes scip-clang's output for EVERY TU — can be advised on."""
+    index = _index_with_metadata("file:///some/repo")
+    meta = build_provenance(index, scip_variant="patched", scip_patchset=7)
+    assert meta["index_tool_variant"] == "patched"
+    assert meta["index_tool_patchset"] == "7"
+
+
+def test_build_provenance_omits_scip_patchset_when_none() -> None:
+    """No patchset (a stock binary, or a sidecar predating the field) -> no key,
+    never a guessed default — `update` must not act on a guess."""
+    index = _index_with_metadata("file:///some/repo")
+    meta = build_provenance(index, scip_variant="stock")
+    assert "index_tool_patchset" not in meta
+
+
 def test_build_provenance_omits_commit_when_root_is_not_a_git_repo(tmp_path: Path) -> None:
     # A real, existing, non-git directory: git rev-parse fails, no commit stored.
     index = _index_with_metadata(f"file://{tmp_path}")

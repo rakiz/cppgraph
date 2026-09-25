@@ -6,6 +6,66 @@ on-disk store also carries its own `schema_version` for forward-compatibility.
 
 ## [Unreleased]
 
+## [0.4.4] - 2026-09-25
+
+### Added
+
+- **A scip-clang patchset bump is now detected and acted on — it is a full-re-index
+  stale, not an incremental-update one.** The graph store recorded the indexer's
+  version and variant but not its **patchset** (`patchset_version` in the
+  binary's `scip-clang.json` sidecar, patched-family binaries only), even though
+  a new patchset changes what scip-clang emits for EVERY translation unit
+  (patchset 7 restored `enclosing_range` for macro-introduced definitions —
+  ~+1.1M call edges on a real mongo graph) while `scip-clang --version` stays
+  the same across patchsets. An existing graph built with an older patchset
+  therefore triggered nothing: no staleness advice, no reindex. Four pieces
+  close the gap:
+  - **Recorded, and deduced for legacy graphs.** `build_provenance` gains
+    `scip_patchset`, stamped from the installed binary's sidecar on the FULL
+    paths only (`full_build`; a rebuild from an existing `.scip` stamps it too
+    when the binary is present) into `meta.index_tool_patchset`. `build --scip`
+    takes a `--scip-patchset` flag for externally produced FULL indexes. A
+    stock binary or a sidecar predating the field records nothing. The partial
+    paths (incremental `update`, `--rescope`, `update --scip`) NEVER stamp it —
+    they re-index only some TUs, so claiming the installed binary's patchset
+    for the whole graph would upgrade/fabricate the recorded value and
+    permanently mask the gap; the store merge preserves whatever the graph
+    already recorded, and a legacy graph gains nothing. For the graphs built
+    BEFORE patchset recording existed (every graph pre-0.4.4), the patchset is
+    **deduced** from release history rather than guessed: a patched-family
+    graph whose recorded `cppgraph_version` is older than 0.4.4 (the release
+    that started recording the field) was necessarily built pre-recording, so
+    its effective patchset counts as 1 and a newer installed patched binary
+    raises the gap; at/after 0.4.4 (or with no `cppgraph_version`) a missing
+    value stays unknowable — no guess. The `index` wizard's reuse plan shows
+    the recorded patchset alongside the rest of the graph's indexer identity.
+  - **Advised, actionably.** `status` (CLI and MCP, which share
+    `compute_scip_advice`) compares the graph's patchset (recorded or deduced)
+    to the installed binary's and — when the binary is a newer patched-family
+    build — sets `reindex_recommended` with a message that says the GRAPH is
+    stale and needs a FULL re-index (an incremental update can't pick it up),
+    naming both patchsets. The installed-vs-pinned binary advice now names BOTH
+    steps in order — re-download/rebuild the binary, THEN re-index your graphs
+    (`cppgraph update`), because the new patchset changes every TU's output —
+    so it can't be misread as "only affects a future reindex". Both patchsets
+    also surface informationally on the CLI `status` scip-clang line (matching
+    the MCP fields). Advisory only, like every `status` check.
+  - **Consented.** `cppgraph update` detects the patchset gap before doing any
+    incremental work and treats it as a full re-index of the recorded scope —
+    which is long, so it never happens silently: interactively it prompts,
+    naming both patchsets and defaulting to No; without a TTY it refuses with a
+    non-zero exit and explains how to proceed (re-run interactively, or pass
+    the new `update --yes`/`-y` flag, which grants consent non-interactively).
+    On consent it re-runs scip-clang over the recorded scope
+    (`index_filter`/`index_tests`), honors an explicit `--graph` destination,
+    and replaces that graph in place, preserving the attribution level.
+    Patchsets matching (including a deduced-match legacy graph) leave the
+    incremental path untouched. The other user-invoked partial paths
+    (`update --rescope`, the `index` wizard's incremental update) don't mask or
+    upgrade the gap either — they print a WARNING (naming both patchsets,
+    pointing at the consented full re-index) and then do exactly the requested
+    partial work.
+
 ## [0.4.3] - 2026-09-24
 
 ### Fixed

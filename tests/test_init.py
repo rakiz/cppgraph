@@ -14,11 +14,15 @@ import pytest
 from cppgraph.cli import main
 from cppgraph.init import (
     artifact_status,
+    existing_artifacts,
     find_compdb,
     onboarding_plan,
     run_init,
     scip_clang_info,
+    scip_clang_patchset,
 )
+from cppgraph.model import Graph
+from cppgraph.store import write_sqlite
 
 
 def _boom_input(_prompt: str) -> str:
@@ -92,6 +96,39 @@ def test_scip_clang_info_absent(tmp_path: Path) -> None:
     assert scip_clang_info(tmp_path) == (False, None)
 
 
+def test_scip_clang_patchset_reads_sidecar(tmp_path: Path) -> None:
+    """The patched binary's `patchset_version` sidecar field — the graph-provenance
+    source for `index_tool_patchset` (a patchset bump changes scip-clang's output
+    for every TU, so it must be recorded and compared)."""
+    (tmp_path / "scip-clang.json").write_text(
+        json.dumps({"variant": "patched", "patchset_version": 7})
+    )
+    assert scip_clang_patchset(tmp_path) == 7
+
+
+def test_scip_clang_patchset_none_without_field_or_sidecar(tmp_path: Path) -> None:
+    # Stock sidecar (no patch bundle -> no field), no sidecar at all, malformed
+    # JSON, and a non-numeric field all mean "no patchset to compare" — never a
+    # guessed default.
+    (tmp_path / "scip-clang.json").write_text(json.dumps({"variant": "stock"}))
+    assert scip_clang_patchset(tmp_path) is None
+    assert scip_clang_patchset(tmp_path / "nope") is None
+    (tmp_path / "broken").mkdir()
+    (tmp_path / "broken" / "scip-clang.json").write_text("{not json")
+    assert scip_clang_patchset(tmp_path / "broken") is None
+
+
+def test_existing_artifacts_carries_patchset(tmp_path: Path) -> None:
+    """The reuse-vs-recompute plan shows the graph's indexer identity, patchset
+    included — an older-patchset graph is exactly what a full rebuild picks up."""
+    graph = Graph()
+    db = tmp_path / "proj.graph.db"
+    write_sqlite(graph, db, meta={"index_tool_variant": "patched", "index_tool_patchset": "6"})
+    got = existing_artifacts(tmp_path, "proj")
+    assert got["graph"]["index_tool_variant"] == "patched"
+    assert got["graph"]["index_tool_patchset"] == "6"
+
+
 def test_artifact_status_detects_stages(tmp_path: Path) -> None:
     (tmp_path / "proj.scip").write_text("")
     st = artifact_status(tmp_path, "proj")
@@ -149,6 +186,72 @@ def test_run_init_offers_update_when_graph_exists(tmp_path: Path) -> None:
     out = "\n".join(lines)
     assert "already exists" in out
     assert "incremental update" in out
+
+
+def test_wizard_update_choice_warns_on_patchset_gap_but_never_full_reindexes(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The wizard's 'update incrementally' choice is a user-invoked partial
+    operation: with a patchset gap it warns (naming both patchsets, pointing at
+    the consented full re-index in `cppgraph update`), then runs the requested
+    incremental update — never a full re-index — leaving the recorded patchset
+    unchanged."""
+    import cppgraph.pipeline as pipeline
+    import cppgraph.updates as updates
+    from cppgraph.model import Graph
+    from cppgraph.store import GraphStore, write_sqlite
+
+    compdb = _write_compdb(tmp_path / "compile_commands.json")
+    cpg = tmp_path / ".cppgraph"
+    cpg.mkdir()
+    db = cpg / "proj.graph.db"
+    write_sqlite(
+        Graph(),
+        db,
+        meta={
+            "index_tool_version": "0.4.0",
+            "index_tool_variant": "patched",
+            "index_tool_patchset": "6",
+        },
+    )
+    monkeypatch.setattr(
+        updates,
+        "installed_scip_clang",
+        lambda: {"version": "0.4.0", "variant": "patched", "patchset_version": 7},
+    )
+    incremental_calls: list[dict] = []
+
+    def _fake_incremental(**kwargs):
+        incremental_calls.append(kwargs)
+        return 0
+
+    monkeypatch.setattr(pipeline, "incremental_update", _fake_incremental)
+
+    def _boom(*_a: object, **_k: object) -> int:
+        raise AssertionError("the wizard's update choice must never trigger a full re-index")
+
+    monkeypatch.setattr(pipeline, "full_build", _boom)
+
+    lines, prnt = _capturing_print()
+    rc = run_init(
+        compdb=str(compdb),
+        project_root=str(tmp_path),
+        name="proj",
+        run=True,
+        input_fn=_scripted_input([""]),  # select: 'update' (the default)
+        print_fn=prnt,
+    )
+    assert rc == 0
+    out = "\n".join(lines)
+    assert "WARNING" in out
+    assert "p6" in out and "p7" in out
+    assert "full re-index" in out
+    assert len(incremental_calls) == 1
+    store = GraphStore(db)
+    try:
+        assert store.meta()["index_tool_patchset"] == "6"
+    finally:
+        store.close()
 
 
 def test_project_root_is_git_toplevel_not_build_dir(tmp_path: Path) -> None:

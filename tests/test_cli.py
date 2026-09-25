@@ -1026,6 +1026,479 @@ def test_update_with_explicit_graph_uses_recorded_project_root(
     assert reindexed == [[str(src)]]
 
 
+# ---- `update` vs a scip-clang patchset gap ------------------------------------
+#
+# A patchset bump changes scip-clang's output for EVERY translation unit, so a
+# graph built with an older patchset can't be fixed by an incremental update —
+# it needs a full re-index of the recorded scope. Indexing is long, so that
+# re-index requires consent: never silent, never a surprise.
+
+
+def _patchset_gap_repo(tmp_path: Path) -> tuple[Path, str, Path]:
+    """A git checkout with one committed source (edited since) + its compdb.
+    Returns `(project_root, commit, compdb_path)`."""
+    import subprocess as sp
+
+    def git(*a: str) -> sp.CompletedProcess:
+        return sp.run(["git", "-C", str(tmp_path), *a], check=True, capture_output=True, text=True)
+
+    git("init", "-q")
+    git("config", "user.email", "t@example.com")
+    git("config", "user.name", "t")
+    src = tmp_path / "a.cpp"
+    src.write_text("int a() {}\n")
+    (tmp_path / "compile_commands.json").write_text(json.dumps([{"file": str(src)}]))
+    git("add", "-A")
+    git("commit", "-q", "-m", "init")
+    commit = git("rev-parse", "HEAD").stdout.strip()
+    src.write_text("int a() { return 1; }\n")  # a real change since the indexed commit
+    return tmp_path, commit, tmp_path / "compile_commands.json"
+
+
+def _patchset_gap_store(
+    tmp_path: Path,
+    commit: str,
+    *,
+    variant: str | None = "patched",
+    patchset: str | None = "6",
+    index_filter: str = "",
+) -> Path:
+    """The auto-discoverable graph store: indexed scope recorded, patchset `patchset`."""
+    from cppgraph.store import build_provenance
+
+    cpg = tmp_path / ".cppgraph"
+    cpg.mkdir()
+    index = scip_pb2.Index(metadata=scip_pb2.Metadata(project_root=f"file://{tmp_path}"))
+    meta = build_provenance(
+        index, source_commit=commit, index_filter=index_filter, index_excludes_tests=False
+    )
+    meta["index_tool_version"] = "0.4.0"  # the .scip's own tool_info, flattened
+    if variant is not None:
+        meta["index_tool_variant"] = variant
+    if patchset is not None:
+        meta["index_tool_patchset"] = patchset
+    db = cpg / "proj.graph.db"
+    write_sqlite(Graph(), db, meta=meta)
+    return db
+
+
+def _patchset_env(monkeypatch: pytest.MonkeyPatch, installed_patchset: int | None):
+    """Pretend the installed scip-clang is a patched binary at `installed_patchset`
+    (both the provenance sidecar `update`/`status` read and the pipeline's own
+    identity lookup), and stub scip-clang itself (it must never really run here)."""
+    import cppgraph.pipeline as pipeline
+
+    sidecar = None
+    if installed_patchset is not None:
+        sidecar = {"version": "0.4.0", "variant": "patched", "patchset_version": installed_patchset}
+    monkeypatch.setattr(updates, "installed_scip_clang", lambda: sidecar)
+    monkeypatch.setattr(
+        pipeline, "scip_clang_info", lambda *a, **k: (sidecar is not None, "patched")
+    )
+    monkeypatch.setattr(pipeline, "scip_clang_patchset", lambda *a, **k: installed_patchset)
+    monkeypatch.setattr(pipeline.os, "access", lambda *a, **k: True)
+    ran: list[list[str]] = []
+
+    def _fake_run_scip_clang(
+        project_root, compdb_path, out_scip, *, total_tus=None, print_fn=print
+    ):
+        data = json.loads(compdb_path.read_text())
+        ran.append([e["file"] for e in data])
+        empty = scip_pb2.Index()
+        empty.metadata.project_root = f"file://{project_root}"
+        out_scip.write_bytes(empty.SerializeToString())
+
+    monkeypatch.setattr(pipeline, "run_scip_clang", _fake_run_scip_clang)
+    return ran
+
+
+def test_update_patchset_gap_refuses_non_interactive_without_yes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """No TTY and no --yes: `update` must NOT reindex (neither the incremental
+    partial nor a full re-index — both run scip-clang). It explains the gap,
+    names both patchsets, says how to proceed, and exits non-zero."""
+    project_root, commit, _compdb = _patchset_gap_repo(tmp_path)
+    db = _patchset_gap_store(tmp_path, commit)
+    before = db.read_bytes()
+    monkeypatch.chdir(project_root)
+    ran = _patchset_env(monkeypatch, installed_patchset=7)
+    monkeypatch.setattr("cppgraph.prompt.interactive", lambda: False)
+
+    rc = main(["update", "--graph", str(db)])
+
+    assert rc != 0
+    out = capsys.readouterr().out
+    assert "p6" in out and "p7" in out
+    assert "--yes" in out
+    assert ran == []  # scip-clang never ran — nothing silent, nothing started
+    assert db.read_bytes() == before  # the graph is untouched
+
+
+def test_update_patchset_gap_proceeds_with_yes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """--yes grants consent non-interactively: a FULL re-index of the recorded
+    scope replaces the graph in place, and the new binary's patchset is
+    recorded (the .scip is recomputed too, not reused)."""
+    project_root, commit, _compdb = _patchset_gap_repo(tmp_path)
+    db = _patchset_gap_store(tmp_path, commit, patchset="6")
+    monkeypatch.chdir(project_root)
+    ran = _patchset_env(monkeypatch, installed_patchset=7)
+
+    rc = main(["update", "--graph", str(db), "--yes"])
+
+    assert rc == 0
+    assert ran == [[str(tmp_path / "a.cpp")]]  # the full recorded scope, re-indexed
+    store = GraphStore(db)
+    try:
+        meta = store.meta()
+        assert meta["index_tool_patchset"] == "7"  # the new binary's patchset
+        assert meta["index_filter"] == ""
+        assert meta["source_commit"] == commit
+    finally:
+        store.close()
+    assert (project_root / ".cppgraph" / "proj.scip").is_file()  # same artifact set
+
+
+def test_update_patchset_gap_interactive_prompt_defaults_to_no(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Interactive decline (the prompt's default): nothing is re-indexed, exit 0 —
+    a clean 'kept the graph' outcome, not an error."""
+    project_root, commit, _compdb = _patchset_gap_repo(tmp_path)
+    db = _patchset_gap_store(tmp_path, commit)
+    monkeypatch.chdir(project_root)
+    ran = _patchset_env(monkeypatch, installed_patchset=7)
+    monkeypatch.setattr("cppgraph.prompt.interactive", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda _prompt: "n")
+
+    rc = main(["update", "--graph", str(db)])
+
+    assert rc == 0
+    assert ran == []
+    assert "p6" in capsys.readouterr().out
+
+
+def test_update_patchset_gap_interactive_yes_proceeds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project_root, commit, _compdb = _patchset_gap_repo(tmp_path)
+    db = _patchset_gap_store(tmp_path, commit)
+    monkeypatch.chdir(project_root)
+    ran = _patchset_env(monkeypatch, installed_patchset=7)
+    monkeypatch.setattr("cppgraph.prompt.interactive", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda _prompt: "y")
+
+    rc = main(["update", "--graph", str(db)])
+
+    assert rc == 0
+    assert ran == [[str(tmp_path / "a.cpp")]]
+
+
+def test_update_patchset_match_keeps_incremental_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """No patchset gap: `update` stays the incremental path — only the changed
+    TU is re-indexed, no consent question, no full re-index."""
+    project_root, commit, _compdb = _patchset_gap_repo(tmp_path)
+    db = _patchset_gap_store(tmp_path, commit, patchset="7")
+    monkeypatch.chdir(project_root)
+    ran = _patchset_env(monkeypatch, installed_patchset=7)
+
+    rc = main(["update", "--graph", str(db)])
+
+    assert rc == 0
+    assert ran == [[str(tmp_path / "a.cpp")]]  # the partial (changed-TU) compdb
+    assert "p6" not in capsys.readouterr().out  # no consent prompt happened
+    store = GraphStore(db)
+    try:
+        assert store.meta()["index_tool_patchset"] == "7"
+    finally:
+        store.close()
+
+
+def test_update_without_recorded_patchset_keeps_incremental_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A legacy graph predating patchset recording: don't guess its patchset —
+    the incremental path runs exactly as before, and the update adds no
+    `index_tool_patchset` (a partial must never fabricate one)."""
+    project_root, commit, _compdb = _patchset_gap_repo(tmp_path)
+    db = _patchset_gap_store(tmp_path, commit, variant="patched", patchset=None)
+    monkeypatch.chdir(project_root)
+    ran = _patchset_env(monkeypatch, installed_patchset=7)
+
+    rc = main(["update", "--graph", str(db)])
+
+    assert rc == 0
+    assert ran == [[str(tmp_path / "a.cpp")]]
+    store = GraphStore(db)
+    try:
+        assert "index_tool_patchset" not in store.meta()
+    finally:
+        store.close()
+
+
+def test_update_rescope_warns_on_patchset_gap_but_never_full_reindexes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`update --rescope` with a patchset gap is a user-invoked partial
+    operation: it prints a clear WARNING (naming both patchsets, pointing at the
+    consented full re-index), then does exactly the requested partial work —
+    no consent prompt, no full re-index, recorded patchset unchanged."""
+    project_root, commit, _compdb = _patchset_gap_repo(tmp_path)
+    db = _patchset_gap_store(tmp_path, commit, patchset="6", index_filter="src")
+    monkeypatch.chdir(project_root)
+    ran = _patchset_env(monkeypatch, installed_patchset=7)
+
+    rc = main(["update", "--graph", str(db), "--rescope", "--filter", ""])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "WARNING" in out
+    assert "p6" in out and "p7" in out
+    assert "full re-index" in out
+    assert "cppgraph update" in out
+    # Exactly one scip-clang run: the rescope partial (the TU the widening
+    # adds) — a full re-index of the widened scope would have too.
+    assert ran == [[str(tmp_path / "a.cpp")]]
+    store = GraphStore(db)
+    try:
+        assert store.meta()["index_tool_patchset"] == "6"
+    finally:
+        store.close()
+
+
+def test_status_shows_patchsets_informationally(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Even with no gap to advise on, `status` surfaces the graph's and the
+    installed binary's patchsets on the scip-clang line — matching the MCP
+    status's machine-readable fields."""
+    graph = Graph()
+    graph.add_node("cxx . . $ mongo/Foo#makeResumeToken(a1).", display_name="x")
+    path = tmp_path / "g.db"
+    write_sqlite(
+        graph,
+        path,
+        meta={
+            "index_tool_version": "0.4.0",
+            "index_tool_variant": "patched",
+            "index_tool_patchset": "7",
+        },
+    )
+    monkeypatch.delenv("CPPGRAPH_NO_UPDATE_CHECK", raising=False)
+    monkeypatch.setattr(
+        updates,
+        "fetch_versions",
+        lambda **_: {
+            "latest": "0.4.0",
+            "releases": [],
+            "scip_clang": {"version": "0.4.0", "rebuild": "reindex", "patchset_version": 7},
+        },
+    )
+    monkeypatch.setattr(
+        updates,
+        "installed_scip_clang",
+        lambda: {"version": "0.4.0", "variant": "patched", "patchset_version": 7},
+    )
+
+    assert main(["status", "--graph", str(path)]) == 0
+    out = capsys.readouterr().out
+    assert "installed binary patched (patchset p7)" in out
+    assert "this graph indexed with patched (patchset p7)" in out
+    assert "full re-index" not in out  # no gap -> no re-index advice
+
+
+def test_update_patchset_gap_yes_honors_explicit_graph_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An explicit `--graph /custom/path.db` + consent: the full re-index must
+    replace THE GIVEN graph, not write a fresh one under `.cppgraph/`."""
+    from cppgraph.store import build_provenance
+
+    project_root, commit, _compdb = _patchset_gap_repo(tmp_path)
+    custom = project_root / "elsewhere" / "mygraph.db"
+    custom.parent.mkdir()
+    index = scip_pb2.Index(metadata=scip_pb2.Metadata(project_root=f"file://{project_root}"))
+    meta = build_provenance(
+        index, source_commit=commit, index_filter="", index_excludes_tests=False
+    )
+    meta["index_tool_version"] = "0.4.0"
+    meta["index_tool_variant"] = "patched"
+    meta["index_tool_patchset"] = "6"
+    write_sqlite(Graph(), custom, meta=meta)
+
+    monkeypatch.chdir(project_root)
+    ran = _patchset_env(monkeypatch, installed_patchset=7)
+
+    rc = main(["update", "--graph", str(custom), "--yes"])
+
+    assert rc == 0
+    assert ran == [[str(project_root / "a.cpp")]]
+    store = GraphStore(custom)  # the explicit destination was rebuilt in place
+    try:
+        assert store.meta()["index_tool_patchset"] == "7"
+        assert store.meta()["index_filter"] == ""
+    finally:
+        store.close()
+    assert not (project_root / ".cppgraph" / "mygraph.graph.db").exists()
+
+
+def test_status_shows_patchset_reindex_advice(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The patchset gap surfaces in `status`'s scip-clang advice: names both
+    patchsets and says the fix is a full re-index, not an incremental update.
+    Advisory only — exit 0."""
+    graph = Graph()
+    graph.add_node("cxx . . $ mongo/Foo#makeResumeToken(a1).", display_name="x")
+    path = tmp_path / "g.db"
+    write_sqlite(
+        graph,
+        path,
+        meta={
+            "index_tool_version": "0.4.0",
+            "index_tool_variant": "patched",
+            "index_tool_patchset": "6",
+        },
+    )
+    monkeypatch.delenv("CPPGRAPH_NO_UPDATE_CHECK", raising=False)
+    monkeypatch.setattr(
+        updates,
+        "fetch_versions",
+        lambda **_: {
+            "latest": "0.4.0",
+            "releases": [],
+            "scip_clang": {"version": "0.4.0", "rebuild": "reindex", "patchset_version": 7},
+        },
+    )
+    monkeypatch.setattr(
+        updates,
+        "installed_scip_clang",
+        lambda: {"version": "0.4.0", "variant": "patched", "patchset_version": 7},
+    )
+
+    assert main(["status", "--graph", str(path)]) == 0
+    out = capsys.readouterr().out
+    assert "patchset p6" in out and "p7" in out
+    assert "FULL re-index" in out
+
+
+def test_build_records_scip_patchset_flag(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`build --scip-patchset` records the .scip producer's patchset — the
+    counterpart of --scip-variant for externally produced indexes."""
+    index = scip_pb2.Index()
+    index.metadata.project_root = "file:///some/repo"
+    doc = index.documents.add(relative_path="foo.cpp")
+    occ = doc.occurrences.add(
+        symbol="cxx . . $ mongo/Foo#bar(a1).", symbol_roles=scip_pb2.SymbolRole.Definition
+    )
+    occ.range.extend([0, 0, 3])
+    scip_path = tmp_path / "index.scip"
+    scip_path.write_bytes(index.SerializeToString())
+    out = tmp_path / "graph.db"
+
+    exit_code = main(
+        [
+            "build",
+            "--scip",
+            str(scip_path),
+            "--out",
+            str(out),
+            "--scip-variant",
+            "patched",
+            "--scip-patchset",
+            "7",
+        ]
+    )
+    assert exit_code == 0
+    assert GraphStore(out).meta()["index_tool_patchset"] == "7"
+
+
+def test_update_scip_cannot_stamp_patchset(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The partial external-`--scip` apply path can no longer write (nor raise)
+    the graph's recorded patchset: `--scip-patchset` was removed from `update` —
+    a partial re-indexes only some TUs, so stamping would claim whole-graph
+    coverage (the exact fabrication the rest of the feature prevents). It
+    remains on `build`, which applies a FULL .scip so stamping is correct."""
+    db = tmp_path / "graph.db"
+    write_sqlite(Graph(), db, meta={"index_tool_patchset": "6"})
+    index = scip_pb2.Index()
+    index.metadata.project_root = "file:///some/repo"
+    doc = index.documents.add(relative_path="foo.cpp")
+    d = doc.occurrences.add(
+        symbol="cxx . . $ mongo/Foo#a(a1).", symbol_roles=scip_pb2.SymbolRole.Definition
+    )
+    d.range.extend([2, 0, 3])
+    scip_path = tmp_path / "partial.scip"
+    scip_path.write_bytes(index.SerializeToString())
+
+    exit_code = main(
+        [
+            "update",
+            "--graph",
+            str(db),
+            "--scip",
+            str(scip_path),
+            "--source-commit",
+            "newsha",
+            "--scip-variant",
+            "patched",
+        ]
+    )
+    assert exit_code == 0
+    meta = GraphStore(db).meta()
+    assert meta["index_tool_patchset"] == "6"  # preserved untouched
+
+    # The flag is gone from `update` entirely.
+    with pytest.raises(SystemExit) as exc:
+        main(["update", "--graph", str(db), "--scip", str(scip_path), "--scip-patchset", "7"])
+    assert exc.value.code == 2
+
+
+def test_update_deduced_legacy_patchset_gap_refuses_non_interactive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The motivating case: a graph built before patchset recording existed
+    (cppgraph < 0.4.4, patched variant, no `index_tool_patchset`) against a
+    newer installed patched binary — the patchset is DEDUCED (effective p1) and
+    `update` demands consent for a full re-index instead of running an
+    incremental update that could never fix it."""
+    from cppgraph.store import GraphStore as GS
+
+    project_root, commit, _compdb = _patchset_gap_repo(tmp_path)
+    db = _patchset_gap_store(tmp_path, commit, variant="patched", patchset=None)
+    # Make it a pre-recording graph: built by cppgraph 0.4.2.
+    store = GS(db)
+    try:
+        store._con.execute("INSERT OR REPLACE INTO meta VALUES ('cppgraph_version', '0.4.2')")
+        store._con.commit()
+    finally:
+        store.close()
+    monkeypatch.chdir(project_root)
+    ran = _patchset_env(monkeypatch, installed_patchset=7)
+    monkeypatch.setattr("cppgraph.prompt.interactive", lambda: False)
+
+    rc = main(["update", "--graph", str(db)])
+
+    assert rc != 0
+    out = capsys.readouterr().out
+    assert "p1" in out and "p7" in out
+    assert "--yes" in out
+    assert ran == []  # nothing ran silently
+    store = GS(db)
+    try:
+        assert "index_tool_patchset" not in store.meta()  # still unrecorded
+    finally:
+        store.close()
+
+
 @pytest.fixture
 def explain_graph(tmp_path: Path) -> Path:
     """A graph whose symbol has a real definition site (file + line) and a

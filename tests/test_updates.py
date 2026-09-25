@@ -276,7 +276,15 @@ def test_scip_advice_patchset_stale_when_installed_older() -> None:
     )
     assert adv["binary_status"] == "ok"  # version matches; only the patchset lags
     assert adv["patchset_status"] == "stale"
-    assert "p1" in adv["patchset_message"] and "p2" in adv["patchset_message"]
+    m = adv["patchset_message"]
+    assert "p1" in m and "p2" in m
+    # Actionable, both steps in order: fix the binary, THEN re-index the graphs
+    # (the message must not read as "only matters for a future reindex").
+    assert ("re-download" in m) or ("rebuild" in m)
+    assert "THEN" in m
+    assert "re-index your graphs" in m
+    assert "cppgraph update" in m
+    assert "every TU" in m or "every translation unit" in m
 
 
 def test_scip_advice_patchset_quiet_when_current() -> None:
@@ -336,3 +344,253 @@ def test_scip_advice_patchset_ignored_when_version_differs() -> None:
     )
     assert adv["binary_status"] == "stale"
     assert "patchset_status" not in adv
+
+
+# ---- graph patchset vs the installed binary: reindex advice + the update gate --
+#
+# A patchset bump changes scip-clang's output for EVERY translation unit (e.g.
+# patchset 7 restored enclosing_range for macro-introduced definitions), so an
+# existing graph built with an older patchset is stale for the installed binary
+# in a way an incremental update can never fix — it needs a full re-index.
+
+
+def test_scip_advice_reindex_on_graph_patchset_older_than_installed() -> None:
+    graph = {"version": "0.4.0", "variant": "patched", "patchset": "6"}
+    adv = updates.compute_scip_advice(
+        _PIN,
+        {"version": "0.4.0", "variant": "patched", "patchset_version": 7},
+        graph,
+    )
+    assert adv.get("reindex_recommended") is True
+    # The message says the GRAPH is stale, names both patchsets, and makes the
+    # fix unambiguous: a FULL re-index, not an incremental update.
+    assert "graph is stale" in adv["reindex_message"]
+    assert "p6" in adv["reindex_message"] and "p7" in adv["reindex_message"]
+    assert "FULL re-index" in adv["reindex_message"]
+    assert "incremental update" in adv["reindex_message"]
+    assert adv["graph_patchset"] == 6
+    assert adv["installed_patchset"] == 7
+
+
+def test_scip_advice_patchset_reindex_accepts_int_recorded_value() -> None:
+    """Store meta values are strings, but a direct caller may pass the int —
+    both parse."""
+    graph = {"version": "0.4.0", "variant": "patched", "patchset": 6}
+    adv = updates.compute_scip_advice(
+        _PIN,
+        {"version": "0.4.0", "variant": "patched", "patchset_version": 7},
+        graph,
+    )
+    assert adv.get("reindex_recommended") is True
+
+
+def test_scip_advice_no_patchset_reindex_when_patchsets_equal() -> None:
+    graph = {"version": "0.4.0", "variant": "patched", "patchset": "7"}
+    adv = updates.compute_scip_advice(
+        _PIN,
+        {"version": "0.4.0", "variant": "patched", "patchset_version": 7},
+        graph,
+    )
+    assert "reindex_recommended" not in adv
+
+
+def test_scip_advice_no_patchset_reindex_when_installed_older() -> None:
+    # The graph is NEWER than the installed binary: nothing to re-index for the
+    # graph (the binary itself gets the patchset_status nag instead).
+    graph = {"version": "0.4.0", "variant": "patched", "patchset": "7"}
+    adv = updates.compute_scip_advice(
+        _PIN,
+        {"version": "0.4.0", "variant": "patched", "patchset_version": 6},
+        graph,
+    )
+    assert "reindex_recommended" not in adv
+
+
+def test_scip_advice_no_patchset_reindex_for_stock_graph() -> None:
+    # A stock-built graph has no patch bundle — patchset comparison is meaningless.
+    graph = {"version": "0.4.0", "variant": "stock", "patchset": "6"}
+    adv = updates.compute_scip_advice(
+        _PIN,
+        {"version": "0.4.0", "variant": "patched", "patchset_version": 7},
+        graph,
+    )
+    assert "reindex_recommended" not in adv
+
+
+def test_scip_advice_no_patchset_reindex_for_stock_installed() -> None:
+    # Same in the other direction: a stock installed binary can't be "newer
+    # patchset" than anything.
+    graph = {"version": "0.4.0", "variant": "patched", "patchset": "6"}
+    adv = updates.compute_scip_advice(
+        _PIN,
+        {"version": "0.4.0", "variant": "stock"},
+        graph,
+    )
+    assert "reindex_recommended" not in adv
+
+
+def test_scip_advice_no_patchset_reindex_when_graph_records_no_patchset() -> None:
+    """A legacy graph predating patchset recording must not be guessed as any
+    patchset — no advice, and `update` stays incremental (don't guess)."""
+    graph = {"version": "0.4.0", "variant": "patched"}
+    adv = updates.compute_scip_advice(
+        _PIN,
+        {"version": "0.4.0", "variant": "patched", "patchset_version": 7},
+        graph,
+    )
+    assert "reindex_recommended" not in adv
+
+
+def test_scip_advice_no_patchset_reindex_when_installed_unknown() -> None:
+    graph = {"version": "0.4.0", "variant": "patched", "patchset": "6"}
+    adv = updates.compute_scip_advice(_PIN, None, graph)
+    assert "reindex_recommended" not in adv
+
+
+def test_scip_advice_exposes_patchsets_informationally() -> None:
+    """Both patchsets surface even with no gap (matching the CLI status line /
+    MCP fields) — informational, like the variants."""
+    adv = updates.compute_scip_advice(
+        _PIN,
+        {"version": "0.4.0", "variant": "patched", "patchset_version": 7},
+        {"version": "0.4.0", "variant": "patched", "patchset": "7"},
+    )
+    assert adv["installed_patchset"] == 7
+    assert adv["graph_patchset"] == 7
+    assert "reindex_recommended" not in adv
+
+
+def test_scip_advice_patchset_reindex_for_pre_rename_504_variant() -> None:
+    # Pre-rename sidecar/meta spellings are the same patched family.
+    graph = {"version": "0.4.0", "variant": "504", "patchset": "6"}
+    adv = updates.compute_scip_advice(
+        _PIN,
+        {"version": "0.4.0", "variant": "patched", "patchset_version": 7},
+        graph,
+    )
+    assert adv.get("reindex_recommended") is True
+
+
+# ---- legacy-graph deduction ----------------------------------------------------
+#
+# `index_tool_patchset` recording was introduced in cppgraph 0.4.4 (alongside
+# patchset 7 of the bundle), so EVERY graph built before that release — i.e.
+# every graph that motivated this feature — carries no patchset. For those the
+# patchset is DEDUCED from release history, not guessed: a patched-family graph
+# built by cppgraph < 0.4.4 necessarily predates patchset recording, so its
+# effective patchset is 1 and any newer installed patched binary raises the gap.
+
+
+def test_patchset_gap_deduced_for_pre_recording_legacy_graph() -> None:
+    gap = updates.patchset_gap(
+        {"version": "0.4.0", "variant": "patched", "cppgraph_version": "0.4.2"},
+        {"version": "0.4.0", "variant": "patched", "patchset_version": 7},
+    )
+    assert gap == (1, 7)
+
+
+def test_scip_advice_reindex_on_deduced_legacy_patchset() -> None:
+    """End to end through `status`'s advice: the p6-era graph every existing
+    user has (patched, pre-0.4.4, no recorded patchset) against a p7 binary."""
+    graph = {"version": "0.4.0", "variant": "patched", "cppgraph_version": "0.4.2"}
+    adv = updates.compute_scip_advice(
+        _PIN,
+        {"version": "0.4.0", "variant": "patched", "patchset_version": 7},
+        graph,
+    )
+    assert adv.get("reindex_recommended") is True
+    assert adv["graph_patchset"] == 1  # the deduced effective patchset
+    assert "graph is stale" in adv["reindex_message"]
+
+
+def test_patchset_gap_none_when_legacy_cppgraph_version_is_current() -> None:
+    """At >= 0.4.4 a full build records the patchset, so a patched graph without
+    one is genuinely unknowable (e.g. `build --scip` without the flag) — no
+    guess, no gap."""
+    graph = {"version": "0.4.0", "variant": "patched", "cppgraph_version": "0.4.4"}
+    assert (
+        updates.patchset_gap(
+            graph,
+            {"version": "0.4.0", "variant": "patched", "patchset_version": 7},
+        )
+        is None
+    )
+    graph["cppgraph_version"] = "0.5.0"
+    assert (
+        updates.patchset_gap(
+            graph,
+            {"version": "0.4.0", "variant": "patched", "patchset_version": 7},
+        )
+        is None
+    )
+
+
+def test_patchset_gap_none_when_cppgraph_version_unknown() -> None:
+    graph = {"version": "0.4.0", "variant": "patched"}
+    assert (
+        updates.patchset_gap(
+            graph,
+            {"version": "0.4.0", "variant": "patched", "patchset_version": 7},
+        )
+        is None
+    )
+
+
+def test_patchset_gap_none_for_stock_legacy_graph() -> None:
+    """A stock-built graph has no patch bundle, however old — no patchset is
+    deduced for it."""
+    graph = {"version": "0.4.0", "variant": "stock", "cppgraph_version": "0.4.2"}
+    assert (
+        updates.patchset_gap(
+            graph,
+            {"version": "0.4.0", "variant": "patched", "patchset_version": 7},
+        )
+        is None
+    )
+
+
+# ---- patchset_gap: the pure detection `cppgraph update` gates on ---------------
+
+
+def test_patchset_gap_detects_older_graph() -> None:
+    gap = updates.patchset_gap(
+        {"version": "0.4.0", "variant": "patched", "patchset": "6"},
+        {"version": "0.4.0", "variant": "patched", "patchset_version": 7},
+    )
+    assert gap == (6, 7)
+
+
+def test_patchset_gap_none_when_equal_or_newer() -> None:
+    inst = {"version": "0.4.0", "variant": "patched", "patchset_version": 7}
+    assert (
+        updates.patchset_gap({"version": "0.4.0", "variant": "patched", "patchset": "7"}, inst)
+        is None
+    )
+    assert (
+        updates.patchset_gap({"version": "0.4.0", "variant": "patched", "patchset": "8"}, inst)
+        is None
+    )
+
+
+def test_patchset_gap_none_for_stock_or_unrecorded_or_unknown() -> None:
+    patched = {"version": "0.4.0", "variant": "patched", "patchset_version": 7}
+    # stock graph / stock installed
+    assert updates.patchset_gap({"version": "0.4.0", "variant": "stock"}, patched) is None
+    assert updates.patchset_gap(patched, {"version": "0.4.0", "variant": "stock"}) is None
+    # graph records no patchset (legacy) — never guessed
+    assert updates.patchset_gap({"version": "0.4.0", "variant": "patched"}, patched) is None
+    # installed sidecar missing entirely
+    assert (
+        updates.patchset_gap({"version": "0.4.0", "variant": "patched", "patchset": "6"}, None)
+        is None
+    )
+
+
+def test_patchset_gap_installed_missing_field_counts_as_1() -> None:
+    # The convention compute_scip_advice established: a patched sidecar from
+    # before the field existed is patchset 1 — so a p1 graph isn't "behind" it.
+    gap = updates.patchset_gap(
+        {"version": "0.4.0", "variant": "patched", "patchset": "1"},
+        {"version": "0.4.0", "variant": "patched"},
+    )
+    assert gap is None

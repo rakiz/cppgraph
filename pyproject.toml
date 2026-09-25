@@ -1,6 +1,6 @@
 [project]
 name = "cppgraph"
-version = "0.4.3"
+version = "0.4.4"
 description = "Semantically accurate code-graph for C++ from a compiler index (SCIP)."
 readme = "README.md"
 license = "MIT"

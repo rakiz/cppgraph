@@ -104,6 +104,29 @@ def scip_clang_info(bin_dir: Path | None = None) -> tuple[bool, str | None]:
     return present, variant
 
 
+def scip_clang_patchset(bin_dir: Path | None = None) -> int | None:
+    """The local scip-clang's patch bundle number — the `patchset_version` field
+    of the `scip-clang.json` provenance sidecar next to the binary, which only a
+    patched build carries (`_write_sidecar` records it for the patched variant
+    alone). None when there is no sidecar, no field (stock binary, or a patched
+    sidecar predating the field — compared as patchset 1 by the advice layer,
+    never guessed here), or the field isn't an int. Threads into
+    `build_provenance(scip_patchset=...)` alongside `scip_clang_info`'s variant:
+    a patchset bump changes scip-clang's output for EVERY translation unit, so
+    the graph must record which one indexed it."""
+    bin_dir = bin_dir or scip_clang_bin_dir()
+    sidecar = bin_dir / "scip-clang.json"
+    if not sidecar.is_file():
+        return None
+    try:
+        import json
+
+        raw = json.loads(sidecar.read_text()).get("patchset_version")
+    except (OSError, ValueError):
+        return None
+    return raw if isinstance(raw, int) and not isinstance(raw, bool) else None
+
+
 def out_dir_for(project_root: Path) -> Path:
     """The project's `.cppgraph/` output dir (a pure path; the pipeline creates it)."""
     return project_root / ".cppgraph"
@@ -207,6 +230,7 @@ def existing_artifacts(out_dir: Path, name: str) -> dict:
                 "index_tests",
                 "index_tool_version",
                 "index_tool_variant",
+                "index_tool_patchset",
             ):
                 if m.get(k):
                     graph[k] = m[k]
@@ -462,7 +486,23 @@ def run_init(
                 if not upd_run:
                     p.note("", f"Plan: incremental update -> {out_graph}", "Not run.")
                     return 0
-                from cppgraph.pipeline import incremental_update
+                from cppgraph.pipeline import incremental_update, warn_patchset_gap
+
+                # A patchset gap makes this incremental update a drop in an
+                # every-TU stale: warn before running it. The wizard's update is
+                # a user-chosen partial operation — it never triggers the
+                # consented full re-index (that's `cppgraph update`'s job).
+                try:
+                    from cppgraph.store import GraphStore
+
+                    store = GraphStore(out_graph)
+                    try:
+                        graph_meta = store.meta()
+                    finally:
+                        store.close()
+                except Exception:  # unreadable store: no warning, update will report
+                    graph_meta = {}
+                warn_patchset_gap(graph_meta, print_fn=p.note)
 
                 p.note("")
                 return incremental_update(

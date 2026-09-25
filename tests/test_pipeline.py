@@ -314,15 +314,30 @@ def test_run_scip_clang_nonzero_exit_still_raises_pipeline_error(
 # can assert exactly which TUs entered the graph.
 
 
-def _scoped_store(db: Path, *, src_filter: str, tests: str, commit: str | None = None) -> None:
-    """An empty store whose recorded scope is `src_filter` / tests `tests`."""
+def _scoped_store(
+    db: Path,
+    *,
+    src_filter: str,
+    tests: str,
+    commit: str | None = None,
+    variant: str | None = None,
+    patchset: str | None = None,
+) -> None:
+    """An empty store whose recorded scope is `src_filter` / tests `tests`, with
+    an explicit indexer identity (`variant`/`patchset`) when given."""
     index = scip_pb2.Index(metadata=scip_pb2.Metadata(project_root="file:///repo"))
+    index.metadata.tool_info.name = "scip-clang"
+    index.metadata.tool_info.version = "0.4.0"
     meta = build_provenance(
         index,
         source_commit=commit or "a" * 40,
         index_filter=src_filter,
         index_excludes_tests=tests == "excluded",
     )
+    if variant is not None:
+        meta["index_tool_variant"] = variant
+    if patchset is not None:
+        meta["index_tool_patchset"] = patchset
     write_sqlite(Graph(), db, meta=meta)
 
 
@@ -892,3 +907,251 @@ def test_warn_missing_include_dirs_relative_not_a_false_positive(tmp_path: Path)
     lines: list[str] = []
     pipeline.warn_missing_include_dirs(compdb, print_fn=lines.append)
     assert lines == []
+
+
+# ---- provenance: the installed binary's patchset is recorded with the graph ----
+#
+# A patchset bump changes scip-clang's output for every TU, so every path that
+# stamps `scip_variant` must stamp the patchset too (from the same sidecar).
+
+
+def _scip_for_provenance() -> scip_pb2.Index:
+    return scip_pb2.Index(
+        metadata=scip_pb2.Metadata(
+            project_root="file:///repo",
+            tool_info=scip_pb2.ToolInfo(name="scip-clang", version="0.4.0"),
+        ),
+        documents=[scip_pb2.Document(relative_path="src/a.cpp")],
+    )
+
+
+def test_full_build_records_installed_patchset(tmp_path: Path, monkeypatch) -> None:
+    compdb = _compdb(tmp_path / "cc.json")
+    out_dir = tmp_path / ".cppgraph"
+    out_dir.mkdir()
+    (out_dir / "proj.scip").write_bytes(_scip_for_provenance().SerializeToString())
+    monkeypatch.setattr(pipeline, "scip_clang_info", lambda *a, **k: (True, "patched"))
+    monkeypatch.setattr(pipeline, "scip_clang_patchset", lambda *a, **k: 7)
+
+    rc = pipeline.full_build(
+        compdb=compdb,
+        project_root=tmp_path,
+        name="proj",
+        src_filter="",
+        no_tests=False,
+        attributed_refs=False,
+        recompute_scip=False,  # reuse the .scip above — no indexer run
+        rebuild_graph=True,
+        print_fn=lambda *a: None,
+    )
+    assert rc == 0
+    store = GraphStore(out_dir / "proj.graph.db")
+    try:
+        meta = store.meta()
+        assert meta["index_tool_variant"] == "patched"
+        assert meta["index_tool_patchset"] == "7"
+    finally:
+        store.close()
+
+
+def test_full_build_omits_patchset_when_binary_absent(tmp_path: Path, monkeypatch) -> None:
+    """No binary (a graph rebuilt from a container-produced .scip): no patchset
+    is guessed — the same rule scip_variant follows."""
+    compdb = _compdb(tmp_path / "cc.json")
+    out_dir = tmp_path / ".cppgraph"
+    out_dir.mkdir()
+    (out_dir / "proj.scip").write_bytes(_scip_for_provenance().SerializeToString())
+    monkeypatch.setattr(pipeline, "scip_clang_info", lambda *a, **k: (False, None))
+    monkeypatch.setattr(pipeline, "scip_clang_patchset", lambda *a, **k: None)
+
+    rc = pipeline.full_build(
+        compdb=compdb,
+        project_root=tmp_path,
+        name="proj",
+        src_filter="",
+        no_tests=False,
+        attributed_refs=False,
+        recompute_scip=False,
+        rebuild_graph=True,
+        print_fn=lambda *a: None,
+    )
+    assert rc == 0
+    store = GraphStore(out_dir / "proj.graph.db")
+    try:
+        assert "index_tool_patchset" not in store.meta()
+    finally:
+        store.close()
+
+
+def test_incremental_update_preserves_recorded_patchset(tmp_path: Path, monkeypatch) -> None:
+    """A partial re-index covers only the changed TUs, so it must NEVER upgrade
+    the graph's recorded patchset to the installed binary's — that would claim
+    the whole graph is current output and permanently mask the gap. The recorded
+    value is carried through the meta rewrite untouched (only a FULL re-index
+    writes the binary's patchset)."""
+    git_init: list[tuple[str, ...]] = [
+        ("init", "-q"),
+        ("config", "user.email", "t@example.com"),
+        ("config", "user.name", "t"),
+    ]
+    for args in git_init:
+        sp.run(["git", "-C", str(tmp_path), *args], check=True, capture_output=True)
+    src = tmp_path / "a.cpp"
+    src.write_text("int a() {}\n")
+    sp.run(["git", "-C", str(tmp_path), "add", "-A"], check=True, capture_output=True)
+    sp.run(["git", "-C", str(tmp_path), "commit", "-qm", "init"], check=True, capture_output=True)
+    commit = sp.run(
+        ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    db = tmp_path / "proj.graph.db"
+    _scoped_store(
+        db, src_filter="", tests="included", commit=commit, variant="patched", patchset="6"
+    )
+    src.write_text("int a() { return 1; }\n")  # a real change since the indexed commit
+    compdb = tmp_path / "compile_commands.json"
+    compdb.write_text(json.dumps([{"file": str(src)}]))
+    monkeypatch.setattr(pipeline.os, "access", lambda *a, **k: True)
+    reindexed: list[list[str]] = []
+    monkeypatch.setattr(pipeline, "run_scip_clang", _fake_rescope_run_scip_clang(reindexed))
+    monkeypatch.setattr(pipeline, "scip_clang_info", lambda *a, **k: (True, "patched"))
+    monkeypatch.setattr(pipeline, "scip_clang_patchset", lambda *a, **k: 7)
+
+    rc = pipeline.incremental_update(
+        graph_db=db, compdb=compdb, project_root=tmp_path, print_fn=lambda *a: None
+    )
+    assert rc == 0
+    assert reindexed == [[str(src)]]
+    store = GraphStore(db)
+    try:
+        # STILL the graph's patchset — the update ran with a p7 binary, but only
+        # re-indexed one TU.
+        assert store.meta()["index_tool_patchset"] == "6"
+    finally:
+        store.close()
+
+
+def test_incremental_update_never_adds_patchset_to_legacy_graph(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A graph predating patchset recording gains no `index_tool_patchset` from
+    an incremental update — fabricating one would claim every TU's output,
+    including the TUs the update never touched."""
+    git_init: list[tuple[str, ...]] = [
+        ("init", "-q"),
+        ("config", "user.email", "t@example.com"),
+        ("config", "user.name", "t"),
+    ]
+    for args in git_init:
+        sp.run(["git", "-C", str(tmp_path), *args], check=True, capture_output=True)
+    src = tmp_path / "a.cpp"
+    src.write_text("int a() {}\n")
+    sp.run(["git", "-C", str(tmp_path), "add", "-A"], check=True, capture_output=True)
+    sp.run(["git", "-C", str(tmp_path), "commit", "-qm", "init"], check=True, capture_output=True)
+    commit = sp.run(
+        ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    db = tmp_path / "proj.graph.db"
+    _scoped_store(db, src_filter="", tests="included", commit=commit, variant="patched")
+    src.write_text("int a() { return 1; }\n")
+    compdb = tmp_path / "compile_commands.json"
+    compdb.write_text(json.dumps([{"file": str(src)}]))
+    monkeypatch.setattr(pipeline.os, "access", lambda *a, **k: True)
+    reindexed: list[list[str]] = []
+    monkeypatch.setattr(pipeline, "run_scip_clang", _fake_rescope_run_scip_clang(reindexed))
+    monkeypatch.setattr(pipeline, "scip_clang_info", lambda *a, **k: (True, "patched"))
+    monkeypatch.setattr(pipeline, "scip_clang_patchset", lambda *a, **k: 7)
+
+    rc = pipeline.incremental_update(
+        graph_db=db, compdb=compdb, project_root=tmp_path, print_fn=lambda *a: None
+    )
+    assert rc == 0
+    assert reindexed == [[str(src)]]
+    store = GraphStore(db)
+    try:
+        assert "index_tool_patchset" not in store.meta()
+    finally:
+        store.close()
+
+
+def test_rescope_update_preserves_recorded_patchset(tmp_path: Path, monkeypatch) -> None:
+    """Same rule for the rescope partial: the recorded patchset survives the
+    meta rewrite untouched even when the installed binary is newer."""
+    db = tmp_path / "proj.graph.db"
+    _scoped_store(db, src_filter="src/foo/bar", tests="excluded", variant="patched", patchset="6")
+    compdb, reindexed = _rescope_env(tmp_path, monkeypatch, [{"file": "/repo/src/foo/new.cpp"}])
+    monkeypatch.setattr(pipeline, "scip_clang_info", lambda *a, **k: (True, "patched"))
+    monkeypatch.setattr(pipeline, "scip_clang_patchset", lambda *a, **k: 7)
+    import cppgraph.updates as updates
+
+    monkeypatch.setattr(
+        updates,
+        "installed_scip_clang",
+        lambda: {"version": "0.4.0", "variant": "patched", "patchset_version": 7},
+    )
+
+    rc = pipeline.rescope_update(
+        graph_db=db,
+        compdb=compdb,
+        project_root=tmp_path,
+        new_filter="src/foo",
+        print_fn=lambda *a: None,
+    )
+    assert rc == 0
+    assert reindexed == [["/repo/src/foo/new.cpp"]]
+    store = GraphStore(db)
+    try:
+        assert store.meta()["index_tool_patchset"] == "6"
+    finally:
+        store.close()
+
+
+def test_rescope_warns_on_patchset_gap_but_never_full_reindexes(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A rescope with a patchset gap is a user-invoked PARTIAL operation: it
+    warns that the graph still needs a full re-index (naming both patchsets and
+    where consent lives), then does exactly the requested partial work — never
+    a full re-index, and the recorded patchset is unchanged."""
+    db = tmp_path / "proj.graph.db"
+    _scoped_store(db, src_filter="src/foo/bar", tests="excluded", variant="patched", patchset="6")
+    compdb, reindexed = _rescope_env(tmp_path, monkeypatch, [{"file": "/repo/src/foo/new.cpp"}])
+    monkeypatch.setattr(pipeline, "scip_clang_info", lambda *a, **k: (True, "patched"))
+    monkeypatch.setattr(pipeline, "scip_clang_patchset", lambda *a, **k: 7)
+    import cppgraph.updates as updates
+
+    monkeypatch.setattr(
+        updates,
+        "installed_scip_clang",
+        lambda: {"version": "0.4.0", "variant": "patched", "patchset_version": 7},
+    )
+    lines: list[str] = []
+
+    rc = pipeline.rescope_update(
+        graph_db=db,
+        compdb=compdb,
+        project_root=tmp_path,
+        new_filter="src/foo",
+        print_fn=lines.append,
+    )
+    assert rc == 0
+    out = "\n".join(lines)
+    assert "WARNING" in out
+    assert "p6" in out and "p7" in out
+    assert "full re-index" in out
+    assert "cppgraph update" in out
+    # Exactly one scip-clang run: the rescope partial — a full re-index of the
+    # recorded scope would have indexed old.cpp too.
+    assert reindexed == [["/repo/src/foo/new.cpp"]]
+    store = GraphStore(db)
+    try:
+        assert store.meta()["index_tool_patchset"] == "6"
+    finally:
+        store.close()

@@ -11,7 +11,7 @@
       "scip-clang-x86_64-linux": "06fd18c576f979a726c651594644ec4a35db4f471f2160b3f72eb89fa6001784"
     }
   },
-  "latest": "0.4.3",
+  "latest": "0.4.4",
   "releases": [
     {
       "version": "0.1.0",
@@ -60,6 +60,12 @@
       "rebuild": "none",
       "notes": "No schema change (still v5), safe to update in place. scip-clang patchset 7 adds an `enclosing_range` fallback for macro-introduced definitions (gtest `TEST`/`TEST_F` bodies and macro-decorated inlines), restoring the call edges cppgraph previously dropped there; adopting it needs the patched binary re-downloaded and the graph re-indexed. Also six CLI/graph fixes (a `find` token-measurement bug, `explain` name display, exact-type name resolution, a graph-build version stamp, a `build --help` crash, a warning on a stale compile_commands.json) and a fully re-measured `COMPARISON.md`. Full detail in `CHANGELOG.md`.",
       "url": "https://github.com/rakiz/cppgraph/releases/tag/v0.4.3"
+    },
+    {
+      "version": "0.4.4",
+      "rebuild": "none",
+      "notes": "No schema change (still v5), safe to update in place. `cppgraph update` now notices when the graph was indexed with an older scip-clang patchset than the installed patched binary and, with your explicit consent (never silently — indexing is long), re-indexes the recorded scope; `status` reports the graph stale and names both patchsets, and the installed-binary advice states the two steps (update the binary, then re-index). A graph built before patchset tracking (cppgraph < 0.4.4, no recorded patchset) is deduced pre-current so p6→p7 users are covered. Partial updates never change the recorded patchset. Full detail in `CHANGELOG.md`.",
+      "url": "https://github.com/rakiz/cppgraph/releases/tag/v0.4.4"
     }
   ]
 }

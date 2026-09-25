@@ -601,6 +601,82 @@ def _normalize_subcommand(argv: list[str], known: Collection[str]) -> list[str]:
     return argv
 
 
+def _full_reindex_with_consent(
+    graph_path: Path,
+    compdb_path: Path,
+    project_root: Path,
+    meta: dict[str, str],
+    graph_patchset: int,
+    installed_patchset: int,
+    *,
+    assume_yes: bool,
+) -> int:
+    """The patchset-gap exit of `cppgraph update`: the graph was indexed with an
+    older scip-clang patchset than the installed binary, and a patchset bump
+    changes scip-clang's output for EVERY translation unit — so an incremental
+    update can't pick it up; the whole recorded scope needs a full re-index.
+    Indexing is long, so this never happens silently: interactive consent with
+    an explicit No default, or the explicit `--yes` flag (granted consent is an
+    acceptable substitute for the prompt). Returns a process-style exit code:
+    2 = refused non-interactively (nothing ran), 0 = declined interactively or
+    the re-index completed."""
+    scope = meta.get("index_filter") or "<whole tree>"
+    tests = meta.get("index_tests", "included")
+    if not assume_yes:
+        from cppgraph.prompt import interactive
+
+        if not interactive():
+            print(
+                f"[cppgraph] this graph was indexed with scip-clang patchset p{graph_patchset} "
+                f"but the installed binary is p{installed_patchset} — its output differs "
+                "for every translation unit, so it needs a FULL re-index of the recorded "
+                f"scope ({scope}, tests {tests}), not an incremental update."
+            )
+            print(
+                "[cppgraph] re-run `cppgraph update` in an interactive terminal to approve "
+                "it, or pass --yes (-y) to consent non-interactively. Nothing was "
+                "re-indexed."
+            )
+            return 2
+        print(
+            f"[cppgraph] this graph was indexed with scip-clang patchset p{graph_patchset} "
+            f"but the installed binary is p{installed_patchset} — its output differs for "
+            "every translation unit. The fix is a FULL re-index of the recorded scope "
+            f"({scope}, tests {tests}): re-running scip-clang over every in-scope "
+            "translation unit and replacing the graph. This is long."
+        )
+        answer = input("[cppgraph] proceed with the full re-index? [y/N]: ")
+        if answer.strip().lower() not in ("y", "yes"):
+            print("[cppgraph] kept the existing graph unchanged. Nothing was re-indexed.")
+            return 0
+    # Same artifacts the graph was built from: the GIVEN graph path (an explicit
+    # `--graph` destination is honored; the auto-discovered conventional layout
+    # passes its own path) plus the `.cppgraph/<name>.scip` / compdb it was
+    # built from, replaced in place, in the recorded scope — which is what an
+    # incremental update can't extend to the patchset's every-TU change.
+    from cppgraph.pipeline import full_build
+
+    name = graph_path.name
+    for suffix in (".graph.db", ".db"):
+        if name.endswith(suffix):
+            name = name[: -len(suffix)]
+            break
+    return full_build(
+        compdb=compdb_path,
+        project_root=project_root,
+        name=name,
+        src_filter=meta.get("index_filter", ""),
+        no_tests=meta.get("index_tests") == "excluded",
+        # Preserve the usage-view level the graph was built at; full_build
+        # re-gates it on the installed binary's variant.
+        attributed_refs=meta.get("has_attributed_refs") == "true",
+        recompute_scip=True,
+        rebuild_graph=True,
+        out_graph=graph_path,
+        print_fn=print,
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="cppgraph",
@@ -630,6 +706,16 @@ def main(argv: list[str] | None = None) -> int:
         help="the scip-clang variant that produced this index (e.g. 'stock' or "
         "'patched'); recorded as provenance so `cppgraph status` can "
         "flag the graph as stale when the pinned indexer changes. the index wizard "
+        "passes it from the binary's provenance sidecar.",
+    )
+    p_build.add_argument(
+        "--scip-patchset",
+        type=int,
+        default=None,
+        help="the patch bundle number of the patched scip-clang that produced this "
+        "index (its sidecar's patchset_version); recorded as provenance — a patchset "
+        "bump changes the indexer's output for every TU, so `cppgraph status` and "
+        "`cppgraph update` compare it to the installed binary. the index wizard "
         "passes it from the binary's provenance sidecar.",
     )
     p_build.add_argument(
@@ -825,6 +911,17 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="the scip-clang variant that produced the partial index (see "
         "`build --scip-variant`); refreshes the graph's recorded indexer identity",
+    )
+    p_update.add_argument(
+        "-y",
+        "--yes",
+        dest="assume_yes",
+        action="store_true",
+        help="grant consent non-interactively: when the graph's recorded scip-clang "
+        "patchset is older than the installed binary's (its output differs for every "
+        "TU), `update` needs a FULL re-index of the recorded scope, which is long — "
+        "so it asks first, and without a TTY it refuses and exits non-zero. This "
+        "flag is that consent",
     )
     p_update.add_argument(
         "--rescope",
@@ -1600,6 +1697,7 @@ def main(argv: list[str] | None = None) -> int:
             source_commit=args.source_commit,
             source_dirty=True if args.source_dirty else None,
             scip_variant=args.scip_variant,
+            scip_patchset=args.scip_patchset,
             index_filter=args.index_filter,
             index_excludes_tests=bool(args.index_no_tests) if scope_recorded else None,
         )
@@ -1719,12 +1817,13 @@ def main(argv: list[str] | None = None) -> int:
         if args.scip is None:
             from cppgraph.init import find_compdb
             from cppgraph.pipeline import incremental_update, rescope_update
+            from cppgraph.updates import installed_scip_clang, patchset_gap
 
             if args.graph:
                 graph_path = Path(args.graph)
                 store = _open_store_at(graph_path, parser)
                 try:
-                    recorded_root = store.meta().get("project_root")
+                    graph_meta = store.meta()
                 finally:
                     store.close()
                 # The store's own recorded `project_root` is authoritative — an
@@ -1734,6 +1833,7 @@ def main(argv: list[str] | None = None) -> int:
                 # can silently pick the wrong checkout/compdb. Only fall back to
                 # the depth guess for an older graph built before this field was
                 # recorded.
+                recorded_root = graph_meta.get("project_root")
                 project_root = (
                     project_root_path(recorded_root) if recorded_root else None
                 ) or graph_path.resolve().parent.parent
@@ -1745,6 +1845,14 @@ def main(argv: list[str] | None = None) -> int:
                         "Pass --graph <store.db>, or run from inside an indexed project."
                     )
                 graph_path, project_root = found
+                try:
+                    store = GraphStore(graph_path)
+                except IncompatibleStoreError as e:
+                    parser.error(str(e))
+                try:
+                    graph_meta = store.meta()
+                finally:
+                    store.close()
             compdb_path = find_compdb(project_root)
             if compdb_path is None:
                 parser.error(
@@ -1761,6 +1869,31 @@ def main(argv: list[str] | None = None) -> int:
                         # tri-state: the flag only asks for inclusion; absent = keep
                         include_tests=True if args.include_tests else None,
                         print_fn=print,
+                    )
+                # Patchset gate, BEFORE any incremental work: a graph indexed with
+                # an older scip-clang patchset than the installed binary is stale
+                # for every TU — an incremental update can't pick that up, only a
+                # full re-index can. Indexing is long, so the re-index needs
+                # consent (interactive, or --yes); a graph with no recorded
+                # patchset is never guessed.
+                gap = patchset_gap(
+                    {
+                        "version": graph_meta.get("index_tool_version"),
+                        "variant": graph_meta.get("index_tool_variant"),
+                        "patchset": graph_meta.get("index_tool_patchset"),
+                        "cppgraph_version": graph_meta.get("cppgraph_version"),
+                    },
+                    installed_scip_clang(),
+                )
+                if gap is not None:
+                    return _full_reindex_with_consent(
+                        graph_path,
+                        compdb_path,
+                        project_root,
+                        graph_meta,
+                        gap[0],
+                        gap[1],
+                        assume_yes=args.assume_yes,
                     )
                 return incremental_update(
                     graph_db=graph_path,
@@ -1779,6 +1912,10 @@ def main(argv: list[str] | None = None) -> int:
         index = scip_pb2.Index()
         with open(args.scip, "rb") as f:
             index.ParseFromString(f.read())
+        # Deliberately no patchset stamping here (no --scip-patchset flag): this
+        # applies a PARTIAL index over some TUs, so recording the producer's
+        # patchset would claim whole-graph coverage and mask a patchset gap.
+        # `build --scip-patchset` exists because `build` applies a FULL .scip.
         meta = build_provenance(
             index,
             source_commit=args.source_commit,
@@ -2480,14 +2617,23 @@ def main(argv: list[str] | None = None) -> int:
         # regardless; don't turn this into a hard gate without discussion
         # (see updates.py's module docstring for the fail-soft rationale).
         scip = scip_update_advice(
-            {"version": m.get("index_tool_version"), "variant": m.get("index_tool_variant")}
+            {
+                "version": m.get("index_tool_version"),
+                "variant": m.get("index_tool_variant"),
+                "patchset": m.get("index_tool_patchset"),
+                "cppgraph_version": m.get("cppgraph_version"),
+            }
         )
         if scip.get("checked"):
             line = f"  scip-clang:    pinned version {scip['pinned_version']}"
             if scip.get("installed_variant"):
                 line += f", installed binary {scip['installed_variant']}"
+                if scip.get("installed_patchset"):
+                    line += f" (patchset p{scip['installed_patchset']})"
             if scip.get("graph_variant"):
                 line += f", this graph indexed with {scip['graph_variant']}"
+                if scip.get("graph_patchset"):
+                    line += f" (patchset p{scip['graph_patchset']})"
             print(line)
             if scip.get("binary_status") in ("stale", "unknown"):
                 print(f"    ! {scip['binary_message']}")

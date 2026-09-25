@@ -25,9 +25,12 @@ import sys
 import time
 from pathlib import Path
 
+# Module-qualified use (`updates.installed_scip_clang()`), not a name import: the
+# provenance sidecar reader is monkeypatched by tests.
+from cppgraph import updates
 from cppgraph.builder import build_graph
 from cppgraph.export import is_test_file
-from cppgraph.init import PATCHED_VARIANTS, scip_clang_bin_dir, scip_clang_info
+from cppgraph.init import PATCHED_VARIANTS, scip_clang_bin_dir, scip_clang_info, scip_clang_patchset
 from cppgraph.proto import scip_pb2
 from cppgraph.store import (
     GraphStore,
@@ -319,6 +322,7 @@ def build_store(
     source_commit: str | None,
     source_dirty: bool,
     scip_variant: str | None,
+    scip_patchset: int | None = None,
     print_fn=print,
 ) -> None:
     """Build the SQLite store from `scip_path`, recording index scope + git
@@ -332,6 +336,7 @@ def build_store(
         source_commit=source_commit,
         source_dirty=source_dirty or None,
         scip_variant=scip_variant,
+        scip_patchset=scip_patchset,
         index_filter=src_filter,  # always recorded (empty = whole tree)
         index_excludes_tests=no_tests,
     )
@@ -356,15 +361,21 @@ def full_build(
     attributed_refs: bool,
     recompute_scip: bool,
     rebuild_graph: bool,
+    out_graph: Path | None = None,
     print_fn=print,
 ) -> int:
     """Run the full pipeline. `recompute_scip`/`rebuild_graph` are the caller's
     decisions: an existing `.scip`/`.graph.db` is reused (never overwritten) unless
-    the corresponding flag is True. Returns a process-style exit code."""
+    the corresponding flag is True. Returns a process-style exit code.
+
+    The graph store goes to `out_graph` when given (an explicit `--graph`
+    destination), else the conventional `.cppgraph/<name>.graph.db`; the
+    compdb/scip artifacts always keep the `.cppgraph/<name>.*` names."""
     out_dir = prepare_out_dir(project_root)
     out_compdb = out_dir / f"{name}.compdb.json"
     out_scip = out_dir / f"{name}.scip"
-    out_graph = out_dir / f"{name}.graph.db"
+    if out_graph is None:
+        out_graph = out_dir / f"{name}.graph.db"
 
     present, variant = scip_clang_info()
     # Attribution needs a patched binary that emits enclosing_range; drop it otherwise.
@@ -374,6 +385,7 @@ def full_build(
             "  warning: --attributed-refs requested but the local scip-clang is not a "
             "patched build; producing file-granularity usage instead."
         )
+    patchset = scip_clang_patchset()
 
     # [1/3] filter compdb (derived + deterministic — always regenerated).
     tests_note = ", excluding tests" if no_tests else ""
@@ -420,10 +432,41 @@ def full_build(
         source_commit=source_commit,
         source_dirty=source_dirty,
         scip_variant=variant if present else None,
+        scip_patchset=patchset if present else None,
         print_fn=print_fn,
     )
     print_fn(f"Done. Graph: {out_graph}")
     return 0
+
+
+def warn_patchset_gap(meta: dict[str, str], print_fn=print) -> bool:
+    """Warn when the graph's recorded scip-clang patchset is older than the
+    installed binary's, and return whether a gap exists.
+
+    For the user-invoked PARTIAL paths (`update --rescope`, the index wizard's
+    incremental update): a patchset bump changes scip-clang's output for every
+    TU, so their partial work cannot pick the patchset up — but they are exactly
+    what the user asked for, so the warning is advisory and no full re-index is
+    ever triggered from here. The consented full re-index lives in
+    `cppgraph update` (which gates on the gap before any incremental work)."""
+    graph_scip = {
+        "version": meta.get("index_tool_version"),
+        "variant": meta.get("index_tool_variant"),
+        "patchset": meta.get("index_tool_patchset"),
+        "cppgraph_version": meta.get("cppgraph_version"),
+    }
+    gap = updates.patchset_gap(graph_scip, updates.installed_scip_clang())
+    if gap is None:
+        return False
+    graph_ps, installed_ps = gap
+    print_fn(
+        f"  WARNING: this graph was indexed with scip-clang patchset p{graph_ps} but the "
+        f"installed binary is p{installed_ps} — a patchset changes the indexer's output "
+        "for every translation unit, so this partial update cannot pick it up; the graph "
+        "still needs a full re-index (run `cppgraph update` and consent to it, or "
+        "`cppgraph init --from-scratch`)."
+    )
+    return True
 
 
 def incremental_update(
@@ -524,6 +567,12 @@ def incremental_update(
         partial.ParseFromString(f.read())
     new_commit, new_dirty = git_head(project_root)
     _present, variant = scip_clang_info()
+    # Deliberately NO scip_patchset here: a partial covers only the changed TUs,
+    # so stamping the installed binary's patchset would claim the whole graph is
+    # its output — upgrading an older-patchset graph (permanently masking the
+    # gap and every future advice) and fabricating one on a legacy graph. The
+    # store merge preserves the recorded value; only a FULL re-index writes it
+    # (see build_store / full_build).
     upd_meta = build_provenance(
         partial,
         source_commit=new_commit,
@@ -587,6 +636,10 @@ def rescope_update(
     old_filter = meta.get("index_filter", "")
     old_tests = meta.get("index_tests", "?")
     old_excludes_tests = old_tests == "excluded"
+    # A patchset gap makes this partial a drop in an every-TU stale: warn, then
+    # do exactly the requested partial work (never a full re-index from here —
+    # the consented one lives in `cppgraph update`).
+    warn_patchset_gap(meta, print_fn=print_fn)
 
     # Widening only, in the substring-containment model `filter_compdb` uses: a
     # file is in scope iff the filter is a substring of its path, so every path
@@ -677,6 +730,9 @@ def rescope_update(
         partial.ParseFromString(f.read())
     new_commit, new_dirty = git_head(project_root)
     _present, variant = scip_clang_info()
+    # No scip_patchset — same preservation rule as incremental_update above: a
+    # rescope indexes only the newly in-scope TUs, and must never claim the
+    # installed binary's patchset for the whole graph.
     upd_meta = build_provenance(
         partial,
         source_commit=new_commit,

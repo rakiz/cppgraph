@@ -17,6 +17,7 @@ from pathlib import Path
 import pytest
 
 from cppgraph import mcp_server
+from cppgraph import updates as mcp_server_updates
 from cppgraph.model import Graph, Node
 from cppgraph.proto import scip_pb2
 from cppgraph.store import SCHEMA_VERSION, GraphStore, write_sqlite
@@ -1907,6 +1908,51 @@ def test_status_reports_commit_without_root(tmp_path: Path) -> None:
         result = mcp_server.status_report(st)
     assert result["source_commit"] == "abc123"
     assert result["drift"]["checked"] is False
+
+
+def test_status_reports_patchset_reindex_advice(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A graph indexed with an older scip-clang patchset than the installed
+    binary carries reindex advice in `scip_clang` (`reindex_recommended` +
+    `reindex_message` naming both patchsets and the FULL re-index fix) — a
+    patchset changes the indexer's output for every TU, so an incremental
+    update can't pick it up. The recorded patchset is also surfaced in
+    `graph_meta`."""
+    monkeypatch.delenv("CPPGRAPH_NO_UPDATE_CHECK", raising=False)
+    monkeypatch.setattr(
+        mcp_server_updates,
+        "fetch_versions",
+        lambda **_: {
+            "latest": "0.4.0",
+            "releases": [],
+            "scip_clang": {"version": "0.4.0", "rebuild": "reindex", "patchset_version": 7},
+        },
+    )
+    monkeypatch.setattr(
+        mcp_server_updates,
+        "installed_scip_clang",
+        lambda: {"version": "0.4.0", "variant": "patched", "patchset_version": 7},
+    )
+    graph = Graph()
+    graph.add_node(FOO, display_name="makeResumeToken")
+    path = tmp_path / "g.db"
+    write_sqlite(
+        graph,
+        path,
+        meta={
+            "index_tool_version": "0.4.0",
+            "index_tool_variant": "patched",
+            "index_tool_patchset": "6",
+        },
+    )
+    with GraphStore(path) as st:
+        result = mcp_server.status_report(st)
+    assert result["graph_meta"]["index_tool_patchset"] == "6"
+    scip = result["scip_clang"]
+    assert scip["reindex_recommended"] is True
+    assert "graph is stale" in scip["reindex_message"]
+    assert "p6" in scip["reindex_message"] and "p7" in scip["reindex_message"]
     assert result["transport"] == "mcp"
 
 

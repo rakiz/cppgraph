@@ -210,6 +210,85 @@ def _scip_identity(d: dict[str, Any] | None) -> tuple[str, str] | None:
     return (str(d["version"]).lstrip("v"), str(d.get("variant") or "stock"))
 
 
+# The cppgraph release that introduced `index_tool_patchset` recording (stamped
+# on full builds from this version on). A patched-family graph built by an
+# OLDER cppgraph necessarily predates patchset recording — the release-history
+# fact behind `_graph_patchset`'s deduction.
+_PATCHSET_RECORDING_SINCE = parse_version("0.4.4")
+
+
+def _graph_patchset(d: dict[str, Any] | None) -> int | None:
+    """The patchset a graph's scip meta records (`index_tool_patchset`, threaded
+    into the dict as `patchset`), or None when it doesn't record one.
+
+    For the graphs that motivated the patchset feature — built before recording
+    existed — the value is **deduced** from release history, not guessed: a
+    patched-family graph whose `cppgraph_version` is older than
+    `_PATCHSET_RECORDING_SINCE` (0.4.4) cannot have recorded a patchset, and
+    was necessarily built in the pre-recording era, so its effective patchset
+    is 1 and any newer installed patched binary raises the gap. At/after 0.4.4
+    a full build always records one, so a patched graph still missing the field
+    is genuinely unknowable (e.g. `build --scip` without `--scip-patchset`) —
+    None, never a guess. A stock graph has no patch bundle at any age."""
+    if not d:
+        return None
+    raw = d.get("patchset")
+    if not isinstance(raw, bool):
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            pass
+    if str(d.get("variant") or "stock") not in PATCHED_VARIANTS:
+        return None
+    ver = d.get("cppgraph_version")
+    if not ver:
+        return None
+    if parse_version(str(ver)) >= _PATCHSET_RECORDING_SINCE:
+        return None
+    return 1
+
+
+def _installed_patchset(d: dict[str, Any] | None) -> int | None:
+    """The installed binary's patchset from its provenance sidecar. A
+    patched-family sidecar predating the `patchset_version` field counts as 1
+    (the initial bundle) — the same default `compute_scip_advice` applies when
+    comparing the binary to the pin. Anything without a patched-family identity
+    (stock binary, missing sidecar) has no patchset to compare -> None."""
+    ident = _scip_identity(d)
+    if ident is None or ident[1] not in PATCHED_VARIANTS:
+        return None
+    try:
+        return int((d or {}).get("patchset_version", 1))
+    except (TypeError, ValueError):
+        return 1
+
+
+def patchset_gap(
+    graph_scip: dict[str, Any] | None, installed: dict[str, Any] | None
+) -> tuple[int, int] | None:
+    """`(graph_patchset, installed_patchset)` when the installed patched-family
+    binary's patchset is NEWER than the one the graph was indexed with, else None.
+
+    A patchset bump changes scip-clang's output for every translation unit, so
+    such a graph is stale for the installed binary in a way an incremental
+    update can never fix — only a full re-index picks it up. Both sides must be
+    patched-family (a stock binary has no patch bundle). The graph's patchset
+    comes from its recorded `index_tool_patchset` or — for the pre-recording
+    graphs the feature exists for — the release-history deduction in
+    `_graph_patchset` (see there); a patched graph built at/after the recording
+    release with no recorded value is genuinely unknowable and yields no gap.
+    Pure and unit-tested; shared by the `status` reindex advice, `cppgraph
+    update`'s consent gate and the partial paths' warning."""
+    ident = _scip_identity(graph_scip)
+    if ident is None or ident[1] not in PATCHED_VARIANTS:
+        return None
+    graph_ps = _graph_patchset(graph_scip)
+    installed_ps = _installed_patchset(installed)
+    if graph_ps is None or installed_ps is None or installed_ps <= graph_ps:
+        return None
+    return (graph_ps, installed_ps)
+
+
 def compute_scip_advice(
     pin: dict[str, Any] | None,
     installed: dict[str, Any] | None,
@@ -252,33 +331,53 @@ def compute_scip_advice(
         advice["binary_status"] = "ok"
     if have is not None:
         advice["installed_variant"] = have[1]  # informational
+        # The installed binary's patchset (patched-family only; a sidecar
+        # predating the field counts as 1). Informational like the variant —
+        # and the basis for the patchset advisory below.
+        have_ps = _installed_patchset(installed)
+        if have_ps is not None:
+            advice["installed_patchset"] = have_ps
         # Patchset staleness, for any patched-family binary (current "patched" or a
         # pre-rename "enclosing_range-504"/"504" sidecar — see PATCHED_VARIANTS): a
         # sidecar predating the field (or missing it) counts as patchset 1 — the
         # initial bundle. Advisory like the version advice, never a hard verdict.
         pin_ps = pin.get("patchset_version")
-        if have[0] == want_ver and have[1] in PATCHED_VARIANTS and isinstance(pin_ps, int):
-            try:
-                have_ps = int((installed or {}).get("patchset_version", 1))
-            except (TypeError, ValueError):
-                have_ps = 1
+        if have[0] == want_ver and have_ps is not None and isinstance(pin_ps, int):
             if have_ps < pin_ps:
                 advice["patchset_status"] = "stale"
                 advice["patchset_message"] = (
                     f"the installed patched binary is patchset p{have_ps} but the "
-                    f"pinned patchset is p{pin_ps} — re-run scripts/setup.sh "
-                    "(download-patched), or rebuild it locally, to pick up the "
-                    "newer patches."
+                    f"pinned patchset is p{pin_ps}: re-download or rebuild the binary "
+                    "(re-run scripts/setup.sh with download-patched, or build it "
+                    "locally), THEN re-index your graphs (`cppgraph update`) — the "
+                    "new patchset changes every TU's output, so existing graphs "
+                    "stay stale until re-indexed."
                 )
 
     g = _scip_identity(graph_scip)
     if g is not None:
         advice["graph_variant"] = g[1]  # informational
+        graph_ps = _graph_patchset(graph_scip)
+        if graph_ps is not None:
+            advice["graph_patchset"] = graph_ps  # informational (like graph_variant)
         if g[0] != want_ver and _rebuild_level(pin) != "none":
             advice["reindex_recommended"] = True
             advice["reindex_message"] = (
                 f"this graph was indexed with scip-clang {g[0]}, but the pinned version "
                 f"is {want_ver} — re-index (scripts/index.sh) to match."
+            )
+        elif (gap := patchset_gap(graph_scip, installed)) is not None:
+            # The graph matches the pin on version, but the INSTALLED binary
+            # carries a newer patch bundle than the graph was indexed with. A
+            # patchset changes scip-clang's output for every TU, so this is a
+            # full-re-index stale, not an incremental-update one.
+            graph_ps_g, installed_ps_g = gap
+            advice["reindex_recommended"] = True
+            advice["reindex_message"] = (
+                f"this graph is stale: it was indexed with scip-clang patchset "
+                f"p{graph_ps_g} but the installed binary is p{installed_ps_g} — the "
+                "patchset changes the indexer's output for every TU, so this graph "
+                "needs a FULL re-index (an incremental update can't pick it up)."
             )
     return advice
 
