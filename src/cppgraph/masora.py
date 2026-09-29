@@ -4,10 +4,12 @@
 Masora is a git-backed knowledge base of claims anchored to code symbols.
 When a query response is centered on symbol S and the feature is enabled,
 cppgraph spawns `masora facts --repo <checkout-root> --symbol <S>` (one
-subprocess per response, 2 s wall-clock budget), parses the JSON document on
-stdout, and appends at most 2 terse fact lines to the response — on both the
-CLI (printed text lines) and the MCP server (the `masora` string field,
-rendered lines joined with newlines; absent when nothing injects).
+subprocess per response, 2 s wall-clock budget; the child's stdin is
+DETACHED — when cppgraph runs as the MCP stdio server, fd 0 is the JSON-RPC
+stream — and its stdout is capped, overflow skipping the response), parses
+the JSON document, and appends at most 2 terse fact lines to the response —
+on both the CLI (printed text lines) and the MCP server (the `masora` string
+field, rendered lines joined with newlines; absent when nothing injects).
 
 Feature flag `CPPGRAPH_MASORA` (checked before any spawn):
 - unset → OFF (the default until the integration is validated);
@@ -22,6 +24,10 @@ Rendering decisions (§6 latitude, pinned here):
   `unverified` renders as nothing, absence of a verify is not evidence —
   then each flag verbatim; `stale` carries a trailing `— re-check`,
   `restored` a trailing `— re-verify`.
+- an unknown `resolution` VALUE renders verbatim: statuses are evidence
+  labels (§6), and a future contract value arriving without a `contract_version`
+  bump is Masora's shape drift to report, not to guess at — fail-closed
+  rejection is reserved for shape violations, not new labels.
 - `resolution: "none"` (every version refuted) is negative knowledge:
   `masora NOT: <summary> [refuted]` — a label, never advice; no fact line is
   ever turned into an instruction.
@@ -29,11 +35,12 @@ Rendering decisions (§6 latitude, pinned here):
   `masora: [stale index — facts may be outdated]` before the fact lines —
   but only when at least one fact renders: zero matching facts injects
   nothing, stale index or not.
-- token budget: ≤ 60 tokens total, estimated at ≈ 4 chars/token (a prose
-  heuristic, no tokenizer dependency); when a line does not fit and at least
-  one fact line is already rendered, it is dropped and the cap is reported
-  visibly (`… +N more — masora search`) — the visible cap wins over the
-  suggested budget, never a silent drop. At least one fact always renders.
+- token budget: ≤ 60 tokens total, estimated at ≈ 4 chars/token with CJK
+  (wide/fullwidth) chars counted ≈ 1 token each — a prose heuristic, no
+  tokenizer dependency; when a line does not fit and at least one fact line
+  is already rendered, it is dropped and the cap is reported visibly
+  (`… +N more — masora search`) — the visible cap wins over the suggested
+  budget, never a silent drop. At least one fact always renders.
 - duplicate `lineage` ids are deduped (first occurrence wins).
 
 Zero-change guarantee (§7): any failure mode — missing binary, non-zero
@@ -41,7 +48,9 @@ exit, timeout, unparsable output, unknown `contract_version`, any exception —
 degrades to "no injection" (`query_lines` returns `[]`), never an error
 surfaced to the user. cppgraph is a read-only consumer: it only ever spawns
 the command with `--repo` pointing at the checkout the graph was built from
-(the store's recorded `project_root`, falling back to the cwd), never reads
+(the store's recorded `project_root`; a legacy graph with no recorded root
+falls back to the cwd; a recorded root missing on disk skips injection
+entirely rather than risk facts for the wrong checkout), never reads
 Masora's config or SQLite, and never writes anywhere Masora owns.
 """
 
@@ -51,7 +60,10 @@ import json
 import math
 import os
 import shutil
+import signal
 import subprocess
+import threading
+import unicodedata
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -63,6 +75,8 @@ CONTRACT_VERSION = 1
 FACTS_TIMEOUT_S = 2.0
 MAX_FACTS = 2
 TOKEN_BUDGET = 60
+MAX_SUMMARY_CHARS = 120
+MAX_OUTPUT_BYTES = 1_048_576  # 1 MiB — far above any legitimate contract document
 STALE_WARNING_LINE = "masora: [stale index — facts may be outdated]"
 _TRUNCATION_LINE = "… +{n} more — masora search"
 
@@ -99,38 +113,109 @@ def enabled(env: Mapping[str, str] | None = None) -> bool:
     return raw.strip().lower() in ("1", "true")
 
 
-def repo_root(meta: Mapping[str, str]) -> str:
-    """The checkout root handed to `masora --repo`: the graph's recorded
-    `project_root` when it exists on disk, else the cwd — never anywhere the
-    graph was not built from."""
+def repo_root(meta: Mapping[str, str]) -> str | None:
+    """The checkout root handed to `masora --repo`, or None to skip injection:
+    the graph's recorded `project_root` when it exists on disk; None when a
+    root IS recorded but missing (moved/deleted checkout — facts for a
+    different repo would violate §4, so no cwd guess); the cwd only for a
+    legacy graph recording no root at all."""
     recorded = meta.get("project_root") if meta else None
-    if recorded:
-        path = project_root_path(recorded)
-        if path is not None and path.is_dir():
-            return str(path)
-    return str(Path.cwd())
+    if not recorded:
+        return str(Path.cwd())
+    path = project_root_path(recorded)
+    if path is not None and path.is_dir():
+        return str(path)
+    return None
+
+
+def _kill_tree(proc: subprocess.Popen) -> None:
+    """Kill the child's whole process group (the child runs in its own session
+    via `start_new_session`): a shell wrapper's grandchildren inherit the
+    stdout write end and would hold the pipe open past a lone `proc.kill()`,
+    stalling the drain for as long as they live. Fallback (no POSIX process
+    groups): kill the direct child only."""
+    if hasattr(os, "killpg"):
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+            return
+        except OSError:
+            pass
+    try:
+        proc.kill()
+    except OSError:
+        pass
 
 
 def run_masora_facts(repo_root: str, symbol: str | None, timeout: float) -> str | None:
     """Spawn `masora facts --repo <root> [--symbol <scip>]`; return stdout, or
     None on any failure (spawn error, non-zero exit — including the
-    binary-missing 127 — or timeout: the process is killed and nothing renders)."""
+    binary-missing 127 — timeout: the process TREE is killed and nothing
+    renders; or an stdout stream beyond MAX_OUTPUT_BYTES, which is treated as
+    unparsable rather than buffered unboundedly). The child's stdin is
+    DEVNULL: cppgraph's own fd 0 may be the MCP stdio transport, and a masora
+    reading it would eat protocol frames.
+
+    Worst case ~2× the timeout budget on the orphaned-grandchild edge (the
+    child exits fast but a grandchild holds the stdout write end, so the
+    post-kill `reader.join` re-blocks up to the full timeout): still silent,
+    still bounded, still no injection."""
     cmd = ["masora", "facts", "--repo", repo_root]
     if symbol is not None:
         cmd += ["--symbol", symbol]
     try:
-        proc = subprocess.run(
+        proc = subprocess.Popen(
             cmd,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            check=False,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            start_new_session=hasattr(os, "setsid"),
         )
-    except (OSError, subprocess.TimeoutExpired, ValueError):
+    except (OSError, ValueError):
         return None
-    if proc.returncode != 0:
+    stream = proc.stdout
+    if stream is None:
+        _kill_tree(proc)
+        proc.wait()
         return None
-    return proc.stdout
+    chunks: list[bytes] = []
+    state = {"total": 0, "overflow": False}
+
+    def _drain() -> None:
+        try:
+            while True:
+                chunk = stream.read(65536)
+                if not chunk:
+                    return
+                chunks.append(chunk)
+                state["total"] += len(chunk)
+                if state["total"] > MAX_OUTPUT_BYTES:
+                    state["overflow"] = True
+                    _kill_tree(proc)
+                    proc.wait()
+                    return
+        except (OSError, ValueError):
+            pass
+
+    reader = threading.Thread(target=_drain, daemon=True)
+    reader.start()
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _kill_tree(proc)
+        proc.wait()
+    reader.join(timeout=timeout)
+    if reader.is_alive() or state["overflow"] or proc.returncode != 0:
+        # Never block on (or close) a stream a still-draining thread holds —
+        # the daemon thread exits at EOF and the fd goes with it.
+        return None
+    try:
+        stream.close()
+    except OSError:
+        pass
+    try:
+        return b"".join(chunks).decode("utf-8")
+    except UnicodeDecodeError:
+        return None
 
 
 def parse_contract(stdout: str) -> Contract | None:
@@ -165,6 +250,11 @@ def parse_contract(stdout: str) -> Contract | None:
         summary = raw.get("summary")
         resolution = raw.get("resolution")
         if not isinstance(summary, str) or not isinstance(resolution, str):
+            return None
+        if len(summary) > MAX_SUMMARY_CHARS or not summary.isprintable():
+            # §3: "one line, ≤ 120 chars". A newline/control char could
+            # smuggle a rendered second line (an instruction — §6 forbids);
+            # an overlong summary is a shape violation. Fail closed either way.
             return None
         lineage = raw.get("lineage")
         if lineage is None:
@@ -201,14 +291,22 @@ def parse_contract(stdout: str) -> Contract | None:
             )
         )
     stale = doc.get("stale_warning")
+    if stale is not None and not isinstance(stale, bool):
+        # Same fail-closed posture as the per-fact fields: present-but-wrong
+        # type rejects the document; absent (or null — §3 "not comparable")
+        # defaults to None.
+        return None
     stale_warning = stale if isinstance(stale, bool) else None
     return Contract(facts=tuple(facts), stale_warning=stale_warning)
 
 
 def est_tokens(text: str) -> int:
-    """The token estimate behind the §6 budget: ≈ 4 chars per token, the usual
-    prose heuristic — deliberately dependency-free."""
-    return max(1, math.ceil(len(text) / 4))
+    """The token estimate behind the §6 budget: ≈ 4 chars per token for
+    regular text, CJK (wide/fullwidth) chars counted ≈ 1 token each (they
+    tokenize far denser than the 4-chars rule assumes) — a prose heuristic,
+    deliberately dependency-free."""
+    cjk = sum(1 for ch in text if unicodedata.east_asian_width(ch) in ("W", "F"))
+    return max(1, cjk + math.ceil((len(text) - cjk) / 4))
 
 
 def _fact_line(fact: Fact) -> str:
@@ -271,8 +369,10 @@ def query_lines(
         return []
     if which("masora") is None:
         return []
-    root = repo_root(meta)
     try:
+        root = repo_root(meta)
+        if root is None:
+            return []
         stdout = runner(root, symbol, timeout)
         if stdout is None:
             return []

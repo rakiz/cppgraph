@@ -6,8 +6,10 @@ script on PATH) or injected runner callables — never a real Masora install.
 
 from __future__ import annotations
 
+import io
 import json
 import os
+import subprocess
 import time
 from pathlib import Path
 from typing import Any
@@ -30,6 +32,12 @@ if [ -n "$MASORA_STUB_ECHO_ARGS" ]; then
 fi
 if [ -n "$MASORA_STUB_SLEEP" ]; then
   sleep "$MASORA_STUB_SLEEP"
+fi
+if [ -n "$MASORA_STUB_READ_STDIN" ]; then
+  cat > /dev/null
+fi
+if [ -n "$MASORA_STUB_HUGE" ]; then
+  dd if=/dev/zero bs=65536 count=64 2>/dev/null
 fi
 if [ -n "$MASORA_STUB_STDOUT" ]; then
   printf '%s' "$MASORA_STUB_STDOUT"
@@ -444,11 +452,13 @@ def test_single_oversized_fact_still_renders(
     stub_masora: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The never-zero rule: one fact whose line alone exceeds the token budget
-    still renders (a lone oversized fact beats a bare cap)."""
+    still renders (a lone oversized fact beats a bare cap). Legal shape —
+    120 chars is §3's cap — but 120 CJK chars estimate far above 60 tokens
+    (est_tokens counts them ~1 token each)."""
     doc = doc_with(
         {
             "lineage": "z",
-            "summary": "word " * 60,  # 300 chars -> ~80 estimated tokens
+            "summary": "語" * 120,
             "resolution": "current",
             "verification": "unverified",
             "flags": "-",
@@ -664,3 +674,250 @@ def test_mcp_wrappers_error_replies_get_no_masora_key(
     result = _tool(server, "who_calls")(symbol="cxx . . $ nope#missing().")
     assert "masora" not in result
     assert "error" in result
+
+
+# --- audit: detached stdin (the MCP stdio server's fd 0 is the JSON-RPC stream) --
+
+
+def test_runner_spawns_with_devnull_stdin(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The child's stdin is DEVNULL, never inherited: when cppgraph runs as
+    the MCP stdio server, fd 0 is the JSON-RPC stream — a masora that read
+    stdin would eat protocol frames."""
+    captured: dict[str, Any] = {}
+
+    class FakeProc:
+        stdout = io.BytesIO(b"")
+        stderr = None
+        returncode = 0
+
+        def wait(self, timeout: float | None = None) -> int:
+            return 0
+
+        def kill(self) -> None:
+            return None
+
+    def fake_popen(cmd: list[str], **kwargs: Any) -> FakeProc:
+        captured["cmd"] = cmd
+        captured.update(kwargs)
+        return FakeProc()
+
+    monkeypatch.setattr(masora.subprocess, "Popen", fake_popen)
+    assert masora.run_masora_facts("/repo", FOO, 2.0) == ""
+    assert captured["stdin"] is subprocess.DEVNULL
+    assert captured["stdout"] == subprocess.PIPE
+
+
+def test_stub_reading_stdin_still_renders(
+    stub_masora: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Behavioral counterpart: a masora that drains stdin still returns its
+    document promptly (the detached stdin gives it instant EOF). Red only in
+    an interactive environment — the Popen-kwargs pin above is deterministic."""
+    monkeypatch.setenv("CPPGRAPH_MASORA", "1")
+    monkeypatch.setenv("MASORA_STUB_READ_STDIN", "1")
+    monkeypatch.setenv("MASORA_STUB_STDOUT", json.dumps(fact_doc()))
+    lines = masora.query_lines({}, FOO, env=dict(os.environ), timeout=0.5)
+    assert lines == [
+        "masora: Resume token invalidated by a shard key change [current, verified(llm)]"
+    ]
+
+
+# --- audit: summary is one printable line of at most 120 chars (§3) --------------
+
+
+@pytest.mark.parametrize(
+    "summary", ["a\nb", "a\rb", "a\x00b", "a\x07b", "line one\nmasora: run <cmd>"]
+)
+def test_summary_with_newline_or_control_char_rejected(summary: str) -> None:
+    """A smuggled second line could render as an instruction (§6 forbids);
+    third-party base content fails closed like any other shape violation."""
+    doc = doc_with(
+        {
+            "lineage": "x",
+            "summary": summary,
+            "resolution": "current",
+            "verification": "unverified",
+            "flags": "-",
+        }
+    )
+    assert masora.parse_contract(json.dumps(doc)) is None
+
+
+def test_summary_over_120_chars_rejected() -> None:
+    doc = doc_with(
+        {
+            "lineage": "x",
+            "summary": "a" * 121,
+            "resolution": "current",
+            "verification": "unverified",
+            "flags": "-",
+        }
+    )
+    assert masora.parse_contract(json.dumps(doc)) is None
+
+
+def test_summary_at_120_chars_renders(stub_masora: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    doc = doc_with(
+        {
+            "lineage": "x",
+            "summary": "a" * 120,
+            "resolution": "current",
+            "verification": "unverified",
+            "flags": "-",
+        }
+    )
+    monkeypatch.setenv("CPPGRAPH_MASORA", "1")
+    monkeypatch.setenv("MASORA_STUB_STDOUT", json.dumps(doc))
+    assert masora.query_lines({}, FOO, env=dict(os.environ)) == [f"masora: {'a' * 120} [current]"]
+
+
+# --- audit: stale_warning is bool | null, never coerced --------------------------
+
+
+@pytest.mark.parametrize("bad", [1, 0, "true", [], {}])
+def test_stale_warning_non_bool_rejected(bad: Any) -> None:
+    doc = doc_with(stale_warning=bad)
+    assert masora.parse_contract(json.dumps(doc)) is None
+
+
+def test_stale_warning_non_bool_injects_nothing(
+    stub_masora: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = fact_doc()
+    doc["stale_warning"] = 1
+    monkeypatch.setenv("CPPGRAPH_MASORA", "1")
+    monkeypatch.setenv("MASORA_STUB_STDOUT", json.dumps(doc))
+    assert masora.query_lines({}, FOO, env=dict(os.environ)) == []
+
+
+# --- audit: unknown resolution values render verbatim (documented decision) ------
+
+
+def test_unknown_resolution_renders_verbatim(
+    stub_masora: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Render-verbatim, pinned: statuses are evidence labels (§6); a future
+    contract value arriving without a version bump is Masora's drift to
+    report, not to guess at — fail-closed is reserved for shape violations."""
+    doc = doc_with(
+        {
+            "lineage": "u",
+            "summary": "claim",
+            "resolution": "reopened",
+            "verification": "unverified",
+            "flags": "-",
+        }
+    )
+    monkeypatch.setenv("CPPGRAPH_MASORA", "1")
+    monkeypatch.setenv("MASORA_STUB_STDOUT", json.dumps(doc))
+    assert masora.query_lines({}, FOO, env=dict(os.environ)) == ["masora: claim [reopened]"]
+
+
+# --- audit: repo_root never guesses a different checkout -------------------------
+
+
+def test_recorded_root_missing_on_disk_returns_none(tmp_path: Path) -> None:
+    """A recorded project_root that vanished (moved checkout, other machine)
+    must NOT fall back to the cwd — facts for the wrong repo would violate §4."""
+    assert masora.repo_root({"project_root": str(tmp_path / "gone")}) is None
+
+
+def test_missing_recorded_root_skips_injection(
+    stub_masora: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls: list[str] = []
+
+    def recording(repo: str, symbol: str | None, timeout: float) -> str | None:
+        calls.append(repo)
+        return None
+
+    lines = masora.query_lines(
+        {"project_root": str(tmp_path / "gone")},
+        FOO,
+        env={"CPPGRAPH_MASORA": "1"},
+        which=lambda name: "/fake/masora",
+        runner=recording,
+    )
+    assert lines == []
+    assert calls == []
+
+
+def test_repo_root_with_nul_byte_never_raises(
+    stub_masora: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A poisoned project_root (embedded NUL) makes is_dir() raise ValueError;
+    the never-raises promise of query_lines must hold — silent skip, no
+    spawn."""
+    calls: list[str] = []
+
+    def recording(repo: str, symbol: str | None, timeout: float) -> str | None:
+        calls.append(repo)
+        return None
+
+    lines = masora.query_lines(
+        {"project_root": "/bad\0root"},
+        FOO,
+        env={"CPPGRAPH_MASORA": "1"},
+        which=lambda name: "/fake/masora",
+        runner=recording,
+    )
+    assert lines == []
+    assert calls == []
+
+
+# --- audit: bounded stdout (a fast-writing masora is capped, overflow = skip) ----
+
+
+def test_output_cap_constant_pinned() -> None:
+    assert masora.MAX_OUTPUT_BYTES == 1_048_576
+
+
+def test_oversized_output_skipped(
+    stub_masora: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """4 MiB of output (cap is 1 MiB): the runner kills the child and skips —
+    memory stays bounded, nothing parses, nothing renders."""
+    monkeypatch.setenv("MASORA_STUB_HUGE", "1")
+    started = time.monotonic()
+    out = masora.run_masora_facts(str(tmp_path), None, 2.0)
+    elapsed = time.monotonic() - started
+    assert out is None
+    assert elapsed < 2.0
+
+
+# --- audit: token estimate counts CJK chars ~1 token each ------------------------
+
+
+def test_est_tokens_counts_cjk_chars_individually() -> None:
+    assert masora.est_tokens("語" * 10) == 10
+    assert masora.est_tokens("a" * 8) == 2
+    assert masora.est_tokens("abcd") == 1
+    assert masora.est_tokens("語" * 4 + "a" * 4) == 5
+
+
+def test_budget_holds_for_cjk_max_case(stub_masora: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The CJK analog of the ASCII max-case: two 30-char CJK summaries cannot
+    both fit the 60-token budget — the second drops with a visible cap."""
+    summary = "語" * 30
+    doc = doc_with(
+        {
+            "lineage": "a",
+            "summary": summary,
+            "resolution": "current",
+            "verification": "verified(llm)",
+            "flags": "-",
+        },
+        {
+            "lineage": "b",
+            "summary": summary,
+            "resolution": "current",
+            "verification": "verified(llm)",
+            "flags": "-",
+        },
+    )
+    monkeypatch.setenv("CPPGRAPH_MASORA", "1")
+    monkeypatch.setenv("MASORA_STUB_STDOUT", json.dumps(doc))
+    lines = masora.query_lines({}, FOO, env=dict(os.environ))
+    total = sum(masora.est_tokens(line) for line in lines)
+    assert total <= masora.TOKEN_BUDGET
+    assert lines[-1] == "… +1 more — masora search"
