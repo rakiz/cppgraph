@@ -921,3 +921,205 @@ def test_budget_holds_for_cjk_max_case(stub_masora: Path, monkeypatch: pytest.Mo
     total = sum(masora.est_tokens(line) for line in lines)
     assert total <= masora.TOKEN_BUDGET
     assert lines[-1] == "… +1 more — masora search"
+
+
+# --- confidence signal (v1 enrichment: source/name/effort/anchors) ---------------
+
+
+def _confidence_doc(**fact_overrides: Any) -> dict[str, Any]:
+    fact = {
+        "lineage": "a",
+        "summary": "claim",
+        "resolution": "current",
+        "verification": "unverified",
+        "flags": "-",
+    }
+    fact.update(fact_overrides)
+    return doc_with(fact)
+
+
+def _confidence_lines(
+    stub_masora: Path, monkeypatch: pytest.MonkeyPatch, doc: dict[str, Any]
+) -> list[str]:
+    monkeypatch.setenv("CPPGRAPH_MASORA", "1")
+    monkeypatch.setenv("MASORA_STUB_STDOUT", json.dumps(doc))
+    return masora.query_lines({}, FOO, env=dict(os.environ))
+
+
+def test_confidence_verified_human_renders_bare(
+    stub_masora: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The verification label IS the signal: it renders verbatim, BARE — no
+    appended `trusted` synonym (doubling information in editorialized form
+    would violate 'never an instruction, only label + summary + status')."""
+    doc = _confidence_doc(verification="verified(human)")
+    assert _confidence_lines(stub_masora, monkeypatch, doc) == [
+        "masora: claim [current, verified(human)]"
+    ]
+
+
+def test_confidence_verified_llm_renders_bare(
+    stub_masora: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _confidence_doc(verification="verified(llm)")
+    assert _confidence_lines(stub_masora, monkeypatch, doc) == [
+        "masora: claim [current, verified(llm)]"
+    ]
+
+
+def test_confidence_re_verify_for_effort_low_alone(
+    stub_masora: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The ONLY interpretation token: effort low appends re-verify — here
+    with an unverified version (which itself renders as nothing)."""
+    doc = _confidence_doc(effort="low")
+    assert _confidence_lines(stub_masora, monkeypatch, doc) == [
+        "masora: claim [current, re-verify]"
+    ]
+
+
+def test_confidence_verified_graph_label_renders_bare(
+    stub_masora: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`verified(graph)` is mechanical proof: its label renders — never
+    conflated with unverified, never given an interpretation token."""
+    doc = _confidence_doc(verification="verified(graph)")
+    assert _confidence_lines(stub_masora, monkeypatch, doc) == [
+        "masora: claim [current, verified(graph)]"
+    ]
+
+
+@pytest.mark.parametrize("effort", ["medium", "high"])
+def test_confidence_nothing_for_effort_medium_or_high(
+    stub_masora: Path, monkeypatch: pytest.MonkeyPatch, effort: str
+) -> None:
+    """Silence, not stripping: a high effort is not a distrust signal — the
+    absence of alarm."""
+    doc = _confidence_doc(effort=effort)
+    assert _confidence_lines(stub_masora, monkeypatch, doc) == ["masora: claim [current]"]
+
+
+def test_confidence_human_verified_plus_effort_low_is_literal(
+    stub_masora: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The literal ruling: effort low appends re-verify even when a human
+    verify is present (a llm-written low-effort version later human-verified)
+    — reads odd, flagged as friction; masora should rule whether a human
+    verify clears the writer's effort token."""
+    doc = _confidence_doc(verification="verified(human)", effort="low")
+    assert _confidence_lines(stub_masora, monkeypatch, doc) == [
+        "masora: claim [current, verified(human), re-verify]"
+    ]
+
+
+def test_not_line_carries_no_confidence(stub_masora: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A refutation is never softened: the NOT line gains no confidence token
+    whatever the verification/effort say."""
+    doc = _confidence_doc(resolution="none", verification="verified(human)", effort="low")
+    assert _confidence_lines(stub_masora, monkeypatch, doc) == ["masora NOT: claim [refuted]"]
+
+
+def test_old_style_document_renders_as_before_enrichment(
+    stub_masora: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pre-enrichment document (no source/name/effort/anchors) renders
+    exactly as it did: no confidence label without a verification/effort
+    that triggers one."""
+    doc = _confidence_doc()  # unverified, no effort
+    assert _confidence_lines(stub_masora, monkeypatch, doc) == ["masora: claim [current]"]
+
+
+def test_unknown_source_and_effort_enums_tolerated_and_inert(
+    stub_masora: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A new enum value is Masora's drift to report, not a shape violation —
+    same posture as unknown `resolution` values; it drives no label."""
+    doc = _confidence_doc(source="robot", effort="extreme")
+    lines = _confidence_lines(stub_masora, monkeypatch, doc)
+    assert lines == ["masora: claim [current]"]
+    assert masora.parse_contract(json.dumps(doc)) is not None
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"source": None},
+        {"name": None},
+        {"effort": None},
+        {"anchors": None},
+        {"anchors": []},
+        {"anchors": ["scip-clang cxx . . mongo/Util#tick()."]},
+        {"name": "claude-opus"},
+    ],
+)
+def test_new_fields_null_or_valid_tolerated(fields: dict[str, Any]) -> None:
+    doc = _confidence_doc(**fields)
+    assert masora.parse_contract(json.dumps(doc)) is not None
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"source": 1},
+        {"source": []},
+        {"name": 5},
+        {"name": {}},
+        {"effort": 1.5},
+        {"effort": []},
+        {"anchors": "scip-clang cxx"},
+        {"anchors": [1]},
+        {"anchors": {"a": "b"}},
+    ],
+)
+def test_new_fields_wrong_type_reject_whole_document(fields: dict[str, Any]) -> None:
+    doc = _confidence_doc(**fields)
+    assert masora.parse_contract(json.dumps(doc)) is None
+
+
+def test_enriched_document_end_to_end(stub_masora: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The full v1 enriched shape through query_lines: verified(llm) renders
+    bare (high effort is silence), inert fields riding along."""
+    doc = _confidence_doc(
+        verification="verified(llm)",
+        source="llm",
+        name="claude-opus",
+        effort="high",
+        anchors=["scip-clang cxx . . mongo/ResumeTokenData#makeResumeToken()."],
+        anchors_matched=["scip-clang cxx . . mongo/ResumeTokenData#makeResumeToken()."],
+    )
+    assert _confidence_lines(stub_masora, monkeypatch, doc) == [
+        "masora: claim [current, verified(llm)]"
+    ]
+
+
+def test_confidence_label_counts_toward_the_token_budget() -> None:
+    """The one interpretation token is rendered text like any other: a
+    max-case fact line grows by `re-verify`'s cost, and the budget math sees
+    it."""
+    summary = "word " * 24  # 120 chars — the §3 cap
+    contract = masora.Contract(
+        facts=(
+            masora.Fact(
+                lineage="a",
+                summary=summary,
+                resolution="current",
+                verification="unverified",
+                flags=(),
+                effort="low",
+            ),
+            masora.Fact(
+                lineage="b",
+                summary=summary,
+                resolution="current",
+                verification="unverified",
+                flags=(),
+                effort="low",
+            ),
+        ),
+        stale_warning=False,
+    )
+    lines = masora.render_lines(contract)
+    total = sum(masora.est_tokens(line) for line in lines)
+    assert total <= masora.TOKEN_BUDGET
+    assert lines[-1] == "… +1 more — masora search"
+    assert ", re-verify]" in lines[0]

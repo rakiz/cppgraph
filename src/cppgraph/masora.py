@@ -20,7 +20,7 @@ instant silent skip (no subprocess, no latency, no error).
 
 Rendering decisions (§6 latitude, pinned here):
 - statuses surface as labels: resolution first (`current` / `stale` /
-  `restored` / `unknown` verbatim), then `verified(<actor>)` when present —
+  `restored` / `unknown` verbatim), then `verified(<source>)` when present —
   `unverified` renders as nothing, absence of a verify is not evidence —
   then each flag verbatim; `stale` carries a trailing `— re-check`,
   `restored` a trailing `— re-verify`.
@@ -28,6 +28,16 @@ Rendering decisions (§6 latitude, pinned here):
   labels (§6), and a future contract value arriving without a `contract_version`
   bump is Masora's shape drift to report, not to guess at — fail-closed
   rejection is reserved for shape violations, not new labels.
+- confidence (the refined §6 ruling): the verification label IS the signal
+  and renders BARE — `verified(human)` / `verified(llm)` / `verified(graph)`
+  verbatim, never an appended token (rendering trust or translation is the
+  receiving LLM's job; doubling information in editorialized form would
+  violate "never an instruction, only label + summary + status"), and
+  "nothing" never strips a label. `unverified` renders as nothing. The ONLY
+  interpretation token: `effort: "low"` → `re-verify`; medium/high/null are
+  silence — a high effort is not a distrust signal, just the absence of
+  alarm. The `masora NOT:` line carries no confidence token ever — a
+  refutation is not softened by the writer's effort.
 - `resolution: "none"` (every version refuted) is negative knowledge:
   `masora NOT: <summary> [refuted]` — a label, never advice; no fact line is
   ever turned into an instruction.
@@ -42,6 +52,26 @@ Rendering decisions (§6 latitude, pinned here):
   (`… +N more — masora search`) — the visible cap wins over the suggested
   budget, never a silent drop. At least one fact always renders.
 - duplicate `lineage` ids are deduped (first occurrence wins).
+
+Contract enrichment (still `contract_version: 1`): each fact may carry
+`source` (`human|llm|graph` or null), `name` (str or null), `effort`
+(`low|medium|high` or null) and `anchors` (list of str). All four are
+ADDITIVE-OPTIONAL — absent or null defaults, so pre-enrichment documents
+render exactly as before; a wrong TYPE rejects the whole document (the
+fail-closed posture of every other field); unknown enum values (`source`,
+`effort`) are tolerated and inert, same posture as an unknown `resolution`
+value. `name`, `anchors` (and `anchors_matched`) are validated and never
+consumed for rendering.
+
+Contract friction to relay: that enrichment landed IN PLACE under
+`contract_version: 1`, although the stated rule is "shape bumps via
+contract_version, never in place". cppgraph tolerates it precisely because
+the new fields are additive-optional — but the in-place-evolution precedent
+erodes the guard the version bump exists to provide. Also relayed: the
+literal confidence ruling makes `effort: "low"` append `re-verify` even on a
+`verified(human)` fact (a llm-written low-effort version later human-verified
+→ `[current, verified(human), re-verify]`) — masora should rule whether a
+human verify clears the writer's effort token.
 
 Zero-change guarantee (§7): any failure mode — missing binary, non-zero
 exit, timeout, unparsable output, unknown `contract_version`, any exception —
@@ -86,13 +116,20 @@ Which = Callable[[str], str | None]
 
 @dataclass(frozen=True)
 class Fact:
-    """One §3 fact, fields the renderer needs; unknown shapes never get here."""
+    """One §3 fact, fields the renderer needs; unknown shapes never get here.
+
+    Of the v1 enrichment fields only `effort` is stored (it feeds the
+    confidence matrix); `source`, `name`, and `anchors` — like
+    `anchors_matched` — are type-validated in `parse_contract` and never
+    consumed for rendering.
+    """
 
     lineage: str
     summary: str
     resolution: str
     verification: str
     flags: tuple[str, ...]
+    effort: str | None = None
 
 
 @dataclass(frozen=True)
@@ -276,10 +313,30 @@ def parse_contract(stdout: str) -> Contract | None:
             verification = ""
         if not isinstance(verification, str):
             return None
-        anchors = raw.get("anchors_matched")
+        # v1 enrichment (additive-optional): absent or null defaults, a wrong
+        # TYPE rejects the whole document, an unknown enum VALUE is tolerated
+        # and inert — the same posture as an unknown `resolution` value.
+        # `name`/`anchors` are validated and never consumed.
+        source = raw.get("source")
+        if source is not None and not isinstance(source, str):
+            return None
+        name = raw.get("name")
+        if name is not None and not isinstance(name, str):
+            return None
+        effort = raw.get("effort")
+        if effort is not None and not isinstance(effort, str):
+            return None
+        anchors = raw.get("anchors")
         if anchors is None:
             anchors = []
         if not isinstance(anchors, list) or not all(isinstance(a, str) for a in anchors):
+            return None
+        anchors_matched = raw.get("anchors_matched")
+        if anchors_matched is None:
+            anchors_matched = []
+        if not isinstance(anchors_matched, list) or not all(
+            isinstance(a, str) for a in anchors_matched
+        ):
             return None
         facts.append(
             Fact(
@@ -288,6 +345,7 @@ def parse_contract(stdout: str) -> Contract | None:
                 resolution=resolution,
                 verification=verification,
                 flags=flags,
+                effort=effort,
             )
         )
     stale = doc.get("stale_warning")
@@ -309,12 +367,29 @@ def est_tokens(text: str) -> int:
     return max(1, cjk + math.ceil((len(text) - cjk) / 4))
 
 
+def _confidence_label(fact: Fact) -> str | None:
+    """The §6 confidence ruling: the verification label IS the signal and
+    renders bare — never an interpreted synonym (rendering trust/translation
+    is the receiving LLM's job). The single interpretation token is
+    `effort: "low"` → re-verify; medium/high/null are silence (a high effort
+    is not a distrust signal, just the absence of alarm). NOT-line facts
+    never reach here — `_fact_line` returns before the confidence is asked."""
+    if fact.effort == "low":
+        return "re-verify"
+    return None
+
+
 def _fact_line(fact: Fact) -> str:
     if fact.resolution == "none":
+        # No confidence signal on the NOT line: a refutation is not softened
+        # by the writer's trust.
         return f"masora NOT: {fact.summary} [refuted]"
     labels = [fact.resolution]
     if fact.verification and fact.verification != "unverified":
         labels.append(fact.verification)
+    confidence = _confidence_label(fact)
+    if confidence is not None:
+        labels.append(confidence)
     labels.extend(fact.flags)
     rendered = ", ".join(labels)
     if fact.resolution == "stale":
