@@ -28,16 +28,20 @@ Rendering decisions (§6 latitude, pinned here):
   labels (§6), and a future contract value arriving without a `contract_version`
   bump is Masora's shape drift to report, not to guess at — fail-closed
   rejection is reserved for shape violations, not new labels.
-- confidence (the refined §6 ruling): the verification label IS the signal
-  and renders BARE — `verified(human)` / `verified(llm)` / `verified(graph)`
-  verbatim, never an appended token (rendering trust or translation is the
-  receiving LLM's job; doubling information in editorialized form would
-  violate "never an instruction, only label + summary + status"), and
-  "nothing" never strips a label. `unverified` renders as nothing. The ONLY
-  interpretation token: `effort: "low"` → `re-verify`; medium/high/null are
-  silence — a high effort is not a distrust signal, just the absence of
-  alarm. The `masora NOT:` line carries no confidence token ever — a
-  refutation is not softened by the writer's effort.
+- confidence: the §6 trust-rendering matrix is PINNED state-form and is the
+  law of rendering — the verification label IS the signal and renders BARE
+  (`verified(human)` / `verified(llm)` / `verified(graph)` verbatim; "nothing"
+  never strips a label); `unverified` renders as nothing. The ONE
+  interpretive token, and only on a `verified(llm)` fact: `effort: "low"` →
+  `low-effort` (a low-effort LLM verification is the weakest trust state a
+  verified label can carry); medium/high/null are silence — a high effort is
+  not a distrust signal, just the absence of alarm. It NEVER renders under
+  `verified(human)` (a human verification answers for the content) nor
+  `verified(graph)` (the verify's currency is the resolution axis's job:
+  current/stale/suspect) nor alongside `unverified` (effort qualifies the
+  LLM's verification quality, so it is contract-wise always null there).
+  The `masora NOT:` line carries no confidence token ever — a refutation is
+  not softened by the writer's effort.
 - `resolution: "none"` (every version refuted) is negative knowledge:
   `masora NOT: <summary> [refuted]` — a label, never advice; no fact line is
   ever turned into an instruction.
@@ -65,13 +69,12 @@ consumed for rendering.
 
 Contract friction to relay: that enrichment landed IN PLACE under
 `contract_version: 1`, although the stated rule is "shape bumps via
-contract_version, never in place". cppgraph tolerates it precisely because
-the new fields are additive-optional — but the in-place-evolution precedent
-erodes the guard the version bump exists to provide. Also relayed: the
-literal confidence ruling makes `effort: "low"` append `re-verify` even on a
-`verified(human)` fact (a llm-written low-effort version later human-verified
-→ `[current, verified(human), re-verify]`) — masora should rule whether a
-human verify clears the writer's effort token.
+contract_version, never in place". cppgraph tolerates it because the new
+fields are additive-optional — but the in-place-evolution precedent erodes
+the guard the version bump exists to provide; masora has ruled this
+tolerated ONCE: any future shape evolution must be a major
+`contract_version` bump (cppgraph already rejects unknown majors), so this
+bullet is historical record, not an open request.
 
 Zero-change guarantee (§7): any failure mode — missing binary, non-zero
 exit, timeout, unparsable output, unknown `contract_version`, any exception —
@@ -368,14 +371,18 @@ def est_tokens(text: str) -> int:
 
 
 def _confidence_label(fact: Fact) -> str | None:
-    """The §6 confidence ruling: the verification label IS the signal and
-    renders bare — never an interpreted synonym (rendering trust/translation
-    is the receiving LLM's job). The single interpretation token is
-    `effort: "low"` → re-verify; medium/high/null are silence (a high effort
-    is not a distrust signal, just the absence of alarm). NOT-line facts
-    never reach here — `_fact_line` returns before the confidence is asked."""
-    if fact.effort == "low":
-        return "re-verify"
+    """The §6 trust-rendering matrix (state-form, pinned) — the law of
+    rendering: the verification label IS the signal and renders bare; human
+    and graph never take an interpretive token whatever the effort (a human
+    verification answers for the content; graph's currency is the resolution
+    axis's job), and unverified renders nothing (effort is contract-wise
+    always null there — it qualifies the LLM's verification quality). The
+    ONE token, only for a `verified(llm)` fact with `effort: "low"`:
+    `low-effort` — the weakest trust state a verified label can carry.
+    NOT-line facts never reach here — `_fact_line` returns before the
+    confidence is asked."""
+    if fact.verification == "verified(llm)" and fact.effort == "low":
+        return "low-effort"
     return None
 
 

@@ -967,23 +967,39 @@ def test_confidence_verified_llm_renders_bare(
     ]
 
 
-def test_confidence_re_verify_for_effort_low_alone(
+def test_confidence_llm_low_renders_the_low_effort_token(
     stub_masora: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The ONLY interpretation token: effort low appends re-verify — here
-    with an unverified version (which itself renders as nothing)."""
-    doc = _confidence_doc(effort="low")
+    """The ONE interpretive token, per the pinned state-form matrix — exact
+    string `low-effort`, pinned against the contract's own example line:
+    a low-effort LLM verification is the weakest trust state a verified
+    label can carry."""
+    doc = _confidence_doc(
+        summary="Bring-up order: start before stop",
+        verification="verified(llm)",
+        effort="low",
+    )
     assert _confidence_lines(stub_masora, monkeypatch, doc) == [
-        "masora: claim [current, re-verify]"
+        "masora: Bring-up order: start before stop [current, verified(llm), low-effort]"
     ]
+
+
+def test_confidence_unverified_effort_low_renders_bare(
+    stub_masora: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Narrowed semantics: effort qualifies the LLM's VERIFICATION quality —
+    an unverified fact (contract-wise effort always null) gets NO token."""
+    doc = _confidence_doc(effort="low")
+    assert _confidence_lines(stub_masora, monkeypatch, doc) == ["masora: claim [current]"]
 
 
 def test_confidence_verified_graph_label_renders_bare(
     stub_masora: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """`verified(graph)` is mechanical proof: its label renders — never
-    conflated with unverified, never given an interpretation token."""
-    doc = _confidence_doc(verification="verified(graph)")
+    conflated with unverified, never given an interpretation token, whatever
+    the effort (the verify's currency is the resolution axis's job)."""
+    doc = _confidence_doc(verification="verified(graph)", effort="low")
     assert _confidence_lines(stub_masora, monkeypatch, doc) == [
         "masora: claim [current, verified(graph)]"
     ]
@@ -994,21 +1010,23 @@ def test_confidence_nothing_for_effort_medium_or_high(
     stub_masora: Path, monkeypatch: pytest.MonkeyPatch, effort: str
 ) -> None:
     """Silence, not stripping: a high effort is not a distrust signal — the
-    absence of alarm."""
-    doc = _confidence_doc(effort=effort)
-    assert _confidence_lines(stub_masora, monkeypatch, doc) == ["masora: claim [current]"]
+    absence of alarm. On a verified(llm) fact too: medium/high/null render
+    bare."""
+    doc = _confidence_doc(verification="verified(llm)", effort=effort)
+    assert _confidence_lines(stub_masora, monkeypatch, doc) == [
+        "masora: claim [current, verified(llm)]"
+    ]
 
 
-def test_confidence_human_verified_plus_effort_low_is_literal(
+def test_confidence_verified_human_effort_low_renders_bare(
     stub_masora: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The literal ruling: effort low appends re-verify even when a human
-    verify is present (a llm-written low-effort version later human-verified)
-    — reads odd, flagged as friction; masora should rule whether a human
-    verify clears the writer's effort token."""
+    """The pinned matrix resolved the former friction the other way: the
+    interpretive token NEVER renders under verified(human) whatever the
+    writer's effort — a human verification answers for the content."""
     doc = _confidence_doc(verification="verified(human)", effort="low")
     assert _confidence_lines(stub_masora, monkeypatch, doc) == [
-        "masora: claim [current, verified(human), re-verify]"
+        "masora: claim [current, verified(human)]"
     ]
 
 
@@ -1093,9 +1111,9 @@ def test_enriched_document_end_to_end(stub_masora: Path, monkeypatch: pytest.Mon
 
 
 def test_confidence_label_counts_toward_the_token_budget() -> None:
-    """The one interpretation token is rendered text like any other: a
-    max-case fact line grows by `re-verify`'s cost, and the budget math sees
-    it."""
+    """The one interpretive token is rendered text like any other: a
+    max-case fact line grows by `low-effort`'s cost, and the budget math
+    sees it."""
     summary = "word " * 24  # 120 chars — the §3 cap
     contract = masora.Contract(
         facts=(
@@ -1103,7 +1121,7 @@ def test_confidence_label_counts_toward_the_token_budget() -> None:
                 lineage="a",
                 summary=summary,
                 resolution="current",
-                verification="unverified",
+                verification="verified(llm)",
                 flags=(),
                 effort="low",
             ),
@@ -1111,7 +1129,7 @@ def test_confidence_label_counts_toward_the_token_budget() -> None:
                 lineage="b",
                 summary=summary,
                 resolution="current",
-                verification="unverified",
+                verification="verified(llm)",
                 flags=(),
                 effort="low",
             ),
@@ -1122,4 +1140,4 @@ def test_confidence_label_counts_toward_the_token_budget() -> None:
     total = sum(masora.est_tokens(line) for line in lines)
     assert total <= masora.TOKEN_BUDGET
     assert lines[-1] == "… +1 more — masora search"
-    assert ", re-verify]" in lines[0]
+    assert ", low-effort]" in lines[0]
