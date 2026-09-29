@@ -11,7 +11,7 @@
       "scip-clang-x86_64-linux": "06fd18c576f979a726c651594644ec4a35db4f471f2160b3f72eb89fa6001784"
     }
   },
-  "latest": "0.4.4",
+  "latest": "0.4.5",
   "releases": [
     {
       "version": "0.1.0",
@@ -66,6 +66,12 @@
       "rebuild": "none",
       "notes": "No schema change (still v5), safe to update in place. `cppgraph update` now notices when the graph was indexed with an older scip-clang patchset than the installed patched binary and, with your explicit consent (never silently — indexing is long), re-indexes the recorded scope; `status` reports the graph stale and names both patchsets, and the installed-binary advice states the two steps (update the binary, then re-index). A graph built before patchset tracking (cppgraph < 0.4.4, no recorded patchset) is deduced pre-current so p6→p7 users are covered. Partial updates never change the recorded patchset. Full detail in `CHANGELOG.md`.",
       "url": "https://github.com/rakiz/cppgraph/releases/tag/v0.4.4"
+    },
+    {
+      "version": "0.4.5",
+      "rebuild": "none",
+      "notes": "No schema change (still v5), safe to update in place. Opt-in Masora fact injection: with `CPPGRAPH_MASORA=1` (default off; without a Masora installation nothing changes at all), the single-symbol queries append up to two terse fact lines about the symbol they answer on, spawned from `masora facts` with a 2 s budget — statuses as labels, refuted knowledge rendered as `masora NOT: …`, never advice, and every failure mode degrades to no injection rather than an error. Needs a Masora installation plus a configured base and index to do anything. Full detail in `CHANGELOG.md`.",
+      "url": "https://github.com/rakiz/cppgraph/releases/tag/v0.4.5"
     }
   ]
 }
