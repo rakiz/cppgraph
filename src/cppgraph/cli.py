@@ -9,6 +9,7 @@ import textwrap
 from collections.abc import Collection
 from pathlib import Path
 
+from cppgraph import masora
 from cppgraph.builder import build_graph
 from cppgraph.export import (
     is_test_file,
@@ -318,6 +319,16 @@ def _resolve_symbol(
     if extra:
         print(f"[cppgraph] note: {extra}.", file=sys.stderr)
     parser.error(f"ambiguous {what}: {query}")
+
+
+def _print_masora_lines(store: GraphStore, symbol: str) -> None:
+    """Append Masora fact lines (contract v1, see `cppgraph.masora`) to a
+    single-symbol query's text output — the CLI half of the shared
+    `masora.query_lines`. Prints nothing when the feature is off or nothing
+    injects (missing binary, failure, no matching base): the zero-change
+    guarantee means this can add lines, never errors."""
+    for line in masora.query_lines(store.meta(), symbol):
+        print(line)
 
 
 def _empty_core_graph(truncated: bool = False) -> dict:
@@ -1990,6 +2001,7 @@ def main(argv: list[str] | None = None) -> int:
             _print_edge(edge, other=edge.src, full_symbols=args.full_symbols)
         if len(shown) < len(edges):
             print(f"  ... and {len(edges) - len(shown)} more (raise --limit to see them)")
+        _print_masora_lines(store, args.symbol)
         return 0
 
     if args.command == "callees":
@@ -2021,6 +2033,7 @@ def main(argv: list[str] | None = None) -> int:
             print(
                 f"  ({trivial_hidden} trivial callee(s) hidden — drop --hide-trivial to see them)"
             )
+        _print_masora_lines(store, args.symbol)
         return 0
 
     if args.command == "bases":
@@ -2794,6 +2807,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"    {edge.dst}  ({edge.file}:{line})")
         if len(callees) > 10:
             print(f"    ... and {len(callees) - 10} more")
+        _print_masora_lines(store, args.symbol)
         return 0
 
     if args.command == "export":

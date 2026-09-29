@@ -6,6 +6,27 @@ on-disk store also carries its own `schema_version` for forward-compatibility.
 
 ## [Unreleased]
 
+### Added
+
+- **Opt-in Masora fact injection on the single-symbol queries** (`callers`,
+  `callees`, `explain` on the CLI; `who_calls`, `what_it_calls`,
+  `explain_symbol` on MCP). With `CPPGRAPH_MASORA=1` (default off until
+  validated; `0`/`false` is the kill switch, checked before any spawn), each
+  response spawns `masora facts --repo <checkout-root> --symbol <S>` (one
+  subprocess per response, 2 s wall-clock budget, kill + skip on timeout) and
+  appends at most 2 terse fact lines — CLI as printed text, MCP as the
+  `masora` string field — within a ~60-token budget, statuses surfaced as
+  labels and a visibly reported cap (`… +N more — masora search`);
+  `resolution: "none"` renders as negative knowledge (`masora NOT: …
+  [refuted]`), never as advice. Zero-change guarantee: missing binary
+  (`shutil.which`), non-zero exit, timeout, unparsable output, unknown
+  `contract_version`, or any other failure degrades to no injection, never
+  an error; the repo root handed to `--repo` is the graph's recorded
+  `project_root` (cwd fallback) — cppgraph stays a read-only consumer (no
+  Masora config, bases, or SQLite). All logic lives in the new
+  `cppgraph/masora.py`, shared by both surfaces; the contract is Masora's
+  `docs/CPPGRAPH_INTEGRATION.md` (shape v1).
+
 ## [0.4.4] - 2026-09-25
 
 ### Added

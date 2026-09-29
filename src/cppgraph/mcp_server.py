@@ -33,6 +33,7 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from cppgraph import masora
 from cppgraph.cli import (
     SOURCE_EXTS,
     boundary_violations_graph,
@@ -1662,6 +1663,24 @@ _NO_GRAPH = {
 }
 
 
+def _masora_field(result: dict[str, Any], store: GraphStore | None) -> None:
+    """Attach Masora fact lines (contract v1, see `cppgraph.masora`) to a
+    single-symbol query response as the `masora` string field — the rendered
+    §6 lines joined with newlines. Present only when something actually
+    injected (flag on, binary found, contract parsed); absent otherwise, and
+    never an error (the zero-change guarantee). Applies to the initial
+    injection scope only (`who_calls`/`what_it_calls`/`explain_symbol`); the
+    CLI appends the same lines as printed text (`cli._print_masora_lines`)."""
+    if store is None:
+        return
+    symbol = result.get("symbol")
+    if not isinstance(symbol, str) or not symbol:
+        return
+    lines = masora.query_lines(store.meta(), symbol)
+    if lines:
+        result["masora"] = "\n".join(lines)
+
+
 class _ReloadingStore:
     """A `GraphStore` handle that reopens when the `.graph.db` changes on disk.
 
@@ -1881,8 +1900,11 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         `include_paths`/`exclude_paths` further filter callers by their
         definition file's path prefix (e.g. scope out vendored deps).
         `limit` caps the list (default 40): lower it to spend fewer tokens when a
-        few callers are enough, raise it when `truncated` is true."""
-        return _call(
+        few callers are enough, raise it when `truncated` is true.
+        When the `CPPGRAPH_MASORA` flag is on, matching Masora facts ride
+        along as the `masora` field (rendered lines; absent when nothing
+        injected — the same lines the CLI's `callers` appends)."""
+        result = _call(
             callers,
             symbol,
             limit=limit,
@@ -1891,6 +1913,8 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
             include_paths=include_paths,
             exclude_paths=exclude_paths,
         )
+        _masora_field(result, stores.get())
+        return result
 
     @mcp.tool()
     def what_it_calls(
@@ -1918,8 +1942,12 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         It cannot tell you the order calls happen in, nor which are conditional
         (`if (…) x();`). For stage/step order, read the function body — sorting
         callees by `file:line` only approximates textual order, not runtime
-        order."""
-        return _call(
+        order.
+
+        When the `CPPGRAPH_MASORA` flag is on, matching Masora facts ride
+        along as the `masora` field (rendered lines; absent when nothing
+        injected — the same lines the CLI's `callees` appends)."""
+        result = _call(
             callees,
             symbol,
             limit=limit,
@@ -1929,6 +1957,8 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
             include_paths=include_paths,
             exclude_paths=exclude_paths,
         )
+        _masora_field(result, stores.get())
+        return result
 
     @mcp.tool()
     def base_classes(
@@ -2528,8 +2558,11 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         lacks #504 enclosing-range data — stock-binary attribution can
         fabricate a phantom caller from a bodyless declaration site or drop an
         unattributable call site, so only a #504 0 is exact; a nonzero count
-        carries no caveat (over-capture is the safe direction)."""
-        return _call(
+        carries no caveat (over-capture is the safe direction).
+        When the `CPPGRAPH_MASORA` flag is on, matching Masora facts ride
+        along as the `masora` field (rendered lines; absent when nothing
+        injected — the same lines the CLI's `explain` appends)."""
+        result = _call(
             explain,
             symbol,
             root=root,
@@ -2540,6 +2573,8 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
             exclude_tests=exclude_tests,
             hide_trivial=hide_trivial,
         )
+        _masora_field(result, stores.get())
+        return result
 
     @mcp.tool()
     def status(force_update_check: bool = False) -> dict[str, Any]:
