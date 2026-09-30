@@ -1,0 +1,37 @@
+{
+  "version": 1,
+  "files": {
+    "agent/deep.md": {
+      "body_sha256": "ed9b2b43d5a74d5bcaa64b877c5e4b764bf16cd3eebf322601916ed59da7d0e1",
+      "model": "github-copilot/claude-opus-5.5",
+      "variant": ""
+    },
+    "agent/design-review.md": {
+      "body_sha256": "73ce4135d3176b3c7e0689d9653fac49f4d2383a0949436da3a92c3b5dce990b",
+      "model": "fireworks-ai/accounts/fireworks/models/deepseek-v4p1-flash",
+      "variant": ""
+    },
+    "agent/explore.md": {
+      "body_sha256": "14dbffa5ce95198a209a0cac9db71d4b615ceb306bcaf70488c7f950a6906acd",
+      "model": "fireworks-ai/accounts/fireworks/models/deepseek-v4p1-flash",
+      "variant": ""
+    },
+    "agent/impl.md": {
+      "body_sha256": "72baafb0e452973263548229b9516ee550c40c3aa509a9ab541c7c984a23a567",
+      "model": "fireworks-ai/accounts/fireworks/models/glm-5p3-flash",
+      "variant": "none"
+    },
+    "agent/review.md": {
+      "body_sha256": "d0bc386da8ad3e8513580b8ac940000f1a43302415e9bea5eb8ee2a16d23d471",
+      "model": "github-copilot/gemini-3.8-flash",
+      "variant": "low"
+    },
+    "skill/dev-workflow/SKILL.md": {
+      "body_sha256": "10bc10b05bd9e0f84926ed560f080ae4a667462cdaa1e95bf509ff9f573f159d"
+    },
+    "CONVENTIONS.md": {
+      "body_sha256": "abd99e267f4fbb1590c20f0341bdf5c881f944ca966a4d96d9d946dc827b47d7"
+    }
+  },
+  "kit_version": "0.4.0"
+}

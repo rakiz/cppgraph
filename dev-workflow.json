@@ -1,0 +1,31 @@
+{
+  "precommit": {
+    "checks": [
+      {
+        "name": "tests",
+        "cmd": ""
+      },
+      {
+        "name": "companions_exist",
+        "builtin": "companion_md_exists",
+        "extensions": [
+          "cpp",
+          "h",
+          "ts",
+          "tsx"
+        ]
+      }
+    ]
+  },
+  "workflow": {
+    "todo": "TODO.md",
+    "inprogress": "INPROGRESS.md",
+    "changelog": "CHANGELOG.md",
+    "spec": "SPEC.md",
+    "conventions": "CONVENTIONS.md",
+    "rules": "RULES.md"
+  },
+  "companions": {
+    "enabled": false
+  }
+}
