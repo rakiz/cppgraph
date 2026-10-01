@@ -26,6 +26,8 @@ An indexed graph must already exist for the project. Check with the `status`
 MCP tool (or `cppgraph status` in the CLI). If no graph is found, tell the
 user to follow the install/index steps in cppgraph's README.md (and its
 agent-facing AGENTS.md) — do not attempt to install or index from a skill.
+If the `/cppgraph` slash command is installed, `/cppgraph index` drives that
+flow agent-side (and `/cppgraph status` checks graph state).
 
 ## Tool selection
 

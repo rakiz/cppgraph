@@ -514,8 +514,11 @@ def test_register_mcp_skips_without_claude(tmp_path: Path, monkeypatch) -> None:
     assert any("claude" in line.lower() for line in out)
 
 
-def _skill_env(tmp_path: Path, monkeypatch) -> tuple[Path, Path]:
-    """Isolate HOME/XDG_CONFIG_HOME/PATH; return (claude_dest, opencode_dest)."""
+def _agent_env(
+    tmp_path: Path, monkeypatch, claude_leaf: str, opencode_leaf: str
+) -> tuple[Path, Path]:
+    """Isolate HOME/XDG_CONFIG_HOME/PATH; return (claude_dest, opencode_dest) for
+    the given install leaves relative to each tool's config dir."""
     home = tmp_path / "home"
     xdg = tmp_path / "xdg"
     (home / ".claude").mkdir(parents=True)
@@ -524,7 +527,17 @@ def _skill_env(tmp_path: Path, monkeypatch) -> tuple[Path, Path]:
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))
     monkeypatch.setenv("PATH", str(tmp_path / "bin"))
-    return home / ".claude/skills/cppgraph/SKILL.md", xdg / "opencode/skills/cppgraph/SKILL.md"
+    return home / ".claude" / claude_leaf, xdg / "opencode" / opencode_leaf
+
+
+def _skill_env(tmp_path: Path, monkeypatch) -> tuple[Path, Path]:
+    """Isolate HOME/XDG_CONFIG_HOME/PATH; return (claude_dest, opencode_dest)."""
+    return _agent_env(tmp_path, monkeypatch, "skills/cppgraph/SKILL.md", "skills/cppgraph/SKILL.md")
+
+
+def _command_env(tmp_path: Path, monkeypatch) -> tuple[Path, Path]:
+    """Same isolation as _skill_env, for the slash-command destinations."""
+    return _agent_env(tmp_path, monkeypatch, "commands/cppgraph.md", "command/cppgraph.md")
 
 
 def test_install_skill_installs_for_both_detected(tmp_path: Path, monkeypatch) -> None:
@@ -594,3 +607,70 @@ def test_install_skill_claude_cli_only(tmp_path: Path, monkeypatch) -> None:
     dest = home / ".claude/skills/cppgraph/SKILL.md"
     assert statuses["claude"] == "installed"
     assert dest.read_bytes() == (setup_cmd._repo_root() / "skills/cppgraph/SKILL.md").read_bytes()
+
+
+def test_install_command_installs_for_both_detected(tmp_path: Path, monkeypatch) -> None:
+    claude_dest, opencode_dest = _command_env(tmp_path, monkeypatch)
+    p, out = _scripted_prompter([])
+    statuses = setup_cmd.install_command(p)
+    assert statuses == {"claude": "installed", "opencode": "installed"}
+    source = setup_cmd._repo_root() / "commands" / "cppgraph.md"
+    assert claude_dest.read_bytes() == source.read_bytes()
+    assert opencode_dest.read_bytes() == source.read_bytes()
+    assert any("Installed the cppgraph command" in line for line in out)
+
+
+def test_install_command_skips_when_neither_detected(tmp_path: Path, monkeypatch) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    (tmp_path / "bin").mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    monkeypatch.setenv("PATH", str(tmp_path / "bin"))
+    p, out = _scripted_prompter([])
+    statuses = setup_cmd.install_command(p)
+    assert statuses == {"claude": "not_detected", "opencode": "not_detected"}
+    assert not (home / ".claude" / "commands").exists()
+    assert any("no Claude Code or OpenCode" in line for line in out)
+
+
+def test_install_command_keeps_identical(tmp_path: Path, monkeypatch) -> None:
+    claude_dest, opencode_dest = _command_env(tmp_path, monkeypatch)
+    source = setup_cmd._repo_root() / "commands" / "cppgraph.md"
+    for dest in (claude_dest, opencode_dest):
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(source.read_bytes())
+    p, _ = _scripted_prompter([])
+    statuses = setup_cmd.install_command(p)
+    assert statuses == {"claude": "kept", "opencode": "kept"}
+    assert claude_dest.read_bytes() == source.read_bytes()
+    assert opencode_dest.read_bytes() == source.read_bytes()
+
+
+def test_install_command_overwrites_stale(tmp_path: Path, monkeypatch) -> None:
+    claude_dest, opencode_dest = _command_env(tmp_path, monkeypatch)
+    source = setup_cmd._repo_root() / "commands" / "cppgraph.md"
+    for dest in (claude_dest, opencode_dest):
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"stale content")
+    p, _ = _scripted_prompter([])
+    statuses = setup_cmd.install_command(p)
+    assert statuses == {"claude": "installed", "opencode": "installed"}
+    assert claude_dest.read_bytes() == source.read_bytes()
+    assert opencode_dest.read_bytes() == source.read_bytes()
+
+
+def test_install_command_missing_source_fails(tmp_path: Path, monkeypatch) -> None:
+    """No bundled `commands/cppgraph.md` (e.g. a partial checkout): every detected
+    target reports `failed` and nothing is written."""
+    claude_dest, opencode_dest = _command_env(tmp_path, monkeypatch)
+    fake_root = tmp_path / "repo"
+    (fake_root / "skills" / "cppgraph").mkdir(parents=True)
+    (fake_root / "skills" / "cppgraph" / "SKILL.md").write_text("skill\n")
+    monkeypatch.setattr(setup_cmd, "_repo_root", lambda: fake_root)
+    p, out = _scripted_prompter([])
+    statuses = setup_cmd.install_command(p)
+    assert statuses == {"claude": "failed", "opencode": "failed"}
+    assert not claude_dest.exists()
+    assert not opencode_dest.exists()
+    assert any("skipping command install" in line for line in out)

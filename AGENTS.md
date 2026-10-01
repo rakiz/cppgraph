@@ -255,7 +255,9 @@ when it's stale (it reflects the build graph at generation time).
   a dev checkout like `~/code_projects/...` — on a fresh machine that path and venv
   don't exist until `setup.sh` has run. `scripts/setup.sh` is the sole entry point:
   it creates the venv, obtains scip-clang (per `--scip-source`), registers the MCP
-  server, then — in a real terminal — offers to index the current project. The whole
+  server, installs the bundled skill and `/cppgraph` slash command into detected
+  agent tools (Claude Code / opencode), then — in a real terminal — offers to index
+  the current project. The whole
   tool lives under one persistent data dir, `${XDG_DATA_HOME:-~/.local/share}/cppgraph/`
   — the git checkout + its `.venv` in `repo/`, and the `scip-clang` binary (a
   per-machine artifact, one per arch, shared across projects) in `bin/` (override
@@ -289,6 +291,8 @@ when it's stale (it reflects the build graph at generation time).
 ```
 src/cppgraph/     package (cli, builder, scip parser, store, queries, mcp, export)
 viz/              bundled offline graph viewer (HTML + vendored vis-network)
+commands/         bundled /cppgraph agent slash command (installed by setup)
+skills/           bundled cppgraph agent skill (installed by setup)
 scripts/          setup.sh, index.sh, index-in-container.sh, uninstall.sh
 tests/            pytest
 scratch/          dev-only throwaway: example graphs, ad-hoc outputs (gitignored)

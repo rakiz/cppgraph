@@ -399,26 +399,16 @@ def register_mcp(
     return "registered"
 
 
-def install_skill(p: Prompter) -> dict[str, str]:
-    """Stage S3b. Installs the bundled skill (`skills/cppgraph/SKILL.md`) into the
-    per-user skill dirs of every detected agent tool. Returns per-target status:
-    `installed`, `kept`, `not_detected`, or `failed`."""
-    source = _repo_root() / "skills" / "cppgraph" / "SKILL.md"
-    home = Path.home()
-    claude_dir = home / ".claude"
-    opencode_dir = Path(os.environ.get("XDG_CONFIG_HOME") or (home / ".config")) / "opencode"
-    targets = {
-        "claude": (
-            shutil.which("claude") is not None or claude_dir.is_dir(),
-            claude_dir / "skills" / "cppgraph" / "SKILL.md",
-        ),
-        "opencode": (
-            shutil.which("opencode") is not None or opencode_dir.is_dir(),
-            opencode_dir / "skills" / "cppgraph" / "SKILL.md",
-        ),
-    }
+def _install_agent_file(
+    source: Path, targets: dict[str, tuple[bool, Path]], what: str, p: Prompter
+) -> dict[str, str]:
+    """Shared copy-if-different loop behind `install_skill`/`install_command`:
+    for every detected target, copy `source` to its dest unless identical bytes
+    are already there. `what` names the artifact in the notes ("skill" /
+    "command"). Returns per-target status: `installed`, `kept`,
+    `not_detected`, or `failed`."""
     if not source.is_file():
-        p.note(f"note: {source} not found — skipping skill install.")
+        p.note(f"note: {source} not found — skipping {what} install.")
         return {name: "failed" for name in targets}
     data = source.read_bytes()
     statuses: dict[str, str] = {}
@@ -433,14 +423,58 @@ def install_skill(p: Prompter) -> dict[str, str]:
             dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_bytes(data)
         except OSError as exc:
-            p.note(f"error: failed to install the skill for {name}: {exc}")
+            p.note(f"error: failed to install the {what} for {name}: {exc}")
             statuses[name] = "failed"
             continue
-        p.note(f"==> Installed the cppgraph skill for {name} at {dest}.")
+        p.note(f"==> Installed the cppgraph {what} for {name} at {dest}.")
         statuses[name] = "installed"
     if all(v == "not_detected" for v in statuses.values()):
-        p.note("note: no Claude Code or OpenCode installation found — skipping skill install.")
+        p.note(f"note: no Claude Code or OpenCode installation found — skipping {what} install.")
     return statuses
+
+
+def install_skill(p: Prompter) -> dict[str, str]:
+    """Stage S3b. Installs the bundled skill (`skills/cppgraph/SKILL.md`) into the
+    per-user skill dirs of every detected agent tool. Returns per-target status:
+    `installed`, `kept`, `not_detected`, or `failed`."""
+    home = Path.home()
+    claude_dir = home / ".claude"
+    opencode_dir = Path(os.environ.get("XDG_CONFIG_HOME") or (home / ".config")) / "opencode"
+    targets = {
+        "claude": (
+            shutil.which("claude") is not None or claude_dir.is_dir(),
+            claude_dir / "skills" / "cppgraph" / "SKILL.md",
+        ),
+        "opencode": (
+            shutil.which("opencode") is not None or opencode_dir.is_dir(),
+            opencode_dir / "skills" / "cppgraph" / "SKILL.md",
+        ),
+    }
+    return _install_agent_file(
+        _repo_root() / "skills" / "cppgraph" / "SKILL.md", targets, "skill", p
+    )
+
+
+def install_command(p: Prompter) -> dict[str, str]:
+    """Stage S3c. Installs the bundled slash command (`commands/cppgraph.md`) into
+    the per-user command dirs of every detected agent tool (`~/.claude/commands/`
+    for Claude Code; `opencode/command/`, singular, for opencode). Same detection
+    and statuses as `install_skill`: `installed`, `kept`, `not_detected`, or
+    `failed`."""
+    home = Path.home()
+    claude_dir = home / ".claude"
+    opencode_dir = Path(os.environ.get("XDG_CONFIG_HOME") or (home / ".config")) / "opencode"
+    targets = {
+        "claude": (
+            shutil.which("claude") is not None or claude_dir.is_dir(),
+            claude_dir / "commands" / "cppgraph.md",
+        ),
+        "opencode": (
+            shutil.which("opencode") is not None or opencode_dir.is_dir(),
+            opencode_dir / "command" / "cppgraph.md",
+        ),
+    }
+    return _install_agent_file(_repo_root() / "commands" / "cppgraph.md", targets, "command", p)
 
 
 def run_setup(
@@ -473,6 +507,7 @@ def run_setup(
     register_mcp(p, from_scratch=from_scratch, assume_yes=assume_yes, can_prompt=can_prompt)
 
     install_skill(p)
+    install_command(p)
 
     p.note("", "Tool setup complete.")
     if not chain_index:

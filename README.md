@@ -76,8 +76,9 @@ UI), then run the script non-interactively with those choices as flags.**
    ! ~/.local/share/cppgraph/repo/scripts/setup.sh --scip-source <download-patched|download|build|emulate>
    ```
    `setup.sh` is the **sole** entry point — it creates the venv, obtains scip-clang,
-   registers the MCP server, and (in a real terminal) offers to index the current
-   project. Never tell the user to run `cppgraph setup` / `.venv/bin/cppgraph …` /
+   registers the MCP server, installs the bundled skill and `/cppgraph` slash
+   command into detected agent tools, and (in a real terminal) offers to index the
+   current project. Never tell the user to run `cppgraph setup` / `.venv/bin/cppgraph …` /
    anything under a dev checkout: none of that exists on a fresh machine until
    `setup.sh` has run.
 5. **Never `pip install cppgraph` (or add it as a dependency) into a target

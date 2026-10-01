@@ -5,9 +5,11 @@ set -euo pipefail
 #
 # Asks, per item, what to remove (nothing is deleted without a yes):
 #   1. the MCP registration ('cppgraph', user scope) — `claude mcp remove`;
-#   2. the scip-clang binary (per-machine, in the bin dir);
-#   3. the tool itself (the cppgraph checkout + its venv);
-#   4. this project's graph data (./.cppgraph), if run from a project.
+#   2. the installed agent extras (the bundled skill + /cppgraph slash command
+#      copied into the detected agent tools' per-user dirs);
+#   3. the scip-clang binary (per-machine, in the bin dir);
+#   4. the tool itself (the cppgraph checkout + its venv);
+#   5. this project's graph data (./.cppgraph), if run from a project.
 #
 # Project graphs live in each project's own <project>/.cppgraph/ — this script
 # only offers the one in the current directory (it can't know the others); delete
@@ -15,8 +17,8 @@ set -euo pipefail
 #
 # Usage:
 #   scripts/uninstall.sh            interactive (recommended)
-#   scripts/uninstall.sh --yes      non-interactive: remove MCP + binary + tool,
-#                                   KEEP project data (the safe defaults)
+#   scripts/uninstall.sh --yes      non-interactive: remove MCP + agent extras +
+#                                   binary + tool, KEEP project data (the safe defaults)
 #   scripts/uninstall.sh --purge    non-interactive: remove EVERYTHING, including
 #                                   this project's .cppgraph data (--all is a synonym)
 #   scripts/uninstall.sh --dry-run  print what would happen, change nothing
@@ -28,6 +30,14 @@ DATA_ROOT="${XDG_DATA_HOME:-$HOME/.local/share}/cppgraph"
 REPO="$DATA_ROOT/repo"
 BIN_DIR="${CPPGRAPH_BIN_DIR:-$DATA_ROOT/bin}"
 PROJECT_CPG="$PWD/.cppgraph"
+# Installed agent extras (item 2): the bundled skill + /cppgraph slash command
+# that setup.sh copied into the detected agent tools' per-user dirs (plain
+# $HOME; opencode under ${XDG_CONFIG_HOME:-~/.config}, as setup_cmd resolves it).
+CLAUDE_SKILL="$HOME/.claude/skills/cppgraph/SKILL.md"
+CLAUDE_CMD="$HOME/.claude/commands/cppgraph.md"
+OPENCODE_ROOT="${XDG_CONFIG_HOME:-$HOME/.config}/opencode"
+OPENCODE_SKILL="$OPENCODE_ROOT/skills/cppgraph/SKILL.md"
+OPENCODE_CMD="$OPENCODE_ROOT/command/cppgraph.md"
 
 ASSUME_YES=0
 DRY_RUN=0
@@ -38,7 +48,7 @@ for arg in "$@"; do
     --purge | --all) PURGE=1; ASSUME_YES=1 ;;
     --dry-run) DRY_RUN=1 ;;
     -h | --help)
-      sed -n '2,30p' "$0"
+      sed -n '2,27p' "$0"
       exit 0
       ;;
     *)
@@ -76,6 +86,29 @@ rm_path() {
   echo "  removed $desc: $path"
 }
 
+# rm_dir_if_empty DESCRIPTION DIR IGNORED  — remove DIR only if it exists and
+# holds nothing but IGNORED (a file removed — or about to be, under --dry-run —
+# by the rm_path calls above), so a dir setup.sh created disappears without ever
+# deleting unrelated content.
+rm_dir_if_empty() {
+  local desc="$1" dir="$2" ignored="$3" others
+  [[ -d "$dir" ]] || return 0
+  others="$(ls -A "$dir" 2>/dev/null | grep -vx "$ignored" || true)"
+  [[ -z "$others" ]] || return 0
+  if [[ "$DRY_RUN" == 1 ]]; then
+    echo "  [dry-run] would remove empty $desc: $dir"
+  else
+    rmdir "$dir" 2>/dev/null && echo "  removed empty $desc: $dir" || true
+  fi
+}
+
+# rm_extra DESCRIPTION PATH — rm_path, but only when PATH exists (a missing
+# agent extra is skipped, not "removed").
+rm_extra() {
+  local desc="$1" path="$2"
+  [[ -e "$path" ]] && rm_path "$desc" "$path" || true
+}
+
 echo "cppgraph uninstall — found:"
 echo "  tool (repo + venv): $REPO $([[ -d $REPO ]] && echo '(present)' || echo '(absent)')"
 echo "  scip-clang binary:  $BIN_DIR $([[ -d $BIN_DIR ]] && echo '(present)' || echo '(absent)')"
@@ -83,6 +116,15 @@ if command -v claude >/dev/null 2>&1; then
   echo "  MCP server 'cppgraph': $(claude mcp get cppgraph >/dev/null 2>&1 && echo registered || echo 'not registered')"
 else
   echo "  MCP server 'cppgraph': (claude CLI not found — cannot check/unregister)"
+fi
+extras_found=0
+for extra in "$CLAUDE_SKILL" "$CLAUDE_CMD" "$OPENCODE_SKILL" "$OPENCODE_CMD"; do
+  [[ -e "$extra" ]] && extras_found=$((extras_found + 1))
+done
+if [[ "$extras_found" -gt 0 ]]; then
+  echo "  installed agent extras: $extras_found of 4 (claude skill+command, opencode skill+command)"
+else
+  echo "  installed agent extras: (absent)"
 fi
 echo "  this project's graph:  $PROJECT_CPG $([[ -d $PROJECT_CPG ]] && echo '(present)' || echo '(absent)')"
 echo
@@ -99,7 +141,24 @@ if command -v claude >/dev/null 2>&1; then
   fi
 fi
 
-# 2. scip-clang binary. Warn when it looks self-built (patched) — costly to rebuild.
+# 2. Installed agent extras — trivially re-created by setup.sh, so the default
+#    is yes.
+extras_present=0
+for extra in "$CLAUDE_SKILL" "$CLAUDE_CMD" "$OPENCODE_SKILL" "$OPENCODE_CMD"; do
+  [[ -e "$extra" ]] && extras_present=1
+done
+if [[ "$extras_present" == 1 ]]; then
+  if ask "Remove the installed agent extras (cppgraph skill + /cppgraph command)?" y; then
+    rm_extra "Claude Code skill" "$CLAUDE_SKILL"
+    rm_extra "Claude Code command" "$CLAUDE_CMD"
+    rm_extra "opencode skill" "$OPENCODE_SKILL"
+    rm_extra "opencode command" "$OPENCODE_CMD"
+    rm_dir_if_empty "Claude Code skill dir" "${CLAUDE_SKILL%/*}" "$(basename "$CLAUDE_SKILL")"
+    rm_dir_if_empty "opencode skill dir" "${OPENCODE_SKILL%/*}" "$(basename "$OPENCODE_SKILL")"
+  fi
+fi
+
+# 3. scip-clang binary. Warn when it looks self-built (patched) — costly to rebuild.
 if [[ -d "$BIN_DIR" ]]; then
   variant=""
   [[ -f "$BIN_DIR/scip-clang.json" ]] && variant="$(
@@ -115,7 +174,7 @@ if [[ -d "$BIN_DIR" ]]; then
   fi
 fi
 
-# 3. The tool (checkout + venv).
+# 4. The tool (checkout + venv).
 if [[ -d "$REPO" ]]; then
   if ask "Delete the cppgraph tool (checkout + venv) at $REPO?" y; then
     rm_path "cppgraph tool" "$REPO"
@@ -126,7 +185,7 @@ if [[ -d "$REPO" ]]; then
   fi
 fi
 
-# 4. This project's graph data — default NO (data is precious; other projects
+# 5. This project's graph data — default NO (data is precious; other projects
 #    have their own .cppgraph to remove separately).
 if [[ -d "$PROJECT_CPG" ]]; then
   # Default no (data is precious) — unless --purge/--all was asked, which means
