@@ -4,7 +4,7 @@ All notable changes to cppgraph. The format follows
 [Keep a Changelog](https://keepachangelog.com/). This project is pre-1.0; the
 on-disk store also carries its own `schema_version` for forward-compatibility.
 
-## [Unreleased]
+## [0.4.6] - 2026-10-01
 
 ### Added
 
@@ -445,8 +445,7 @@ safe to update in place (no rebuild/reindex needed).
   monkeypatch planned), not a cppgraph bug, so a typo'd kwarg like `path=`
   produces a silent unfiltered/global result instead of a clear failure.
   (Superseded since: the dispatch now rejects unknown parameters with an
-  explicit error naming them — see the input-hygiene entry under
-  [Unreleased].)
+  explicit error naming them — see the input-hygiene entry under [0.4.6].)
 
 ### Removed
 
