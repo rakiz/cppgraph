@@ -1141,3 +1141,191 @@ def test_confidence_label_counts_toward_the_token_budget() -> None:
     assert total <= masora.TOKEN_BUDGET
     assert lines[-1] == "… +1 more — masora search"
     assert ", low-effort]" in lines[0]
+
+
+# --- (k) configurable fact count: CPPGRAPH_MASORA_MAX_FACTS (§9.8b) --------------
+
+
+def _many_fact_contract(n: int, *, summary: str = "") -> masora.Contract:
+    """A contract with `n` distinct short facts (or `n` copies of `summary`)."""
+    return masora.Contract(
+        facts=tuple(
+            masora.Fact(
+                lineage=f"l{i}",
+                summary=summary or f"fact number {i}",
+                resolution="current",
+                verification="unverified",
+                flags=(),
+            )
+            for i in range(n)
+        ),
+        stale_warning=False,
+    )
+
+
+def _many_facts_doc(n: int) -> dict[str, Any]:
+    """The JSON shape of `_many_fact_contract`, for the stub-masora e2e tests."""
+    return doc_with(
+        *[
+            {
+                "lineage": f"l{i}",
+                "summary": f"fact number {i}",
+                "resolution": "current",
+                "verification": "unverified",
+                "flags": "-",
+            }
+            for i in range(n)
+        ]
+    )
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        pytest.param(None, 2, id="unset-default"),
+        pytest.param("3", 3, id="three"),
+        pytest.param("1", 1, id="one"),
+        pytest.param("10", 10, id="ten-higher-allowed"),
+        pytest.param("  4  ", 4, id="surrounding-whitespace-tolerated"),
+        pytest.param("0", 2, id="zero-below-one-default"),
+        pytest.param("-1", 2, id="negative-default"),
+        pytest.param("abc", 2, id="non-integer-default"),
+        pytest.param("2.5", 2, id="float-string-default"),
+        pytest.param("", 2, id="empty-default"),
+        pytest.param("   ", 2, id="whitespace-only-default"),
+    ],
+)
+def test_max_facts_matrix(raw: str | None, expected: int) -> None:
+    """Pure-unit matrix for `max_facts`: unset / non-integer / < 1 silently
+    uses the default (a config typo is a zero-change case, never an error);
+    any integer >= 1 is accepted."""
+    env = {} if raw is None else {masora.MAX_FACTS_ENV_VAR: raw}
+    assert masora.max_facts(env) == expected
+
+
+def test_max_facts_reads_the_process_env_when_no_env_dict_is_given(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CPPGRAPH_MASORA_MAX_FACTS", "3")
+    assert masora.max_facts() == 3
+    monkeypatch.setenv("CPPGRAPH_MASORA_MAX_FACTS", "junk")
+    assert masora.max_facts() == 2
+    monkeypatch.delenv("CPPGRAPH_MASORA_MAX_FACTS")
+    assert masora.max_facts() == 2
+
+
+def test_render_lines_max_facts_parameter_extends_and_shrinks() -> None:
+    """Pure-unit pin on `render_lines(max_facts=…)`: 3 renders three facts and
+    reports the remaining one visibly; 1 renders one and reports the other
+    three. The default (param omitted) stays MAX_FACTS."""
+    contract = _many_fact_contract(4)
+    three = masora.render_lines(contract, max_facts=3)
+    assert three[:3] == [
+        "masora: fact number 0 [current]",
+        "masora: fact number 1 [current]",
+        "masora: fact number 2 [current]",
+    ]
+    assert three[3] == "… +1 more — masora search"
+    one = masora.render_lines(contract, max_facts=1)
+    assert one == ["masora: fact number 0 [current]", "… +3 more — masora search"]
+    assert masora.render_lines(contract)[:2] == [
+        "masora: fact number 0 [current]",
+        "masora: fact number 1 [current]",
+    ]
+
+
+def test_render_lines_budget_wins_over_max_facts() -> None:
+    """The §6 budget always wins over the configured count: with max_facts=3,
+    two max-length summaries still drop to one rendered fact plus the visible
+    cap — a higher fact count never buys its way past the token budget."""
+    contract = _many_fact_contract(3, summary="word " * 24)  # 3 × 120-char summaries
+    lines = masora.render_lines(contract, max_facts=3)
+    total = sum(masora.est_tokens(line) for line in lines)
+    assert total <= masora.TOKEN_BUDGET
+    assert len(lines) == 2
+    assert lines[-1] == "… +2 more — masora search"
+
+
+def test_max_facts_env_renders_three_with_visible_cap(
+    stub_masora: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End-to-end (§9.8b): CPPGRAPH_MASORA_MAX_FACTS=3 renders three matching
+    facts and reports the remaining two with the visible truncation line."""
+    monkeypatch.setenv("CPPGRAPH_MASORA", "1")
+    monkeypatch.setenv("CPPGRAPH_MASORA_MAX_FACTS", "3")
+    monkeypatch.setenv("MASORA_STUB_STDOUT", json.dumps(_many_facts_doc(5)))
+    lines = masora.query_lines({}, FOO, env=dict(os.environ))
+    assert lines[:3] == [
+        "masora: fact number 0 [current]",
+        "masora: fact number 1 [current]",
+        "masora: fact number 2 [current]",
+    ]
+    assert lines[3] == "… +2 more — masora search"
+
+
+def test_max_facts_env_one_renders_one(stub_masora: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CPPGRAPH_MASORA", "1")
+    monkeypatch.setenv("CPPGRAPH_MASORA_MAX_FACTS", "1")
+    monkeypatch.setenv("MASORA_STUB_STDOUT", json.dumps(_many_facts_doc(5)))
+    lines = masora.query_lines({}, FOO, env=dict(os.environ))
+    assert lines == ["masora: fact number 0 [current]", "… +4 more — masora search"]
+
+
+@pytest.mark.parametrize("raw", ["0", "-1", "abc", "2.5", ""])
+def test_max_facts_env_invalid_values_use_the_default(
+    stub_masora: Path, monkeypatch: pytest.MonkeyPatch, raw: str
+) -> None:
+    """A typo'd fact count never errors and never zeroes the injection: it
+    silently renders the default 2 (the zero-change guarantee covers config)."""
+    monkeypatch.setenv("CPPGRAPH_MASORA", "1")
+    monkeypatch.setenv("CPPGRAPH_MASORA_MAX_FACTS", raw)
+    monkeypatch.setenv("MASORA_STUB_STDOUT", json.dumps(_many_facts_doc(5)))
+    lines = masora.query_lines({}, FOO, env=dict(os.environ))
+    assert lines[:2] == [
+        "masora: fact number 0 [current]",
+        "masora: fact number 1 [current]",
+    ]
+    assert lines[2] == "… +3 more — masora search"
+
+
+def test_max_facts_env_unset_defaults_to_two(
+    stub_masora: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("CPPGRAPH_MASORA", "1")
+    monkeypatch.delenv("CPPGRAPH_MASORA_MAX_FACTS", raising=False)
+    monkeypatch.setenv("MASORA_STUB_STDOUT", json.dumps(_many_facts_doc(5)))
+    lines = masora.query_lines({}, FOO, env=dict(os.environ))
+    assert lines[:2] == [
+        "masora: fact number 0 [current]",
+        "masora: fact number 1 [current]",
+    ]
+    assert lines[2] == "… +3 more — masora search"
+
+
+def test_budget_wins_over_max_facts_three_cjk(
+    stub_masora: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The CJK case at the higher count: three 30-char CJK summaries cannot all
+    fit the 60-token budget even with CPPGRAPH_MASORA_MAX_FACTS=3 — the second
+    drops and the cap is reported visibly (budget > fact count, always)."""
+    summary = "語" * 30
+    doc = doc_with(
+        *[
+            {
+                "lineage": f"c{i}",
+                "summary": summary,
+                "resolution": "current",
+                "verification": "verified(llm)",
+                "flags": "-",
+            }
+            for i in range(3)
+        ]
+    )
+    monkeypatch.setenv("CPPGRAPH_MASORA", "1")
+    monkeypatch.setenv("CPPGRAPH_MASORA_MAX_FACTS", "3")
+    monkeypatch.setenv("MASORA_STUB_STDOUT", json.dumps(doc))
+    lines = masora.query_lines({}, FOO, env=dict(os.environ))
+    total = sum(masora.est_tokens(line) for line in lines)
+    assert total <= masora.TOKEN_BUDGET
+    assert len(lines) == 2
+    assert lines[-1] == "… +2 more — masora search"

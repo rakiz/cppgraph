@@ -4108,3 +4108,130 @@ def test_ambiguous_candidates_show_derived_names_when_display_name_empty(
     err = capsys.readouterr().err
     assert "(a/Widget# @ w.h:2)" in err  # derived from the SCIP string...
     assert "(?" not in err  # ...never the bare '?' placeholder
+
+
+# --- input hygiene: a path/filter prefix matching nothing is an explicit error ---
+#
+# Mirrors the MCP tests in test_mcp_server.py (same shared helper
+# `cppgraph.filters.path_prefix_error`, same message): a --include-path/
+# --exclude-path prefix that matches zero indexed files must error naming the
+# prefix, never silently narrow to "no matches".
+
+_CLI_FOO = "cxx . . $ mongo/Foo#makeResumeToken(a1)."
+_CLI_CALLER = "cxx . . $ mongo/Foo#caller(a2)."
+_CLI_OTHER = "cxx . . $ mongo/Other#thing(a1)."
+
+
+@pytest.fixture
+def two_dir_graph(tmp_path: Path) -> Path:
+    """A graph with definition files under two directories (src/mongo/,
+    src/other/) so the path-filter tests can tell a typo'd prefix (matches no
+    indexed file) from a valid one that merely filters a query to zero."""
+    graph = Graph()
+    graph.nodes[_CLI_FOO] = Node(
+        symbol=_CLI_FOO, display_name="makeResumeToken", file="src/mongo/foo.cpp", line=0
+    )
+    graph.nodes[_CLI_CALLER] = Node(
+        symbol=_CLI_CALLER, display_name="caller", file="src/mongo/foo.cpp", line=9
+    )
+    graph.nodes[_CLI_OTHER] = Node(
+        symbol=_CLI_OTHER, display_name="thing", file="src/other/other.cpp", line=3
+    )
+    graph.add_edge("calls", _CLI_CALLER, _CLI_FOO, file="src/mongo/foo.cpp", line=11)
+    graph.add_edge("calls", _CLI_OTHER, _CLI_CALLER, file="src/other/other.cpp", line=4)
+    path = tmp_path / "two-dir.db"
+    write_sqlite(graph, path)
+    return path
+
+
+# Every CLI command that accepts --include-path/--exclude-path, with its
+# minimal valid arguments (the command word first, any required flags/positionals).
+_CLI_FILTER_COMMANDS = [
+    pytest.param(["find", "makeResumeToken"], id="find"),
+    pytest.param(["callers", _CLI_CALLER], id="callers"),
+    pytest.param(["callees", _CLI_CALLER], id="callees"),
+    pytest.param(["references", _CLI_FOO], id="references"),
+    pytest.param(["impact", _CLI_FOO], id="impact"),
+    pytest.param(["reachable-from", _CLI_CALLER], id="reachable-from"),
+    pytest.param(["hotspots"], id="hotspots"),
+    pytest.param(["dependency-cost", "--target-path", "src/"], id="dependency-cost"),
+    pytest.param(["stats"], id="stats"),
+    pytest.param(["line-span"], id="line-span"),
+    pytest.param(["no-incoming-calls"], id="no-incoming-calls"),
+    pytest.param(["strongly-connected-components"], id="strongly-connected-components"),
+]
+
+
+@pytest.mark.parametrize("argv", _CLI_FILTER_COMMANDS)
+def test_cli_include_path_typo_is_an_explicit_error(
+    two_dir_graph: Path, capsys: pytest.CaptureFixture[str], argv: list[str]
+) -> None:
+    """--include-path matching zero indexed files: the command errors (exit 2)
+    naming the prefix, on EVERY path-filtered command — never a silent
+    narrowing that reads as 'no matches'."""
+    with pytest.raises(SystemExit) as excinfo:
+        main(
+            [argv[0], "--graph", str(two_dir_graph), *argv[1:], "--include-path", "no/such/prefix"]
+        )
+    assert excinfo.value.code == 2
+    assert "no file matches path prefix 'no/such/prefix'" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("argv", _CLI_FILTER_COMMANDS[:3])
+def test_cli_exclude_path_typo_is_an_explicit_error(
+    two_dir_graph: Path, capsys: pytest.CaptureFixture[str], argv: list[str]
+) -> None:
+    """An --exclude-path typo alone (it matches no indexed file, so it can only
+    be a mistake) errors the same way — representative commands; the MCP side
+    pins the full list."""
+    with pytest.raises(SystemExit) as excinfo:
+        main(
+            [argv[0], "--graph", str(two_dir_graph), *argv[1:], "--exclude-path", "no/such/prefix"]
+        )
+    assert excinfo.value.code == 2
+    assert "no file matches path prefix 'no/such/prefix'" in capsys.readouterr().err
+
+
+def test_cli_include_exclude_composition_matching_nothing_is_an_error(
+    two_dir_graph: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Each prefix individually matches an indexed file, but the composition
+    (include ∧ ¬exclude) cannot be satisfied: the error names both sides."""
+    with pytest.raises(SystemExit) as excinfo:
+        main(
+            [
+                "callers",
+                "--graph",
+                str(two_dir_graph),
+                "--include-path",
+                "src/mongo",
+                "--exclude-path",
+                "src/mongo",
+                _CLI_CALLER,
+            ]
+        )
+    assert excinfo.value.code == 2
+    err = capsys.readouterr().err
+    assert "path filters match no file: include 'src/mongo' minus exclude 'src/mongo'" in err
+
+
+def test_cli_valid_prefix_with_no_query_matches_is_a_normal_empty_result(
+    two_dir_graph: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """THE key distinction: a prefix that matches indexed files but filters the
+    QUERY to zero is a normal (empty) result — exit 0, no error. `src/mongo` is
+    indexed; CALLER's only caller is defined under `src/other`."""
+    exit_code = main(
+        [
+            "callers",
+            "--graph",
+            str(two_dir_graph),
+            "--include-path",
+            "src/mongo",
+            _CLI_CALLER,
+        ]
+    )
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "0 caller(s)" in out
+    assert "no file matches" not in out

@@ -18,6 +18,14 @@ Feature flag `CPPGRAPH_MASORA` (checked before any spawn):
 When ON, detection is `shutil.which("masora")`; a missing binary is an
 instant silent skip (no subprocess, no latency, no error).
 
+Fact count `CPPGRAPH_MASORA_MAX_FACTS` (§9.8b): the at-most count of rendered
+fact lines. Unset → the default MAX_FACTS (2); any integer ≥ 1 is accepted
+(higher is allowed); unset-mangling — non-integer, empty, or < 1 — silently
+uses the default, never an error (a config typo is a zero-change case, like
+every other failure here). The ≤ 60-token budget guidance STANDS: it wins
+over the fact count, so a higher count renders fewer lines plus the visible
+truncation line whenever the budget runs out first.
+
 Rendering decisions (§6 latitude, pinned here):
 - statuses surface as labels: resolution first (`current` / `stale` /
   `restored` / `unknown` verbatim), then `verified(<source>)` when present —
@@ -104,6 +112,7 @@ from pathlib import Path
 from cppgraph.store import project_root_path
 
 ENV_VAR = "CPPGRAPH_MASORA"
+MAX_FACTS_ENV_VAR = "CPPGRAPH_MASORA_MAX_FACTS"
 CONTRACT_VERSION = 1
 FACTS_TIMEOUT_S = 2.0
 MAX_FACTS = 2
@@ -151,6 +160,24 @@ def enabled(env: Mapping[str, str] | None = None) -> bool:
     if raw is None:
         return False
     return raw.strip().lower() in ("1", "true")
+
+
+def max_facts(env: Mapping[str, str] | None = None) -> int:
+    """The configured fact count from `CPPGRAPH_MASORA_MAX_FACTS` (§9.8b):
+    unset → the default MAX_FACTS; any integer ≥ 1 is accepted (higher than
+    the default is allowed); non-integer, empty, or < 1 silently falls back to
+    the default — like `enabled`, this NEVER raises (the zero-change guarantee
+    covers config typos: a broken value means "default", not "error" and
+    never "zero facts"). The ≤ 60-token budget still wins over whatever count
+    is configured — see `render_lines`."""
+    raw = (os.environ if env is None else env).get(MAX_FACTS_ENV_VAR)
+    if raw is None:
+        return MAX_FACTS
+    try:
+        configured = int(raw)
+    except ValueError:
+        return MAX_FACTS
+    return configured if configured >= 1 else MAX_FACTS
 
 
 def repo_root(meta: Mapping[str, str]) -> str | None:
@@ -406,22 +433,29 @@ def _fact_line(fact: Fact) -> str:
     return f"masora: {fact.summary} [{rendered}]"
 
 
-def render_lines(contract: Contract) -> list[str]:
-    """§6: at most MAX_FACTS fact lines within the token budget, one terse
+def render_lines(contract: Contract, *, max_facts: int = MAX_FACTS) -> list[str]:
+    """§6: at most `max_facts` fact lines within the token budget, one terse
     line each, any cap reported visibly; the stale-index note (when present)
     renders first — but only alongside facts: zero matching facts injects
     nothing at all, stale index or not (§1: no output without matching
     facts). At least one fact renders even when it alone exceeds the budget —
-    a lone oversized fact is still worth more than a bare cap."""
+    a lone oversized fact is still worth more than a bare cap.
+
+    `max_facts` is the configured count (`max_facts(env)` — default
+    MAX_FACTS), and the token budget WINS over it: when rendering the
+    configured count would exceed the budget, fewer facts render plus the
+    visible truncation line. A configured count below 1 is clamped to 1 so
+    the never-zero rule stays unconditional."""
     lines: list[str] = []
     if contract.stale_warning:
         lines.append(STALE_WARNING_LINE)
     kept = 0
     dropped = 0
+    cap = max(1, max_facts)
     for i, fact in enumerate(contract.facts):
         line = _fact_line(fact)
         over = est_tokens("\n".join([*lines, line])) > TOKEN_BUDGET
-        if kept >= MAX_FACTS or (kept and over):
+        if kept >= cap or (kept and over):
             dropped = len(contract.facts) - i
             break
         lines.append(line)
@@ -444,9 +478,10 @@ def query_lines(
 ) -> list[str]:
     """The entry point query responses call to inject Masora facts: flag
     check → binary detection → one `masora facts` spawn for the resolved
-    symbol → contract-v1 parse → §6 render. Returns the rendered lines —
-    `[]` whenever the feature is off or nothing injects, and never raises
-    (the zero-change guarantee)."""
+    symbol → contract-v1 parse → §6 render (the fact count resolved from
+    `CPPGRAPH_MASORA_MAX_FACTS` in the same env the flag is read from).
+    Returns the rendered lines — `[]` whenever the feature is off or nothing
+    injects, and never raises (the zero-change guarantee)."""
     if not enabled(env):
         return []
     if which("masora") is None:
@@ -461,6 +496,6 @@ def query_lines(
         contract = parse_contract(stdout)
         if contract is None:
             return []
-        return render_lines(contract)
+        return render_lines(contract, max_facts=max_facts(env))
     except Exception:
         return []

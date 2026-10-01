@@ -112,6 +112,19 @@ def drop_test_edges(store: GraphStore, edges: list[Edge], *, on: str) -> list[Ed
     return kept
 
 
+def _segment_match(path: str, prefix: str) -> bool:
+    """One prefix's segment-boundary match against an already-normalized
+    (`/`-slashed) path — THE matching rule, factored so
+    `matches_path_prefix` and `unmatched_path_prefixes` cannot drift apart.
+    rstrip("/") only trims a *trailing* separator (e.g. a user-given
+    "src/foo/"); a prefix that's only "/" (or empty) has nothing left to
+    match on a segment boundary — treat it as matching nothing, not as a
+    universal match (a `not prefix` special case here would make
+    `exclude=["/"]` silently drop every relative path)."""
+    prefix = prefix.replace("\\", "/").rstrip("/")
+    return bool(prefix) and (path == prefix or path.startswith(prefix + "/"))
+
+
 def matches_path_prefix(
     file: str | None, *, include: list[str] | None, exclude: list[str] | None
 ) -> bool:
@@ -134,20 +147,91 @@ def matches_path_prefix(
         return include is None
     p = file.replace("\\", "/")
 
-    def _segment_match(prefix: str) -> bool:
-        # rstrip("/") only trims a *trailing* separator (e.g. a user-given
-        # "src/foo/"); a prefix that's only "/" (or empty) has nothing left to
-        # match on a segment boundary — treat it as matching nothing, not as a
-        # universal match (a `not prefix` special case here would make
-        # `exclude=["/"]` silently drop every relative path).
-        prefix = prefix.replace("\\", "/").rstrip("/")
-        return bool(prefix) and (p == prefix or p.startswith(prefix + "/"))
-
-    if include and not any(_segment_match(prefix) for prefix in include):
+    if include and not any(_segment_match(p, prefix) for prefix in include):
         return False
-    if exclude and any(_segment_match(prefix) for prefix in exclude):
+    if exclude and any(_segment_match(p, prefix) for prefix in exclude):
         return False
     return True
+
+
+def unmatched_path_prefixes(
+    files: set[str] | None,
+    include: list[str] | None,
+    exclude: list[str] | None,
+) -> tuple[list[str], bool]:
+    """The path-prefix filters that CANNOT match anything, plus whether the
+    combined filter is unsatisfiable — the pure check behind the input-hygiene
+    rule "a filter that matches nothing is an explicit error, never a silent
+    narrowing": a typo'd prefix must not be indistinguishable from "no
+    matches".
+
+    Returns `(unmatched, eligible_empty)`:
+    - `unmatched` — the given include AND exclude prefixes matching ZERO of
+      `files`, under the same segment-boundary rule `matches_path_prefix`
+      applies (it is factored out and shared, never re-implemented here);
+      deduplicated, in given order. An empty/None list contributes no prefixes
+      and never errors — an absent filter is "no constraint", not a broken
+      one.
+    - `eligible_empty` — True when every given prefix individually matches
+      something yet the COMBINED filter (include ∧ ¬exclude) selects zero
+      files — e.g. `include=["src/foo"], exclude=["src/foo"]`: each prefix is
+      well-spelled, but their composition cannot be satisfied, so the error
+      must blame the composition rather than name a typo.
+
+    `files` is the universe of definition-file paths to match against
+    (`GraphStore.definition_files`). A node with `file=None` has no path and
+    is irrelevant to this check — it simply isn't in the set (`matches_path_prefix`
+    already drops such nodes when an include filter is given); the check never
+    sees a None entry. An empty/None `files` makes every given prefix
+    unmatched — the honest answer on a graph with no definitions."""
+    include = include or []
+    exclude = exclude or []
+    if not include and not exclude:
+        return [], False
+    normalized = {f.replace("\\", "/") for f in files} if files else set()
+    unmatched: list[str] = []
+    seen: set[str] = set()
+    for prefix in [*include, *exclude]:
+        if prefix in seen:
+            continue
+        seen.add(prefix)
+        if not any(_segment_match(f, prefix) for f in normalized):
+            unmatched.append(prefix)
+    eligible_empty = False
+    if not unmatched:
+        eligible_empty = not any(
+            matches_path_prefix(f, include=include, exclude=exclude) for f in normalized
+        )
+    return unmatched, eligible_empty
+
+
+def path_prefix_error(
+    files: set[str] | None,
+    include: list[str] | None,
+    exclude: list[str] | None,
+) -> str | None:
+    """The error message for path filters that can match nothing, or None when
+    they are satisfiable — the single wording both surfaces report, so a CLI
+    `--include-path` typo and the MCP `include_paths` one read the same. Mirrors
+    the init wizard's unmatched-substring note ("'f' matches nothing — try
+    another substring."): state the fact, name the prefix, suggest the fix."""
+    unmatched, eligible_empty = unmatched_path_prefixes(files, include, exclude)
+    if unmatched:
+        listed = ", ".join(repr(p) for p in unmatched)
+        plural = "es" if len(unmatched) > 1 else ""
+        return (
+            f"no file matches path prefix{plural} {listed} — try another prefix "
+            "(segment-boundary match on definition-file paths; `stats` lists "
+            "the indexed files)"
+        )
+    if eligible_empty:
+        message = "path filters match no file"
+        if include:
+            message += ": include " + ", ".join(repr(p) for p in include)
+        if exclude:
+            message += " minus exclude " + ", ".join(repr(p) for p in exclude)
+        return message
+    return None
 
 
 def filter_by_path(

@@ -14,7 +14,12 @@ Two layers, deliberately split so the substance is testable without a transport:
   hundreds of callers) never dumps the whole set into the model's context.
 - **Transport wiring** (`build_server` / `main`): a thin FastMCP layer that
   binds one long-lived `GraphStore` (resolved at launch — from `--graph` or
-  auto-discovered from the cwd's `.cppgraph/`) to those functions.
+  auto-discovered from the cwd's `.cppgraph/`) to those functions. The
+  dispatch is strict-argument: an unknown tool parameter (a typo'd name) is
+  rejected with an explicit error naming it — never silently dropped into an
+  unfiltered result — and a path/filter prefix matching no indexed file is
+  the same explicit error on every tool that accepts one (see
+  `cppgraph.filters.path_prefix_error`).
 
 Source snippets: by default these tools return **coordinates** (`file:line`),
 which are cheap. When you actually want to see the code, pass
@@ -47,6 +52,7 @@ from cppgraph.filters import filter_by_access as _filter_by_access
 from cppgraph.filters import filter_by_path as _filter_by_path
 from cppgraph.filters import is_trivial_callee as _is_trivial_callee
 from cppgraph.filters import matches_path_prefix as _matches_path_prefix
+from cppgraph.filters import path_prefix_error as _path_prefix_error
 from cppgraph.filters import short_label as _short_label
 from cppgraph.queries import capped as _capped
 from cppgraph.queries import extract_signature, find_symbols, read_source_snippet
@@ -1799,9 +1805,37 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
     used for `status` drift and source snippets.
     """
     from mcp.server.fastmcp import FastMCP
+    from mcp.server.fastmcp.exceptions import ToolError
+
+    class _StrictArgsFastMCP(FastMCP):
+        """FastMCP that rejects unknown tool parameters instead of dropping
+        them.
+
+        The stock dispatch silently DROPS argument keys no declared parameter
+        covers (empirical: `call_tool("greet", {"name": "x", "lvel": 2})` on a
+        `(name: str, level: int = 1)` tool runs with `level=1`, no error) — so
+        a typo'd parameter name narrows nothing and quietly returns UNFILTERED
+        results, the exact failure the input-hygiene contract forbids (Masora
+        integration doc §9.8a: an unknown parameter is an explicit error
+        naming it). The check is central — every registered tool, and every
+        future one, inherits it — and fires BEFORE argument validation, so a
+        call carrying only an unknown parameter reports the typo rather than
+        a misleading missing-required-argument error. The raised ToolError
+        reaches the caller directly from `call_tool`; over the stdio transport
+        the low-level server converts it into the isError response carrying
+        the message — the explicit error the contract asks for."""
+
+        async def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
+            tool = self._tool_manager.get_tool(name)
+            if tool is not None and arguments:
+                declared = set(tool.parameters.get("properties", {}))
+                unknown = sorted(set(arguments) - declared)
+                if unknown:
+                    raise ToolError(f"unknown parameter(s): {', '.join(unknown)}")
+            return await super().call_tool(name, arguments)
 
     stores = _ReloadingStore(graph_path)
-    mcp = FastMCP("cppgraph", instructions=_server_instructions(stores.get()))
+    mcp = _StrictArgsFastMCP("cppgraph", instructions=_server_instructions(stores.get()))
 
     def _no_graph_notice() -> dict[str, Any]:
         """What a tool returns when no usable store is open: the specific
@@ -1816,10 +1850,24 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         """Run a pure `(store, …) -> dict` query, or return the no-graph notice.
         Attaches a cheap `stale` flag (git diff, no rebuild) when `root` and a
         recorded source commit make the check possible — the per-query drift
-        signal `status`'s full report already computes, without its cost."""
+        signal `status`'s full report already computes, without its cost.
+
+        Also runs the path-filter input-hygiene gate centrally: any call
+        passing `include_paths`/`exclude_paths` first checks those prefixes
+        against the graph's definition files (`filters.path_prefix_error`, the
+        same helper the CLI commands run) — a prefix matching zero files is an
+        explicit error naming it, never a silent narrowing that reads as "no
+        matches". Central here so every tool that accepts the filters —
+        current or future — is covered by construction."""
         s = stores.get()
         if s is None:
             return _no_graph_notice()
+        include = kwargs.get("include_paths")
+        exclude = kwargs.get("exclude_paths")
+        if include or exclude:
+            err = _path_prefix_error(s.definition_files(), include, exclude)
+            if err is not None:
+                return {"error": err}
         result = fn(s, *args, **kwargs)
         if root is not None:
             try:
@@ -2130,11 +2178,9 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         (`full_symbols=True` for raw SCIP); pass `exclude_tests=True` to drop
         edges whose call site is in a test file. `include_paths`/`exclude_paths`
         further filter by definition-file path prefix (e.g. scope out vendored
-        deps) — pass them by their exact names: an unrecognized parameter name
-        (a typo like `path=`) is silently ignored by the underlying MCP
-        argument validation rather than raising, so a typo silently yields an
-        unfiltered result. `limit` caps the list (default
-        40): lower it to spend fewer tokens, raise it when `truncated`."""
+        deps; unknown parameter names are rejected, never ignored). `limit` caps
+        the list (default 40): lower it to spend fewer tokens, raise it when
+        `truncated`."""
         return _call(
             hotspot_ranking,
             limit=limit,
@@ -2219,12 +2265,10 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         on a stock-binary graph the tool returns `available: false` with the
         rebuild pointer instead of a silently empty list. `exclude_tests` drops
         definitions in test files; `include_paths`/`exclude_paths` filter by
-        definition-file path prefix — pass them by their exact names: an
-        unrecognized parameter name (a typo like `path=`) is silently ignored
-        by the underlying MCP argument validation rather than raising, so a
-        typo silently yields an unfiltered result. `limit`
-        caps the list (default 40): lower it to spend fewer tokens, raise it
-        when `truncated` — `total` always reports the full count."""
+        definition-file path prefix (unknown parameter names are rejected,
+        never ignored). `limit` caps the list (default 40): lower it to spend
+        fewer tokens, raise it when `truncated` — `total` always reports the
+        full count."""
         return _call(
             line_span_ranking,
             limit=limit,
@@ -2255,12 +2299,9 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         included) instead of answering. Compact `name` + `file:line` by
         default (`full_symbols=True` for raw SCIP). `exclude_tests` drops
         definitions in test files, but a test caller still counts as a caller.
-        `include_paths`/`exclude_paths` filter by definition-file path prefix —
-        pass them by their exact names: an unrecognized parameter name (a typo
-        like `path=`) is silently ignored by the underlying MCP argument
-        validation rather than raising, so a typo silently yields an unfiltered
-        result. `limit` caps the list (default 40) — `total` always reports the full
-        count."""
+        `include_paths`/`exclude_paths` filter by definition-file path prefix
+        (unknown parameter names are rejected, never ignored). `limit` caps
+        the list (default 40) — `total` always reports the full count."""
         return _call(
             no_incoming_calls_report,
             limit=limit,
@@ -2428,10 +2469,9 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         answer is call sites only, flagged `refs_available: false` with a
         note (type uses are invisible without the reference index).
         `exclude_tests` drops uses whose use site or used definition is in a
-        test file. `module_prefix` must be passed by its exact name: an
-        unrecognized parameter name (a typo like `path=`) is silently ignored
-        by the underlying MCP argument validation rather than raising, so a
-        typo silently yields an unfiltered (whole-tree) result. `limit` caps
+        test file. `module_prefix` is the directory path prefix, passed by its
+        exact name — unknown parameter names (a typo like `path=`) are
+        rejected, never ignored. `limit` caps
         the list (default 40): raise it when
         `truncated` — `total` always reports the full count. The complementary
         outward view — how many call sites outside code runs into a module

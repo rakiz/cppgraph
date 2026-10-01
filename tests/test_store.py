@@ -3310,3 +3310,24 @@ def test_resolve_exact_type_name_still_ambiguous_across_packages(tmp_path: Path)
     resolved, candidates = store.resolve("Widget#")
     assert resolved is None
     assert {n.symbol for n in candidates} == {a_cls, b_cls}
+
+
+def test_definition_files_lists_only_node_definition_files(tmp_path: Path) -> None:
+    """The unmatched-path-prefix check's file universe: distinct paths of nodes'
+    own definition files — edge call sites and reference use sites interned in
+    the `files` table but owned by no definition are excluded, as are nodes
+    with no file at all."""
+    graph = Graph()
+    f = graph.add_node("cxx . . $ a/F#f(a1).")
+    f.file = "src/a/foo.cpp"
+    g = graph.add_node("cxx . . $ a/G#g(b1).")
+    g.file = "src/b/bar.cpp"
+    graph.add_node("cxx . . $ a/H#h(c1).")  # no definition file recorded
+    graph.add_edge(
+        "calls", "cxx . . $ a/G#g(b1).", "cxx . . $ a/F#f(a1).", file="edge_only.cpp", line=1
+    )
+    graph.add_reference("cxx . . $ a/F#f(a1).", file="refs_only.cpp", line=5)
+    path = tmp_path / "def-files.db"
+    write_sqlite(graph, path)
+    store = GraphStore(path)
+    assert store.definition_files() == {"src/a/foo.cpp", "src/b/bar.cpp"}

@@ -4,6 +4,62 @@ All notable changes to cppgraph. The format follows
 [Keep a Changelog](https://keepachangelog.com/). This project is pre-1.0; the
 on-disk store also carries its own `schema_version` for forward-compatibility.
 
+## [Unreleased]
+
+### Added
+
+- **Configurable Masora fact count** — `CPPGRAPH_MASORA_MAX_FACTS` (contract
+  §9.8b): the at-most count of rendered fact lines is no longer the hard
+  `MAX_FACTS = 2`. Default stays 2; any integer ≥ 1 is accepted (higher
+  allowed); unset, non-integer, empty, or < 1 silently uses the default —
+  never an error (the zero-change guarantee covers config typos, so
+  `max_facts()` reads like `enabled()` and never raises). The ≤ 60-token
+  budget guidance stands and wins over the count: a higher configured count
+  renders fewer facts plus the visible `… +N more — masora search` line
+  whenever the budget runs out first (at least one fact still always
+  renders). Implemented as the pure `cppgraph.masora.max_facts(env)` +
+  `render_lines(contract, max_facts=…)`; `query_lines` resolves the count
+  from the same env the flag is read from, so both surfaces pick it up
+  unchanged.
+
+- **Input hygiene on path/filter prefixes** (contract §9.8a, "Input hygiene"
+  section): an `--include-path`/`--exclude-path` (MCP
+  `include_paths`/`exclude_paths`) prefix that matches ZERO indexed
+  definition files — or an include ∧ exclude composition that cannot be
+  satisfied (e.g. `include=["src/foo"], exclude=["src/foo"]`) — is now an
+  explicit error naming the offending prefix, on both surfaces with the same
+  shared message (`filters.path_prefix_error`, wording mirroring the init
+  wizard's "'f' matches nothing — try another substring."): a typo'd prefix
+  used to look identical to "no matches", silently narrowing a query. The
+  key distinction is preserved and tested: a VALID prefix that merely filters
+  the query to zero remains a normal (empty) result. Backed by the new
+  `GraphStore.definition_files()` (one SQL query per filtered call — the
+  distinct definition-file paths the filters match against); wired into every
+  path-filtered MCP tool via the shared `_call` gate (current and future
+  tools covered by construction) and into every path-filtered CLI command
+  (`find`, `callers`, `callees`, `references`, `impact`, `reachable-from`,
+  `hotspots`, `dependency-cost`, `stats`, `line-span`, `no-incoming-calls`,
+  `strongly-connected-components`). `api_surface`'s `module_prefix` and
+  `boundary_violations`' `rules` keep their own existing validation.
+
+### Fixed
+
+- **Unknown MCP tool parameters are now rejected with an explicit error
+  naming them** (contract §9.8a) — never silently ignored. FastMCP's stock
+  dispatch silently DROPS argument keys no declared parameter covers, so a
+  typo'd parameter name (e.g. `path=` instead of `include_paths=`) quietly
+  returned unfiltered/whole-graph results — the whole graph answering where
+  one symbol was asked about. `build_server` now subclasses FastMCP and
+  overrides `call_tool` with a central unknown-parameter check that fires
+  BEFORE argument validation (a call with only an unknown parameter reports
+  the typo, not a misleading missing-required-argument error), so every
+  registered tool — current and future — is covered by construction. The
+  raised `ToolError` surfaces as the isError response carrying the message.
+  This supersedes 0.4.4's documented silently-ignored limitation (and its
+  docstring warnings on `hotspots`/`line_span`/`no_incoming_calls`/
+  `api_surface`, now rewritten to the new behavior; the resolved TODO.md
+  entry is removed).
+
 ## [0.4.5] - 2026-09-29
 
 ### Added
@@ -388,6 +444,9 @@ safe to update in place (no rebuild/reindex needed).
   error — a deliberately-unpatched upstream limitation (no local pydantic
   monkeypatch planned), not a cppgraph bug, so a typo'd kwarg like `path=`
   produces a silent unfiltered/global result instead of a clear failure.
+  (Superseded since: the dispatch now rejects unknown parameters with an
+  explicit error naming them — see the input-hygiene entry under
+  [Unreleased].)
 
 ### Removed
 

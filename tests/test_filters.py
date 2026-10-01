@@ -166,3 +166,98 @@ def test_ambiguous_hint_silent_for_member_only_candidates() -> None:
     # Neither trap present: methods of other shapes must not trip the hints.
     assert ambiguous_candidate_hint("mongo/DocumentSource#", _hint_candidates(M1, M2)) == ""
     assert ambiguous_candidate_hint("createFromBson", _hint_candidates(M1, M2)) == ""
+
+
+# --- input hygiene: unmatched path prefixes are an explicit error, not silence ---
+
+
+def test_unmatched_path_prefixes_segment_boundary() -> None:
+    """The unmatched check applies the SAME segment-boundary rule as
+    `matches_path_prefix` — factored, not duplicated: a prefix that matches
+    nothing under the filter's own rule is exactly the one reported."""
+    from cppgraph.filters import unmatched_path_prefixes
+
+    files = {"src/foo/bar.cpp"}
+    assert unmatched_path_prefixes(files, ["src/foo"], None) == ([], False)
+    assert unmatched_path_prefixes(files, ["src/fo"], None) == (["src/fo"], False)
+
+
+def test_unmatched_path_prefixes_normalizes_separators_and_trailing_slash() -> None:
+    from cppgraph.filters import unmatched_path_prefixes
+
+    files = {"src/foo/bar.cpp"}
+    assert unmatched_path_prefixes(files, ["src/foo/"], None) == ([], False)
+    assert unmatched_path_prefixes(files, ["src\\foo"], None) == ([], False)
+
+
+def test_unmatched_path_prefixes_empty_lists_are_no_constraint() -> None:
+    """An empty (or None) include/exclude list is 'no constraint', the same as
+    `matches_path_prefix` treats it — it can never be an error."""
+    from cppgraph.filters import unmatched_path_prefixes
+
+    files = {"src/foo/bar.cpp"}
+    for include, exclude in ((None, None), ([], []), ([], None), (None, [])):
+        assert unmatched_path_prefixes(files, include, exclude) == ([], False)
+
+
+def test_unmatched_path_prefixes_exclude_typo_reported() -> None:
+    from cppgraph.filters import unmatched_path_prefixes
+
+    files = {"src/foo/bar.cpp"}
+    assert unmatched_path_prefixes(files, None, ["no/such"]) == (["no/such"], False)
+
+
+def test_unmatched_path_prefixes_eligible_empty_composition() -> None:
+    """Every prefix individually matches something, yet the combined filter
+    (include ∧ ¬exclude) selects zero files: eligible_empty=True — the message
+    must blame the composition, not a single typo."""
+    from cppgraph.filters import unmatched_path_prefixes
+
+    files = {"src/foo/bar.cpp"}
+    assert unmatched_path_prefixes(files, ["src/foo"], ["src/foo"]) == ([], True)
+    # The mirror: exclude-only that removes every file.
+    assert unmatched_path_prefixes(files, None, ["src/foo"]) == ([], True)
+    # A composition that IS satisfiable stays False.
+    both = {"src/a/a.cpp", "src/b/b.cpp"}
+    assert unmatched_path_prefixes(both, ["src/a"], ["src/b"]) == ([], False)
+
+
+def test_unmatched_path_prefixes_reports_both_sides_in_given_order() -> None:
+    from cppgraph.filters import unmatched_path_prefixes
+
+    files = {"src/a/a.cpp"}
+    unmatched, eligible_empty = unmatched_path_prefixes(files, ["src/a", "src/x"], ["src/y"])
+    assert unmatched == ["src/x", "src/y"]
+    assert eligible_empty is False
+
+
+def test_unmatched_path_prefixes_empty_file_set_matches_nothing() -> None:
+    """No indexed definition files at all: any given prefix matches nothing —
+    the honest answer (and nodes with file=None are simply not in the set, so
+    they never distort the check)."""
+    from cppgraph.filters import unmatched_path_prefixes
+
+    assert unmatched_path_prefixes(set(), ["src"], None) == (["src"], False)
+    assert unmatched_path_prefixes(None, ["src"], None) == (["src"], False)
+
+
+def test_path_prefix_error_messages_name_the_prefix() -> None:
+    """The shared message both surfaces report: names the offending prefix
+    (mirroring the init wizard's 'matches nothing — try another' wording) or
+    the unsatisfiable composition; satisfiable filters give None."""
+    from cppgraph.filters import path_prefix_error
+
+    files = {"src/foo/bar.cpp"}
+    assert path_prefix_error(files, ["src/typo"], None) == (
+        "no file matches path prefix 'src/typo' — try another prefix "
+        "(segment-boundary match on definition-file paths; `stats` lists the "
+        "indexed files)"
+    )
+    msg = path_prefix_error(files, ["src/x"], ["src/y"])
+    assert "no file matches path prefix" in msg
+    assert "'src/x'" in msg and "'src/y'" in msg
+    assert path_prefix_error(files, ["src/foo"], ["src/foo"]) == (
+        "path filters match no file: include 'src/foo' minus exclude 'src/foo'"
+    )
+    assert path_prefix_error(files, ["src/foo"], None) is None
+    assert path_prefix_error(files, None, None) is None

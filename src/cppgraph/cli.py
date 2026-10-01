@@ -25,6 +25,7 @@ from cppgraph.filters import (
     filter_by_path,
     is_trivial_callee,
     matches_path_prefix,
+    path_prefix_error,
     short_label,
 )
 from cppgraph.model import Edge, Node
@@ -230,6 +231,24 @@ def _open_store_checked(args: argparse.Namespace, parser: argparse.ArgumentParse
             file=sys.stderr,
         )
     return store
+
+
+def _check_path_filters(
+    store: GraphStore, args: argparse.Namespace, parser: argparse.ArgumentParser
+) -> None:
+    """The input-hygiene gate every path-filtered command runs right after the
+    store opens: an `--include-path`/`--exclude-path` prefix that matches zero
+    indexed definition files (or an include ∧ exclude composition that cannot
+    be satisfied) is an explicit error naming the prefix — never a silent
+    narrowing that reads as "no matches". The same shared helper
+    (`cppgraph.filters.path_prefix_error`) and the same message the MCP tools'
+    `include_paths`/`exclude_paths` report, per the surface-parity rule."""
+    include = getattr(args, "include_paths", None)
+    exclude = getattr(args, "exclude_paths", None)
+    if include or exclude:
+        err = path_prefix_error(store.definition_files(), include, exclude)
+        if err is not None:
+            parser.error(err)
 
 
 _NO_STATIC_PATH_HINT = (
@@ -1948,6 +1967,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "find":
         store = _open_store_checked(args, parser)
+        _check_path_filters(store, args, parser)
         r = find_symbols(
             store,
             args.query,
@@ -1983,6 +2003,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "callers":
         store = _open_store_checked(args, parser)
+        _check_path_filters(store, args, parser)
         args.symbol = _resolve_symbol(store, args.symbol, parser)
         edges = store.callers_of(args.symbol)
         if args.exclude_tests:
@@ -2006,6 +2027,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "callees":
         store = _open_store_checked(args, parser)
+        _check_path_filters(store, args, parser)
         args.symbol = _resolve_symbol(store, args.symbol, parser)
         edges = store.callees_of(args.symbol)
         if args.exclude_tests:
@@ -2056,6 +2078,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "references":
         store = _open_store_checked(args, parser)
+        _check_path_filters(store, args, parser)
         args.symbol = _resolve_symbol(store, args.symbol, parser)
         refs = store.references_of(args.symbol)
         if not refs and store.meta().get("has_references") != "true":
@@ -2117,6 +2140,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "impact":
         store = _open_store_checked(args, parser)
+        _check_path_filters(store, args, parser)
         args.symbol = _resolve_symbol(store, args.symbol, parser)
         if args.kind == "calls" and args.symbol.rstrip().endswith("#"):
             n = len(store.references_of(args.symbol))
@@ -2157,6 +2181,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "reachable-from":
         store = _open_store_checked(args, parser)
+        _check_path_filters(store, args, parser)
         args.symbol = _resolve_symbol(store, args.symbol, parser)
         if args.kind == "calls" and args.symbol.rstrip().endswith("#"):
             print(
@@ -2199,6 +2224,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "hotspots":
         store = _open_store_checked(args, parser)
+        _check_path_filters(store, args, parser)
         ranked, total = store.hotspots(
             limit=args.limit,
             kind=args.kind,
@@ -2222,6 +2248,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "dependency-cost":
         store = _open_store_checked(args, parser)
+        _check_path_filters(store, args, parser)
         # limit=None: the aggregate must sum over the full ranking, --limit
         # caps only the displayed breakdown (same shape as the MCP report).
         ranked, total = store.hotspots(
@@ -2253,6 +2280,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "stats":
         store = _open_store_checked(args, parser)
+        _check_path_filters(store, args, parser)
         groups, total = store.stats(
             group_by=args.group_by,
             limit=args.limit,
@@ -2272,6 +2300,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "line-span":
         store = _open_store_checked(args, parser)
+        _check_path_filters(store, args, parser)
         result = store.line_span(
             limit=args.limit,
             exclude_tests=args.exclude_tests,
@@ -2302,6 +2331,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "no-incoming-calls":
         store = _open_store_checked(args, parser)
+        _check_path_filters(store, args, parser)
         result = store.no_incoming_calls(
             limit=args.limit,
             exclude_tests=args.exclude_tests,
@@ -2489,6 +2519,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "strongly-connected-components":
         store = _open_store_checked(args, parser)
+        _check_path_filters(store, args, parser)
         try:
             components, total = store.strongly_connected_components(
                 limit=args.limit,

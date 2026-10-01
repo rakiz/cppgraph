@@ -8,13 +8,16 @@ tiny fixture store — no transport needed.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import sqlite3
 import subprocess
 from pathlib import Path
+from typing import Any
 
 import pytest
+from mcp.server.fastmcp.exceptions import ToolError
 
 from cppgraph import mcp_server
 from cppgraph import updates as mcp_server_updates
@@ -2962,3 +2965,195 @@ def test_explain_shows_class_name_and_member_files(tmp_path: Path) -> None:
     by_symbol = {m.symbol: m for m in members}
     assert by_symbol[member].file == "src/widget.cpp"  # the index has one -> carried
     assert by_symbol[decl_only].file is None  # none in the index -> honest absence
+
+
+# --- strict argument dispatch: unknown tool parameters are rejected (§9.8a) ------
+#
+# FastMCP's stock dispatch silently DROPS argument keys no declared parameter
+# covers (verified on the installed mcp package: `call_tool("greet", {"name":
+# "x", "lvel": 2})` runs with level=1, no error) — so a typo'd parameter name
+# quietly returns unfiltered results. The overridden dispatch turns one into an
+# explicit error naming the parameter, centrally, on every tool.
+
+OTHER = "cxx . . $ mongo/Other#thing(a1)."
+
+
+def _tool(server: Any, name: str) -> Any:
+    """A tool's inner function, bypassing the dispatch — for asserting on the
+    payload shape directly (the dispatch itself is covered by the
+    strict-argument tests using `server.call_tool`)."""
+    return server._tool_manager._tools[name].fn
+
+
+def _dispatch_payload(server: Any, name: str, arguments: dict[str, Any]) -> Any:
+    """The JSON payload a dispatch-level call produces. `FastMCP.call_tool`
+    (convert_result=True) returns a `(content_blocks, structured)` tuple for
+    these dict-returning tools — take the structured half, falling back to
+    parsing the single text content block."""
+    result = asyncio.run(server.call_tool(name, arguments))
+    if isinstance(result, tuple) and len(result) == 2 and isinstance(result[1], dict):
+        return result[1]
+    blocks = result[0] if isinstance(result, tuple) else result
+    return json.loads(blocks[0].text)
+
+
+@pytest.fixture
+def strict_server(tmp_path: Path) -> Any:
+    """A built server over a small two-directory graph — for tests that go
+    through the REAL call dispatch (`server.call_tool`) rather than `.fn`,
+    proving the strict-argument and path-filter gates on the live path."""
+    graph = Graph()
+    graph.nodes[FOO] = Node(
+        symbol=FOO, display_name="makeResumeToken", file="src/mongo/foo.cpp", line=0
+    )
+    graph.nodes[CALLER] = Node(
+        symbol=CALLER, display_name="caller", file="src/mongo/foo.cpp", line=9
+    )
+    graph.nodes[OTHER] = Node(
+        symbol=OTHER, display_name="thing", file="src/other/other.cpp", line=3
+    )
+    graph.add_edge("calls", CALLER, FOO, file="src/mongo/foo.cpp", line=11)
+    graph.add_edge("calls", OTHER, CALLER, file="src/other/other.cpp", line=4)
+    path = tmp_path / "strict-graph.db"
+    write_sqlite(graph, path)
+    return mcp_server.build_server(str(path))
+
+
+def test_every_tool_rejects_an_unknown_parameter(strict_server: Any) -> None:
+    """The strict-argument contract (Masora §9.8a) over EVERY registered tool:
+    an unknown parameter must produce an error naming it — never a silently
+    unfiltered result. The check is central, so future tools inherit it."""
+    failures = []
+    for name in sorted(strict_server._tool_manager._tools):
+        try:
+            asyncio.run(strict_server.call_tool(name, {"_typo_param_": 1}))
+        except ToolError as e:
+            if "_typo_param_" not in str(e):
+                failures.append(f"{name}: error does not name the parameter: {e}")
+        except Exception as e:  # any other error shape is not the contract
+            failures.append(f"{name}: raised {type(e).__name__}: {e}")
+        else:
+            failures.append(f"{name}: no error — unknown parameter was silently dropped")
+    assert not failures, "strict-argument violations:\n" + "\n".join(failures)
+
+
+def test_clean_call_through_the_dispatch_unchanged(strict_server: Any) -> None:
+    """No regression: a call with only declared parameters runs the tool and
+    returns its JSON payload as before (the override passes clean calls
+    through untouched)."""
+    result = _dispatch_payload(strict_server, "who_calls", {"symbol": CALLER})
+    assert "error" not in result
+    assert result["total"] == 1
+    assert result["callers"][0]["name"] == "thing"  # display_name label, as ever
+
+
+def test_unknown_parameter_wins_over_missing_required_argument(
+    strict_server: Any,
+) -> None:
+    """The unknown-param check fires BEFORE argument validation: a call with
+    ONLY an unknown parameter reports the typo, not a misleading
+    missing-required-argument error (`find` requires `query`)."""
+    with pytest.raises(ToolError, match="_typo_param_"):
+        asyncio.run(strict_server.call_tool("find", {"_typo_param_": 1}))
+
+
+# --- input hygiene: a path/filter prefix matching nothing is an explicit error ---
+#
+# A typo'd include_paths/exclude_paths prefix used to look identical to "no
+# matches" — a silent narrowing. It must name the unmatched prefix instead.
+
+
+@pytest.mark.parametrize(
+    ("tool_args", "kwarg", "prefix"),
+    [
+        ({"symbol": CALLER}, "include_paths", "no/such/prefix"),
+        ({"symbol": CALLER}, "exclude_paths", "no/such/prefix"),
+    ],
+)
+def test_mcp_path_prefix_typo_is_an_explicit_error(
+    strict_server: Any, tool_args: dict, kwarg: str, prefix: str
+) -> None:
+    """An include OR exclude prefix matching zero indexed files is an explicit
+    error naming the prefix — on the MCP dict, not a silently narrowed result."""
+    result = _tool(strict_server, "who_calls")(**tool_args, **{kwarg: [prefix]})
+    assert "error" in result
+    assert "no/such/prefix" in result["error"]
+
+
+def test_mcp_typo_surfaces_through_the_real_dispatch(strict_server: Any) -> None:
+    """Same gate through `server.call_tool` — the strict-argument dispatch
+    passes declared parameters through, and the tool's error dict travels as
+    the isError-free JSON payload."""
+    payload = _dispatch_payload(
+        strict_server, "who_calls", {"symbol": CALLER, "include_paths": ["no/such/prefix"]}
+    )
+    assert "no/such/prefix" in payload["error"]
+
+
+def test_mcp_include_exclude_composition_matching_nothing_is_an_error(
+    strict_server: Any,
+) -> None:
+    """Every prefix individually matches something, but the composition
+    (include ∧ ¬exclude) cannot: say so, naming both sides — never a silent
+    empty result."""
+    result = _tool(strict_server, "who_calls")(
+        symbol=CALLER, include_paths=["src/mongo"], exclude_paths=["src/mongo"]
+    )
+    assert "error" in result
+    assert "include 'src/mongo' minus exclude 'src/mongo'" in result["error"]
+
+
+def test_mcp_valid_prefix_with_no_query_matches_is_a_normal_empty_result(
+    strict_server: Any,
+) -> None:
+    """THE key distinction: a prefix that matches indexed files but filters the
+    QUERY to zero is a normal (empty) result — no error. `src/mongo` is an
+    indexed directory; CALLER's only caller is defined under `src/other`."""
+    result = _tool(strict_server, "who_calls")(symbol=CALLER, include_paths=["src/mongo"])
+    assert "error" not in result
+    assert result["total"] == 0
+    assert result["callers"] == []
+
+
+def test_mcp_exclude_alone_matching_everything_is_a_normal_result(
+    strict_server: Any,
+) -> None:
+    """The mirror case: excluding a directory that exists but the query's
+    results don't come from — a normal, non-empty result, never an error.
+    (`src/mongo` is indexed — FOO is defined there — but CALLER's caller is
+    defined under `src/other`, so nothing is dropped.)"""
+    result = _tool(strict_server, "who_calls")(symbol=CALLER, exclude_paths=["src/mongo"])
+    assert "error" not in result
+    assert result["total"] == 1
+
+
+# Every tool that accepts include_paths/exclude_paths, with its minimal valid
+# arguments — the whole list the MCP tools' shared `_call` gate must cover.
+_PATH_FILTER_TOOLS: dict[str, dict[str, Any]] = {
+    "find": {"query": "makeResumeToken"},
+    "who_calls": {"symbol": CALLER},
+    "what_it_calls": {"symbol": CALLER},
+    "find_references": {"symbol": FOO},
+    "impact_of": {"symbol": FOO},
+    "reachable_from": {"symbol": CALLER},
+    "hotspots": {},
+    "dependency_cost": {"target_paths": ["src/"]},
+    "stats": {},
+    "line_span": {},
+    "no_incoming_calls": {},
+    "strongly_connected_components": {},
+}
+
+
+@pytest.mark.parametrize("tool_name", sorted(_PATH_FILTER_TOOLS))
+def test_mcp_every_path_filtered_tool_rejects_an_unmatched_prefix(
+    strict_server: Any, tool_name: str
+) -> None:
+    """The unmatched-prefix gate is wired into EVERY tool that accepts
+    include_paths/exclude_paths — one shared check, parametrized over the full
+    enumerated list, so a new tool cannot quietly skip it."""
+    result = _tool(strict_server, tool_name)(
+        **_PATH_FILTER_TOOLS[tool_name], include_paths=["no/such/prefix"]
+    )
+    assert "error" in result, tool_name
+    assert "no/such/prefix" in result["error"], tool_name

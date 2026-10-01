@@ -982,6 +982,22 @@ class GraphStore:
         (n,) = self._con.execute("SELECT COUNT(*) FROM files").fetchone()
         return n
 
+    def definition_files(self) -> set[str]:
+        """The distinct definition-file paths (nodes' `.file`) — the universe
+        the include/exclude path-prefix filters match against, and the file
+        set the unmatched-prefix hygiene check
+        (`cppgraph.filters.unmatched_path_prefixes`) consults. A symbol with
+        no recorded definition file (NULL `file_id`) is simply absent, and so
+        is a path interned only by an edge call site or a reference use site
+        with no definition in it. One SQL query per call, no instance cache:
+        a set build per *filtered* tool call is cheap against the interned
+        tables, and a cache would need invalidation on every `apply_update`
+        for no measured gain."""
+        rows = self._con.execute(
+            "SELECT DISTINCT f.path FROM symbols s JOIN files f ON s.file_id = f.id"
+        ).fetchall()
+        return {row[0] for row in rows}
+
     def _symbols_for_ids(self, ids: set[int]) -> dict[int, str]:
         out: dict[int, str] = {}
         ids_list = list(ids)

@@ -564,7 +564,16 @@ designing the builder so this isn't a later rewrite:
     tools and the CLI query commands (`callers`/`callees`/`impact`, with
     `--limit`, `--exclude-tests`/`--no-exclude-tests`, `--hide-trivial`,
     `--full-symbols`, `--include-path`/`--exclude-path`) — so the same question
-    gives the same answer whichever way it's asked.
+    gives the same answer whichever way it's asked. Input hygiene, both
+    surfaces one gate: a prefix matching zero indexed definition files — or an
+    include ∧ exclude composition that cannot be satisfied — is an explicit
+    error naming the prefix (`filters.path_prefix_error` over
+    `GraphStore.definition_files`), never a silent narrowing that reads as
+    "no matches"; a valid prefix that merely filters the query to zero stays a
+    normal (empty) result. On the MCP side the dispatch itself is
+    strict-argument: an unknown parameter name (a typo like `path=`) is
+    rejected with an error naming it, never silently dropped into an
+    unfiltered result.
     Measured effect on `who_calls` for a hub symbol: ~5.5× smaller payload
     (`scripts/measure_tokens.py`).
   - *Query quality*: `find` matches multiple words as an order-free AND (each

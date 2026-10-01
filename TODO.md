@@ -37,6 +37,13 @@ in `CHANGELOG.md`, releases in `versions.json`.
   setup flow) is still the right default now that the two heaviest costs (compile
   time, disk space) can often be skipped entirely — and publish an `x86_64-linux` patched
   asset too, the one platform still without one.
+- **Fetch the patched binary for the user, not by hand.** When `status`/`update` sees the
+  installed patched binary lagging the pinned patchset, it tells the user to re-run
+  `scripts/setup.sh --scip-source download-patched`. Offer instead to fetch → verify the
+  `.sha256` → atomically replace the binary in place, gated on an explicit yes (the same
+  consent rule as the patchset-triggered re-index — replacing an executable is not
+  nothing), then chain into the re-index. Only for an already-patched install, where the
+  source choice is unambiguous; stock / build / emulate stay manual.
 - **Contributing notes, CI (lint + pytest).** Repo is already public and past
   several releases (currently v0.4.0) — the "publish" half is done; what's still
   missing is a `CONTRIBUTING.md` and a `.github/workflows/` CI job running
@@ -144,18 +151,6 @@ in `CHANGELOG.md`, releases in `versions.json`.
   Code, Cursor, Codex, Gemini, Copilot, Kiro, Windsurf, AdaL from one source) — a reason to
   revisit the "Claude Code-only" premise if adoption data ever shows non-Claude usage
   demand, not a reason to build it speculatively now.
-
-- **MCP argument validation is lenient upstream (`mcp` SDK) — mistyped parameter
-  names are silently ignored.** An unknown/mistyped kwarg passed to an MCP tool
-  (e.g. `path=` instead of `include_paths=`) is accepted and dropped by the
-  underlying `mcp` SDK's default Pydantic argument validation (`ArgModelBase`
-  doesn't set `extra="forbid"`), so a typo silently produces an unfiltered/global
-  result instead of a clear failure — confirmed on `hotspots` via a live
-  `call_tool` (known upstream-library gap, **no local fix planned**: monkeypatching
-  a third-party library's pydantic model configs would be fragile). The four
-  path-scoping tools' docstrings (`hotspots`, `no_incoming_calls`, `line_span`,
-  `api_surface` in `mcp_server.py`) warn about it. A real fix needs the `mcp` SDK
-  to support strict/forbid-extra argument models.
 
 - **Split the three largest modules** (`store.py` ~2830 lines, `mcp_server.py`
   ~2700 lines, `cli.py` ~2700 lines) — grown mostly through this project's own
