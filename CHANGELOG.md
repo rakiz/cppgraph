@@ -4,6 +4,38 @@ All notable changes to cppgraph. The format follows
 [Keep a Changelog](https://keepachangelog.com/). This project is pre-1.0; the
 on-disk store also carries its own `schema_version` for forward-compatibility.
 
+## [0.4.7] - 2026-10-01
+
+### Added
+
+- **Bundled `/cppgraph` agent slash command** — `commands/cppgraph.md` at the
+  repo root (sibling of `skills/cppgraph/`), installed by `cppgraph setup`
+  (new stage S3c, `install_command`, sharing `install_skill`'s copy
+  machinery) into the per-user command dirs of every detected agent tool:
+  `~/.claude/commands/cppgraph.md` for Claude Code and
+  `<XDG_CONFIG_HOME:-~/.config>/opencode/command/cppgraph.md` (singular
+  `command`, opencode's documented dir) for opencode. Same detection,
+  keep-if-identical, and statuses as the skill install (`installed`/`kept`/
+  `not_detected`/`failed`). The command routes on the first word of
+  `$ARGUMENTS` — `status` (drift summary + `/cppgraph update`), `help`,
+  `index` (the agent-driven non-interactive index flow), `update`
+  (non-destructive re-run with the recorded scope), else a free-form graph
+  query — so the installed agent can drive indexing and queries without the
+  README walkthrough.
+
+### Fixed
+
+- **`scripts/uninstall.sh` now offers to remove the installed agent extras**
+  (a pre-existing gap: the installed skill was never offered). One new item
+  between the MCP and binary items asks once (default yes — setup re-creates
+  them trivially; auto-yes under `--yes`/`--purge`) to delete the installed
+  cppgraph skill and `/cppgraph` command from the detected agent tools'
+  per-user dirs (`~/.claude` skills + commands, opencode `skills/` +
+  `command/`), honoring plain `$HOME` and `XDG_CONFIG_HOME` exactly as
+  `setup_cmd` resolves them, removing only paths that exist via `rm_path`
+  (`--dry-run` still changes nothing, and a skill dir left empty by the
+  removal is cleaned up only when nothing else lives there).
+
 ## [0.4.6] - 2026-10-01
 
 ### Added

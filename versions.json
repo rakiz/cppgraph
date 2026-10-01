@@ -11,7 +11,7 @@
       "scip-clang-x86_64-linux": "06fd18c576f979a726c651594644ec4a35db4f471f2160b3f72eb89fa6001784"
     }
   },
-  "latest": "0.4.6",
+  "latest": "0.4.7",
   "releases": [
     {
       "version": "0.1.0",
@@ -78,6 +78,12 @@
       "rebuild": "none",
       "notes": "No schema change (still v5), safe to update in place. Masora injection hardening per the integration contract §9.8: the fact count is configurable (`CPPGRAPH_MASORA_MAX_FACTS`, default 2, higher allowed; the ≤60-token budget still wins with a visible cap) and input hygiene lands on both surfaces — unknown MCP tool parameters are rejected with an explicit error naming them (FastMCP used to silently drop them, returning unfiltered results), and a path-prefix filter matching no indexed file is an explicit error naming the prefix (MCP + CLI; a valid prefix with zero query matches stays a normal result). Full detail in `CHANGELOG.md`.",
       "url": "https://github.com/rakiz/cppgraph/releases/tag/v0.4.6"
+    },
+    {
+      "version": "0.4.7",
+      "rebuild": "none",
+      "notes": "No schema change (still v5), safe to update in place. A bundled `/cppgraph` agent slash command ships in-repo (`commands/cppgraph.md`) and `cppgraph setup` installs it into the Claude Code and opencode user command dirs (stage S3c, same detection and keep-if-identical statuses as the bundled skill); it routes on the first word of `$ARGUMENTS` — `status` (drift + update advice), `help`, `index` (the agent-driven non-interactive index flow), `update` (non-destructive re-run with the recorded scope), else a free-form graph query. `scripts/uninstall.sh` now also offers to remove the installed skill and command files, fixing the skill's pre-existing uninstall gap (one ask, `--dry-run`-aware, a skill dir removed only when left empty). Full detail in `CHANGELOG.md`.",
+      "url": "https://github.com/rakiz/cppgraph/releases/tag/v0.4.7"
     }
   ]
 }
