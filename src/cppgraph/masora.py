@@ -1,5 +1,5 @@
 """Masora fact injection — the cppgraph side of the integration contract
-(documented in masora's `docs/CPPGRAPH_INTEGRATION.md`, contract shape v1).
+(documented in masora's `docs/CPPGRAPH_INTEGRATION.md`, contract shape v2).
 
 Masora is a git-backed knowledge base of claims anchored to code symbols.
 When a query response is centered on symbol S and the feature is enabled,
@@ -25,6 +25,61 @@ uses the default, never an error (a config typo is a zero-change case, like
 every other failure here). The ≤ 60-token budget guidance STANDS: it wins
 over the fact count, so a higher count renders fewer lines plus the visible
 truncation line whenever the budget runs out first.
+
+Contract shape v2 (the current shape; NO dual-version window — masora ruled
+"v2 or nothing", so cppgraph accepts exactly `contract_version: 2` and
+rejects v1 and every other major like any unknown version): each fact
+additionally REQUIRES the four context stamps — `established_relation`
+(`str | null`; the known enum is `in_line | ahead | out_of_line | unknown`,
+and an unrecognized string value is parser-inert), `established_commit`
+(`str | null`, short 12 hex chars, presentation-only — a pointer for the
+rendered context, never an input to any comparison), `off_version` (a
+STRICT `bool` — a JSON int/str is a violation) and `context_ordering`
+(`str`; known enum `exact | degraded`, an unrecognized value is
+parser-inert). A fact MISSING any of the four is a shape violation → the
+WHOLE document rejects, fail-closed as every other shape error; explicit
+`null` is accepted for the two nullable stamps (`established_relation`,
+`established_commit`) but `context_ordering` null is a violation.
+
+Context rendering (§6 — "Masora evaluates, cppgraph renders"; the stamps
+are the trigger, cppgraph never computes git state): an indented context
+line renders under a fact line IFF ANY trigger fires — `off_version` is
+true; or `established_relation` is not null and not `in_line` (`ahead`,
+`out_of_line`, `unknown`, or an unrecognized value); or `context_ordering`
+is `degraded` (an unrecognized ordering value does NOT trigger). A null
+`established_relation` never triggers alone — its phrase, "context
+unproven", renders only when another trigger fired. ONE exception,
+short-circuited BEFORE the trigger test: a fact with `resolution: "none"`
+renders NO context line at all (nothing displays on a refuted lineage; the
+NOT: envelope already carries the negative knowledge). The line itself:
+two-space indent + `context: `, then in order `off-version` (when
+off_version), the relation phrase — `ahead` → "established ahead of this
+checkout", `out_of_line` → "established on another line", `unknown`/null →
+"context unproven", an unrecognized value → `established relation <value>`
+verbatim in the neutral forward-compatibility template, never mapped onto
+a pinned phrase, never guessed — with the short `established_commit`
+beside the phrase as `(12-hex)` when non-null, then `selection ordering
+degraded` (when degraded), the parts joined with `" — "` (a single part
+renders alone). The stamps never gate, upgrade or downgrade a status
+label, never reorder, filter or drop a fact, never join the dedup key
+(that stays `lineage`), and no branch name is ever rendered — the contract
+carries none. A fact line and its context line are ATOMIC in the budget
+and dedup logic: they render together or drop together, and the context
+line counts in the 60-token estimate (`est_tokens` runs over the joined
+text).
+
+Version-mismatch advisory — a deliberate carve-out from the silent skip:
+after a successful spawn, a stdout that parses as a JSON dict whose
+`contract_version` is a strict integer (a JSON bool is invalid even where
+the language conflates bool and int) OTHER than 2 returns exactly ONE
+advisory line instead of facts — newer: `masora: [facts contract v{n}
+unsupported — update cppgraph]`; older: `masora: [facts contract v{n} —
+update masora]`. Every other failure mode stays silent. Contract friction
+to relay to masora: the contract's letter says an unknown major version
+"renders nothing" — cppgraph renders no FACTS from an unknown shape (that
+posture is unchanged), but surfaces the toolchain mismatch itself, one
+terse line, because a silent skip is indistinguishable from "no facts" and
+would strand a user on a stale toolchain with no signal at all.
 
 Rendering decisions (§6 latitude, pinned here):
 - statuses surface as labels: resolution first (`current` / `stale` /
@@ -65,7 +120,8 @@ Rendering decisions (§6 latitude, pinned here):
   budget, never a silent drop. At least one fact always renders.
 - duplicate `lineage` ids are deduped (first occurrence wins).
 
-Contract enrichment (still `contract_version: 1`): each fact may carry
+Contract enrichment (additive-optional since v1, carried into v2
+unchanged): each fact may carry
 `source` (`human|llm|graph` or null), `name` (str or null), `effort`
 (`low|medium|high` or null) and `anchors` (list of str). All four are
 ADDITIVE-OPTIONAL — absent or null defaults, so pre-enrichment documents
@@ -85,9 +141,11 @@ tolerated ONCE: any future shape evolution must be a major
 bullet is historical record, not an open request.
 
 Zero-change guarantee (§7): any failure mode — missing binary, non-zero
-exit, timeout, unparsable output, unknown `contract_version`, any exception —
-degrades to "no injection" (`query_lines` returns `[]`), never an error
-surfaced to the user. cppgraph is a read-only consumer: it only ever spawns
+exit, timeout, unparsable output, any exception — degrades to "no
+injection" (`query_lines` returns `[]`), never an error surfaced to the
+user; the one deliberate carve-out is the strict-integer version-mismatch
+advisory above (one advisory line, still never an error, still no facts
+from an unknown shape). cppgraph is a read-only consumer: it only ever spawns
 the command with `--repo` pointing at the checkout the graph was built from
 (the store's recorded `project_root`; a legacy graph with no recorded root
 falls back to the cwd; a recorded root missing on disk skips injection
@@ -113,7 +171,7 @@ from cppgraph.store import project_root_path
 
 ENV_VAR = "CPPGRAPH_MASORA"
 MAX_FACTS_ENV_VAR = "CPPGRAPH_MASORA_MAX_FACTS"
-CONTRACT_VERSION = 1
+CONTRACT_VERSION = 2
 FACTS_TIMEOUT_S = 2.0
 MAX_FACTS = 2
 TOKEN_BUDGET = 60
@@ -130,8 +188,11 @@ Which = Callable[[str], str | None]
 class Fact:
     """One §3 fact, fields the renderer needs; unknown shapes never get here.
 
-    Of the v1 enrichment fields only `effort` is stored (it feeds the
-    confidence matrix); `source`, `name`, and `anchors` — like
+    The four v2 context stamps (§3, required) ride along for the §6 context
+    rule: `established_relation` / `established_commit` are the git stamps —
+    rendered, never analyzed — and `off_version` / `context_ordering`
+    qualify the display. Of the v1 enrichment fields only `effort` is stored
+    (it feeds the confidence matrix); `source`, `name`, and `anchors` — like
     `anchors_matched` — are type-validated in `parse_contract` and never
     consumed for rendering.
     """
@@ -141,12 +202,16 @@ class Fact:
     resolution: str
     verification: str
     flags: tuple[str, ...]
+    established_relation: str | None
+    established_commit: str | None
+    off_version: bool
+    context_ordering: str
     effort: str | None = None
 
 
 @dataclass(frozen=True)
 class Contract:
-    """The §3 document, parsed. Only contract shape v1 parses to one."""
+    """The §3 document, parsed. Only contract shape v2 parses to one."""
 
     facts: tuple[Fact, ...]
     stale_warning: bool | None
@@ -286,15 +351,24 @@ def run_masora_facts(repo_root: str, symbol: str | None, timeout: float) -> str 
 
 
 def parse_contract(stdout: str) -> Contract | None:
-    """Parse the §3 JSON document; None when it is not a contract-v1 document
-    (unparsable, wrong shape, unknown/missing major version) — fail-closed,
-    the caller renders nothing. Per-fact fields are equally strict: a present
-    field of the wrong type (`summary`, `resolution`, `lineage`, `flags`,
-    `verification`, `anchors_matched`) rejects the WHOLE document — no
-    partial delivery. Absent (or null) optional fields default instead:
-    `lineage` to no-dedup, `flags` to none, `verification` to unrendered,
-    `anchors_matched` to empty (it is validated, never consumed — a str item
-    list per §3)."""
+    """Parse the §3 JSON document; None when it is not a contract-v2 document
+    (unparsable, wrong shape, unknown/missing major version — v2 or nothing:
+    there is no dual-version window, so a v1 document rejects like any other
+    unknown version) — fail-closed, the caller renders nothing. Per-fact
+    fields are equally strict: a present field of the wrong type (`summary`,
+    `resolution`, `lineage`, `flags`, `verification`, `anchors_matched`) AND
+    a MISSING required field (the four v2 context stamps —
+    `established_relation`, `established_commit`, `off_version`,
+    `context_ordering`) reject the WHOLE document — no partial delivery.
+    Nullable requirements: explicit `null` is accepted for the two nullable
+    stamps (`established_relation`, `established_commit`); `context_ordering`
+    null is a violation. Enum VALUES are not shape: an unrecognized
+    `established_relation` / `context_ordering` (like an unknown
+    `resolution` / `effort` / `source`) is parser-inert — rendering, not
+    rejection, is where unknown values get a voice. Absent (or null)
+    optional fields default instead: `lineage` to no-dedup, `flags` to none,
+    `verification` to unrendered, `anchors_matched` to empty (it is
+    validated, never consumed — a str item list per §3)."""
     try:
         doc = json.loads(stdout)
     except (json.JSONDecodeError, ValueError):
@@ -343,6 +417,33 @@ def parse_contract(stdout: str) -> Contract | None:
             verification = ""
         if not isinstance(verification, str):
             return None
+        # v2 context stamps (§3, REQUIRED — a fact missing one is a shape
+        # violation): fail-closed like every other shape error. A wrong TYPE
+        # rejects the whole document; an unknown enum VALUE is parser-inert
+        # (rendering decides what it means — see `_context_line`).
+        if "established_relation" not in raw:
+            return None
+        established_relation = raw["established_relation"]
+        if established_relation is not None and not isinstance(established_relation, str):
+            return None
+        if "established_commit" not in raw:
+            return None
+        established_commit = raw["established_commit"]
+        if established_commit is not None and not isinstance(established_commit, str):
+            return None
+        off_version = raw.get("off_version")
+        if not isinstance(off_version, bool):
+            # STRICT bool — a JSON int (0/1), str, null, or absent field is a
+            # violation (the same strictness as `contract_version` itself,
+            # which a bool would otherwise slip past numerically).
+            return None
+        if "context_ordering" not in raw:
+            return None
+        context_ordering = raw["context_ordering"]
+        if not isinstance(context_ordering, str):
+            # Null is a violation here (the selection's ordering is always
+            # known: exact/degraded) — unlike the two nullable stamps above.
+            return None
         # v1 enrichment (additive-optional): absent or null defaults, a wrong
         # TYPE rejects the whole document, an unknown enum VALUE is tolerated
         # and inert — the same posture as an unknown `resolution` value.
@@ -375,6 +476,10 @@ def parse_contract(stdout: str) -> Contract | None:
                 resolution=resolution,
                 verification=verification,
                 flags=flags,
+                established_relation=established_relation,
+                established_commit=established_commit,
+                off_version=off_version,
+                context_ordering=context_ordering,
                 effort=effort,
             )
         )
@@ -433,13 +538,58 @@ def _fact_line(fact: Fact) -> str:
     return f"masora: {fact.summary} [{rendered}]"
 
 
+def _context_line(fact: Fact) -> str | None:
+    """The §6 context label, rendered from the stamps ONLY — never computed,
+    never treated as validity. Renders iff any trigger fires (`off_version`,
+    a non-`in_line` relation, a `degraded` ordering); `resolution: "none"`
+    short-circuits to None BEFORE the trigger test (nothing displays on a
+    refuted lineage — the NOT: envelope carries the negative knowledge). A
+    null relation never triggers alone, but renders "context unproven" when
+    another trigger fired; an unrecognized relation value renders VERBATIM
+    in the neutral forward-compatibility template, never guessed. The short
+    `established_commit` renders beside the relation phrase as a pointer
+    when non-null — with no relation phrase (an `in_line` fact) there is
+    nothing to point at, so it does not render."""
+    if fact.resolution == "none":
+        return None
+    relation = fact.established_relation
+    degraded = fact.context_ordering == "degraded"
+    relation_triggers = relation is not None and relation != "in_line"
+    if not (fact.off_version or relation_triggers or degraded):
+        return None
+    parts: list[str] = []
+    if fact.off_version:
+        parts.append("off-version")
+    if relation != "in_line":
+        if relation is None or relation == "unknown":
+            phrase = "context unproven"
+        elif relation == "ahead":
+            phrase = "established ahead of this checkout"
+        elif relation == "out_of_line":
+            phrase = "established on another line"
+        else:
+            # Forward compatibility (§6): a value this reader does not know
+            # renders verbatim in the neutral template — never mapped onto a
+            # pinned phrase, never guessed.
+            phrase = f"established relation {relation}"
+        if fact.established_commit is not None:
+            phrase = f"{phrase} ({fact.established_commit})"
+        parts.append(phrase)
+    if degraded:
+        parts.append("selection ordering degraded")
+    return "  context: " + " — ".join(parts)
+
+
 def render_lines(contract: Contract, *, max_facts: int = MAX_FACTS) -> list[str]:
     """§6: at most `max_facts` fact lines within the token budget, one terse
-    line each, any cap reported visibly; the stale-index note (when present)
-    renders first — but only alongside facts: zero matching facts injects
-    nothing at all, stale index or not (§1: no output without matching
-    facts). At least one fact renders even when it alone exceeds the budget —
-    a lone oversized fact is still worth more than a bare cap.
+    line each (plus its indented context line when the §6 v2 trigger fires —
+    the pair is ATOMIC: it renders together or drops together, and the
+    context line counts in the estimate), any cap reported visibly; the
+    stale-index note (when present) renders first — but only alongside
+    facts: zero matching facts injects nothing at all, stale index or not
+    (§1: no output without matching facts). At least one fact renders even
+    when it alone exceeds the budget — a lone oversized fact (context line
+    included) is still worth more than a bare cap.
 
     `max_facts` is the configured count (`max_facts(env)` — default
     MAX_FACTS), and the token budget WINS over it: when rendering the
@@ -453,18 +603,54 @@ def render_lines(contract: Contract, *, max_facts: int = MAX_FACTS) -> list[str]
     dropped = 0
     cap = max(1, max_facts)
     for i, fact in enumerate(contract.facts):
-        line = _fact_line(fact)
-        over = est_tokens("\n".join([*lines, line])) > TOKEN_BUDGET
+        fact_line = _fact_line(fact)
+        context = _context_line(fact)
+        # The fact line and its context line are ATOMIC (§6): they render
+        # together or drop together, and the context line counts in the
+        # token estimate — est_tokens runs over the joined text, as it ran
+        # over the lone line before v2. The returned list stays FLAT: one
+        # element per rendered line, the context line right after its fact.
+        block = fact_line if context is None else f"{fact_line}\n{context}"
+        over = est_tokens("\n".join([*lines, block])) > TOKEN_BUDGET
         if kept >= cap or (kept and over):
             dropped = len(contract.facts) - i
             break
-        lines.append(line)
+        lines.append(fact_line)
+        if context is not None:
+            lines.append(context)
         kept += 1
     if not kept:
         return []
     if dropped:
         lines.append(_TRUNCATION_LINE.format(n=dropped))
     return lines
+
+
+def mismatch_advisory(stdout: str) -> str | None:
+    """The version-mismatch advisory (a deliberate carve-out from the silent
+    skip): when stdout parses as a JSON dict whose `contract_version` is a
+    strict integer (a JSON bool is invalid even where the language conflates
+    bool and int) OTHER than `CONTRACT_VERSION`, return the one-line
+    advisory — a newer contract: `masora: [facts contract v{n} unsupported —
+    update cppgraph]`; an older one: `masora: [facts contract v{n} — update
+    masora]`. None — silence, the zero-change posture — for unparsable JSON,
+    a non-dict document, a missing/bool/non-integer version, and the
+    matching version itself. The advisory carries no facts: cppgraph knows
+    nothing about another major's shape, so nothing from it ever renders."""
+    try:
+        doc = json.loads(stdout)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(doc, dict):
+        return None
+    version = doc.get("contract_version")
+    if isinstance(version, bool) or not isinstance(version, int):
+        return None
+    if version == CONTRACT_VERSION:
+        return None
+    if version > CONTRACT_VERSION:
+        return f"masora: [facts contract v{version} unsupported — update cppgraph]"
+    return f"masora: [facts contract v{version} — update masora]"
 
 
 def query_lines(
@@ -478,10 +664,13 @@ def query_lines(
 ) -> list[str]:
     """The entry point query responses call to inject Masora facts: flag
     check → binary detection → one `masora facts` spawn for the resolved
-    symbol → contract-v1 parse → §6 render (the fact count resolved from
-    `CPPGRAPH_MASORA_MAX_FACTS` in the same env the flag is read from).
-    Returns the rendered lines — `[]` whenever the feature is off or nothing
-    injects, and never raises (the zero-change guarantee)."""
+    symbol → version-mismatch advisory (the one-line carve-out from silent
+    skip — see `mismatch_advisory`) → contract-v2 parse → §6 render (the
+    fact count resolved from `CPPGRAPH_MASORA_MAX_FACTS` in the same env the
+    flag is read from). Returns the rendered lines — `[]` whenever the
+    feature is off or nothing injects, the single advisory line on a strict-
+    integer version mismatch, and never a raise (the zero-change
+    guarantee)."""
     if not enabled(env):
         return []
     if which("masora") is None:
@@ -493,6 +682,12 @@ def query_lines(
         stdout = runner(root, symbol, timeout)
         if stdout is None:
             return []
+        advisory = mismatch_advisory(stdout)
+        if advisory is not None:
+            # The carve-out: a strict-integer version mismatch is worth one
+            # terse line (update cppgraph / update masora) where every other
+            # failure stays silent — see `mismatch_advisory`.
+            return [advisory]
         contract = parse_contract(stdout)
         if contract is None:
             return []

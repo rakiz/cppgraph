@@ -1670,7 +1670,7 @@ _NO_GRAPH = {
 
 
 def _masora_field(result: dict[str, Any], store: GraphStore | None) -> None:
-    """Attach Masora fact lines (contract v1, see `cppgraph.masora`) to a
+    """Attach Masora fact lines (contract v2, see `cppgraph.masora`) to a
     single-symbol query response as the `masora` string field — the rendered
     §6 lines joined with newlines. Present only when something actually
     injected (flag on, binary found, contract parsed); absent otherwise, and

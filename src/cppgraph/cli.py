@@ -341,7 +341,7 @@ def _resolve_symbol(
 
 
 def _print_masora_lines(store: GraphStore, symbol: str) -> None:
-    """Append Masora fact lines (contract v1, see `cppgraph.masora`) to a
+    """Append Masora fact lines (contract v2, see `cppgraph.masora`) to a
     single-symbol query's text output — the CLI half of the shared
     `masora.query_lines`. Prints nothing when the feature is off or nothing
     injects (missing binary, failure, no matching base): the zero-change

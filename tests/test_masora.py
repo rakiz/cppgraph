@@ -1,4 +1,4 @@
-"""Tests for the Masora fact injection (contract v1, masora.py).
+"""Tests for the Masora fact injection (contract v2, masora.py).
 
 Everything runs against a stub `masora` executable (an env-var-driven shell
 script on PATH) or injected runner callables — never a real Masora install.
@@ -46,8 +46,21 @@ exit "${MASORA_STUB_EXIT:-0}"
 """
 
 
+CTX_SILENT: dict[str, Any] = {
+    "established_relation": "in_line",
+    "established_commit": "1a1a8e1f4e5a",
+    "off_version": False,
+    "context_ordering": "exact",
+}
+"""The silent v2 context stamp (no trigger fires) for hand-built facts.
+
+Every hand-built fact JSON must carry the four v2 context fields — they are
+required per fact — and this combination renders byte-identically to v1.
+Missing-field tests deliberately do NOT use this spread."""
+
+
 def fact_doc(**overrides: Any) -> dict[str, Any]:
-    """One contract-v1 fact shaped like §3's first example."""
+    """One contract-v2 fact shaped like §3's first example (silent stamp)."""
     fact = {
         "lineage": "01J8Z3K0000000000000000000",
         "summary": "Resume token invalidated by a shard key change",
@@ -55,13 +68,17 @@ def fact_doc(**overrides: Any) -> dict[str, Any]:
         "verification": "verified(llm)",
         "flags": "-",
         "anchors_matched": ["scip-clang cxx . . mongo/ResumeTokenData#makeResumeToken()."],
+        "established_relation": "in_line",
+        "established_commit": "1a1a8e1f4e5a",
+        "off_version": False,
+        "context_ordering": "exact",
     }
     fact.update(overrides)
-    return {"contract_version": 1, "stale_warning": False, "facts": [fact]}
+    return {"contract_version": 2, "stale_warning": False, "facts": [fact]}
 
 
 def doc_with(*facts: dict[str, Any], **doc_overrides: Any) -> dict[str, Any]:
-    doc = {"contract_version": 1, "stale_warning": False, "facts": list(facts)}
+    doc = {"contract_version": 2, "stale_warning": False, "facts": list(facts)}
     doc.update(doc_overrides)
     return doc
 
@@ -195,6 +212,7 @@ def test_max_two_facts_kept_and_truncation_visible(
             "resolution": "current",
             "verification": "unverified",
             "flags": "-",
+            **CTX_SILENT,
         }
         for i in range(5)
     ]
@@ -218,6 +236,7 @@ def test_two_short_facts_both_render_without_truncation(
             "resolution": "current",
             "verification": "unverified",
             "flags": "-",
+            **CTX_SILENT,
         },
         {
             "lineage": "b",
@@ -225,6 +244,7 @@ def test_two_short_facts_both_render_without_truncation(
             "resolution": "current",
             "verification": "unverified",
             "flags": "-",
+            **CTX_SILENT,
         },
     )
     monkeypatch.setenv("MASORA_STUB_STDOUT", json.dumps(doc))
@@ -241,6 +261,7 @@ def test_duplicate_lineages_deduped(stub_masora: Path, monkeypatch: pytest.Monke
             "resolution": "current",
             "verification": "unverified",
             "flags": "-",
+            **CTX_SILENT,
         },
         {
             "lineage": "a",
@@ -248,6 +269,7 @@ def test_duplicate_lineages_deduped(stub_masora: Path, monkeypatch: pytest.Monke
             "resolution": "current",
             "verification": "unverified",
             "flags": "-",
+            **CTX_SILENT,
         },
     )
     monkeypatch.setenv("MASORA_STUB_STDOUT", json.dumps(doc))
@@ -275,6 +297,7 @@ def test_stale_warning_rendered_terse_and_first(
             "resolution": "current",
             "verification": "unverified",
             "flags": "-",
+            **CTX_SILENT,
         },
         stale_warning=True,
     )
@@ -367,10 +390,13 @@ def test_runner_exception_never_surfaces(stub_masora: Path) -> None:
 # --- (g) unknown contract_version ----------------------------------------------
 
 
-@pytest.mark.parametrize("version", [2, 0, "1", None])
-def test_unknown_or_missing_contract_version_renders_nothing(
+@pytest.mark.parametrize("version", ["1", None])
+def test_non_integer_or_missing_contract_version_renders_nothing(
     stub_masora: Path, monkeypatch: pytest.MonkeyPatch, version: Any
 ) -> None:
+    """A non-integer or missing version stays SILENT (zero-change). Strict
+    integer mismatches (v0/v1/v3+) now return the one-line advisory instead
+    (see the advisory tests), and version 2 renders."""
     monkeypatch.setenv("CPPGRAPH_MASORA", "1")
     doc = fact_doc()
     if version is None:
@@ -390,6 +416,84 @@ def test_boolean_contract_version_rejected(
     doc["contract_version"] = version
     monkeypatch.setenv("CPPGRAPH_MASORA", "1")
     monkeypatch.setenv("MASORA_STUB_STDOUT", json.dumps(doc))
+    assert masora.query_lines({}, FOO, env=dict(os.environ)) == []
+
+
+# --- version-mismatch advisory (the one-line carve-out from silent skip) ---------
+
+
+def test_mismatch_advisory_matrix() -> None:
+    """A strict-int `contract_version` != 2 → the one-line advisory (newer:
+    update cppgraph; older: update masora). Everything else — unparsable
+    JSON, non-dict document, missing/bool/str version, and 2 itself — is
+    silence."""
+    assert masora.mismatch_advisory(json.dumps({"contract_version": 3})) == (
+        "masora: [facts contract v3 unsupported — update cppgraph]"
+    )
+    assert masora.mismatch_advisory(json.dumps({"contract_version": 99})) == (
+        "masora: [facts contract v99 unsupported — update cppgraph]"
+    )
+    assert masora.mismatch_advisory(json.dumps({"contract_version": 1})) == (
+        "masora: [facts contract v1 — update masora]"
+    )
+    assert masora.mismatch_advisory(json.dumps({"contract_version": 0})) == (
+        "masora: [facts contract v0 — update masora]"
+    )
+    assert masora.mismatch_advisory(json.dumps({"contract_version": 2})) is None
+    for silent in (
+        "",
+        "not json",
+        "[]",
+        '"a string"',
+        "{}",
+        '{"contract_version": true}',
+        '{"contract_version": false}',
+        '{"contract_version": "3"}',
+        '{"contract_version": null}',
+        '{"no_version": 3}',
+    ):
+        assert masora.mismatch_advisory(silent) is None, silent
+
+
+def test_advisory_newer_version_renders_one_line_no_facts(
+    stub_masora: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("CPPGRAPH_MASORA", "1")
+    doc = fact_doc()
+    doc["contract_version"] = 3
+    monkeypatch.setenv("MASORA_STUB_STDOUT", json.dumps(doc))
+    assert masora.query_lines({}, FOO, env=dict(os.environ)) == [
+        "masora: [facts contract v3 unsupported — update cppgraph]"
+    ]
+
+
+def test_advisory_older_version_renders_one_line(
+    stub_masora: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("CPPGRAPH_MASORA", "1")
+    doc = fact_doc()
+    doc["contract_version"] = 1
+    monkeypatch.setenv("MASORA_STUB_STDOUT", json.dumps(doc))
+    assert masora.query_lines({}, FOO, env=dict(os.environ)) == [
+        "masora: [facts contract v1 — update masora]"
+    ]
+
+
+@pytest.mark.parametrize(
+    "stdout",
+    [
+        '{"contract_version": true, "facts": []}',
+        '{"stale_warning": false}',
+        "garbage{",
+    ],
+)
+def test_version_shapes_that_stay_silent(
+    stub_masora: Path, monkeypatch: pytest.MonkeyPatch, stdout: str
+) -> None:
+    """No advisory for unparsable output, a bool version, or a missing one —
+    those stay with the zero-change silence."""
+    monkeypatch.setenv("CPPGRAPH_MASORA", "1")
+    monkeypatch.setenv("MASORA_STUB_STDOUT", stdout)
     assert masora.query_lines({}, FOO, env=dict(os.environ)) == []
 
 
@@ -414,21 +518,38 @@ def test_boolean_contract_version_rejected(
 def test_malformed_fact_field_rejects_whole_document(field_override: dict[str, Any]) -> None:
     doc = fact_doc()
     doc["facts"].append(
-        {"lineage": "ok-lineage", "summary": "fine", "resolution": "current", **field_override}
+        {
+            "lineage": "ok-lineage",
+            "summary": "fine",
+            "resolution": "current",
+            **CTX_SILENT,
+            **field_override,
+        }
     )
     assert masora.parse_contract(json.dumps(doc)) is None
 
 
 def test_absent_flag_fields_tolerated() -> None:
     """Absent (or null) optional fact fields default; only a present-but-wrong
-    type rejects the document."""
-    fact = {"summary": "s", "resolution": "current"}
+    type rejects the document. The four v2 context fields are REQUIRED — they
+    ride along explicitly here."""
+    fact = {"summary": "s", "resolution": "current", **CTX_SILENT}
     contract = masora.parse_contract(
-        json.dumps({"contract_version": 1, "stale_warning": False, "facts": [fact]})
+        json.dumps({"contract_version": 2, "stale_warning": False, "facts": [fact]})
     )
     assert contract is not None
     assert contract.facts == (
-        masora.Fact(lineage="", summary="s", resolution="current", verification="", flags=()),
+        masora.Fact(
+            lineage="",
+            summary="s",
+            resolution="current",
+            verification="",
+            flags=(),
+            established_relation="in_line",
+            established_commit="1a1a8e1f4e5a",
+            off_version=False,
+            context_ordering="exact",
+        ),
     )
 
 
@@ -438,11 +559,109 @@ def test_query_with_one_valid_one_malformed_fact_injects_nothing(
     """No partial delivery: a single malformed fact poisons the whole document."""
     doc = fact_doc()
     doc["facts"].append(
-        {"lineage": "ok-lineage", "summary": 123, "resolution": "current", "flags": "-"}
+        {
+            "lineage": "ok-lineage",
+            "summary": 123,
+            "resolution": "current",
+            "flags": "-",
+            **CTX_SILENT,
+        }
     )
     monkeypatch.setenv("CPPGRAPH_MASORA", "1")
     monkeypatch.setenv("MASORA_STUB_STDOUT", json.dumps(doc))
     assert masora.query_lines({}, FOO, env=dict(os.environ)) == []
+
+
+# --- contract v2: the four context fields (parser) -------------------------------
+
+
+def test_v2_document_parses_with_context_fields() -> None:
+    contract = masora.parse_contract(json.dumps(fact_doc()))
+    assert contract is not None
+    fact = contract.facts[0]
+    assert fact.established_relation == "in_line"
+    assert fact.established_commit == "1a1a8e1f4e5a"
+    assert fact.off_version is False
+    assert fact.context_ordering == "exact"
+
+
+def test_v1_document_rejected() -> None:
+    """No dual-version window: the contract is v2 or nothing — a v1 document
+    is an unknown major, rejected like any other."""
+    doc = fact_doc()
+    doc["contract_version"] = 1
+    assert masora.parse_contract(json.dumps(doc)) is None
+
+
+@pytest.mark.parametrize("version", [True, False])
+def test_v2_boolean_version_rejected_at_parse(version: bool) -> None:
+    """A JSON bool would compare == 1 numerically; the parser rejects it
+    before any version comparison."""
+    doc = fact_doc()
+    doc["contract_version"] = version
+    assert masora.parse_contract(json.dumps(doc)) is None
+
+
+@pytest.mark.parametrize(
+    "field", ["established_relation", "established_commit", "off_version", "context_ordering"]
+)
+def test_missing_v2_field_rejects_whole_document(field: str) -> None:
+    """The four context stamps are REQUIRED per fact in v2: a fact missing
+    one is a shape violation → the whole document rejects (fail-closed, no
+    partial delivery)."""
+    doc = fact_doc()
+    del doc["facts"][0][field]
+    assert masora.parse_contract(json.dumps(doc)) is None
+
+
+@pytest.mark.parametrize(
+    "field_override",
+    [
+        {"established_relation": 5},
+        {"established_relation": ["ahead"]},
+        {"established_commit": 12},
+        {"established_commit": ["9f8e7d6c5b4a"]},
+        {"off_version": 1},
+        {"off_version": "true"},
+        {"off_version": None},
+        {"context_ordering": 7},
+        {"context_ordering": ["exact"]},
+        {"context_ordering": None},
+    ],
+)
+def test_v2_field_wrong_type_rejects_whole_document(field_override: dict[str, Any]) -> None:
+    """`off_version` is a STRICT bool (a JSON int/str/null is a violation);
+    the other three must be str-or-null (`context_ordering` may not even be
+    null)."""
+    doc = fact_doc()
+    doc["facts"][0].update(field_override)
+    assert masora.parse_contract(json.dumps(doc)) is None
+
+
+@pytest.mark.parametrize("fields", [{"established_relation": None}, {"established_commit": None}])
+def test_v2_nullable_stamps_explicit_null_accepted(fields: dict[str, Any]) -> None:
+    doc = fact_doc()
+    doc["facts"][0].update(fields)
+    assert masora.parse_contract(json.dumps(doc)) is not None
+
+
+def test_unknown_relation_value_inert_to_parser() -> None:
+    """An unrecognized `established_relation` is parser-inert (the document
+    is accepted) — enum VALUES are not shape; it still triggers the context
+    label (§6 forward compatibility)."""
+    doc = fact_doc(established_relation="rebased")
+    contract = masora.parse_contract(json.dumps(doc))
+    assert contract is not None
+    assert contract.facts[0].established_relation == "rebased"
+
+
+def test_unknown_ordering_value_inert_to_parser() -> None:
+    """Same inert posture for an unrecognized `context_ordering` value —
+    but it does NOT trigger the context label (only `degraded` does)."""
+    doc = fact_doc(context_ordering="fuzzy")
+    contract = masora.parse_contract(json.dumps(doc))
+    assert contract is not None
+    assert contract.facts[0].context_ordering == "fuzzy"
 
 
 # --- never-zero rule + stale-with-no-facts --------------------------------------
@@ -462,6 +681,7 @@ def test_single_oversized_fact_still_renders(
             "resolution": "current",
             "verification": "unverified",
             "flags": "-",
+            **CTX_SILENT,
         }
     )
     monkeypatch.setenv("CPPGRAPH_MASORA", "1")
@@ -502,6 +722,7 @@ def test_budget_holds_for_the_max_case(stub_masora: Path, monkeypatch: pytest.Mo
             "resolution": "current",
             "verification": "verified(llm)",
             "flags": "-",
+            **CTX_SILENT,
         },
         {
             "lineage": "b",
@@ -509,6 +730,7 @@ def test_budget_holds_for_the_max_case(stub_masora: Path, monkeypatch: pytest.Mo
             "resolution": "current",
             "verification": "verified(llm)",
             "flags": "-",
+            **CTX_SILENT,
         },
     )
     monkeypatch.setenv("MASORA_STUB_STDOUT", json.dumps(doc))
@@ -529,6 +751,7 @@ def test_resolution_none_renders_as_negative_knowledge(
             "resolution": "none",
             "verification": "unverified",
             "flags": "-",
+            **CTX_SILENT,
         }
     )
     monkeypatch.setenv("MASORA_STUB_STDOUT", json.dumps(doc))
@@ -545,12 +768,223 @@ def test_status_labels_surface_as_such(stub_masora: Path, monkeypatch: pytest.Mo
             "resolution": "stale",
             "verification": "unverified",
             "flags": "suspect",
+            **CTX_SILENT,
         }
     )
     monkeypatch.setenv("MASORA_STUB_STDOUT", json.dumps(doc))
     assert masora.query_lines({}, FOO, env=dict(os.environ)) == [
         "masora: Lock L must be held before calling commitShard [stale, suspect — re-check]"
     ]
+
+
+# --- contract v2: the context line (rendering matrix) -----------------------------
+
+
+def _fact(**overrides: Any) -> masora.Fact:
+    """A v2 Fact at the silent stamp (no trigger fires); override to trigger."""
+    fields: dict[str, Any] = {
+        "lineage": "a",
+        "summary": "claim",
+        "resolution": "current",
+        "verification": "unverified",
+        "flags": (),
+        "established_relation": "in_line",
+        "established_commit": "1a1a8e1f4e5a",
+        "off_version": False,
+        "context_ordering": "exact",
+    }
+    fields.update(overrides)
+    return masora.Fact(**fields)
+
+
+def _render(fact: masora.Fact) -> list[str]:
+    return masora.render_lines(masora.Contract(facts=(fact,), stale_warning=False))
+
+
+def test_silent_stamp_is_byte_identical_to_v1_rendering() -> None:
+    """`in_line` + `exact` + `off_version: false` renders NO context line —
+    the common case costs exactly what it cost under v1."""
+    assert _render(_fact()) == ["masora: claim [current]"]
+
+
+@pytest.mark.parametrize(
+    ("fact", "context"),
+    [
+        pytest.param(_fact(off_version=True), "  context: off-version", id="off_version"),
+        pytest.param(
+            _fact(established_relation="ahead"),
+            "  context: established ahead of this checkout (1a1a8e1f4e5a)",
+            id="ahead",
+        ),
+        pytest.param(
+            _fact(established_relation="out_of_line"),
+            "  context: established on another line (1a1a8e1f4e5a)",
+            id="out_of_line",
+        ),
+        pytest.param(
+            _fact(established_relation="unknown"),
+            "  context: context unproven (1a1a8e1f4e5a)",
+            id="unknown-relation",
+        ),
+        pytest.param(
+            _fact(established_relation="rebased"),
+            "  context: established relation rebased (1a1a8e1f4e5a)",
+            id="unrecognized-relation-verbatim",
+        ),
+        pytest.param(
+            _fact(context_ordering="degraded"),
+            "  context: selection ordering degraded",
+            id="degraded",
+        ),
+    ],
+)
+def test_context_line_triggers(fact: masora.Fact, context: str) -> None:
+    """One context line per fired trigger, assembled in order: off-version,
+    then the relation phrase with the commit beside it, then the degraded
+    note — joined with ' — '. An unrecognized relation renders verbatim in
+    the neutral template, never guessed; with no relation phrase (in_line)
+    there is nothing for the commit to point at, so it does not render."""
+    assert _render(fact) == ["masora: claim [current]", context]
+
+
+def test_resolution_none_never_renders_context() -> None:
+    """The ONE exception, short-circuited before the trigger test: a
+    `resolution: "none"` fact renders no context line even with EVERY
+    trigger set — the NOT: envelope already carries the negative knowledge."""
+    fact = _fact(
+        resolution="none",
+        established_relation=None,
+        established_commit=None,
+        off_version=True,
+        context_ordering="degraded",
+    )
+    assert _render(fact) == ["masora NOT: claim [refuted]"]
+
+
+def test_null_relation_exact_renders_no_context() -> None:
+    """A null relation never triggers alone: a stale fact with unproven
+    context and exact ordering renders exactly the v1 line."""
+    fact = _fact(resolution="stale", established_relation=None, established_commit=None)
+    assert _render(fact) == ["masora: claim [stale — re-check]"]
+
+
+def test_null_relation_degraded_renders_unproven_and_degraded() -> None:
+    """Null relation + degraded: the line renders (degraded fired) with
+    'context unproven' (the null relation's phrase) and the degraded note."""
+    fact = _fact(
+        established_relation=None,
+        established_commit=None,
+        context_ordering="degraded",
+    )
+    assert _render(fact) == [
+        "masora: claim [current]",
+        "  context: context unproven — selection ordering degraded",
+    ]
+
+
+# --- contract v2: the worked example (§6), byte-exact -----------------------------
+
+
+WORKED_EXAMPLE_FACT: dict[str, Any] = {
+    "lineage": "01J8ZP20000000000000000000",
+    "summary": "Lock L must be held before calling commitShard",
+    "resolution": "stale",
+    "verification": "unverified",
+    "flags": "suspect",
+    "established_relation": "out_of_line",
+    "established_commit": "9f8e7d6c5b4a",
+    "off_version": True,
+    "context_ordering": "exact",
+}
+
+
+def test_contract_worked_example_renders_exactly(
+    stub_masora: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§6's worked example, byte for byte, through the full query_lines
+    pipeline — the anchor for the assembly (off-version, then the relation
+    phrase with the commit beside it, ' — '-joined)."""
+    monkeypatch.setenv("CPPGRAPH_MASORA", "1")
+    monkeypatch.setenv("MASORA_STUB_STDOUT", json.dumps(doc_with(WORKED_EXAMPLE_FACT)))
+    lines = masora.query_lines({}, FOO, env=dict(os.environ))
+    assert lines == [
+        "masora: Lock L must be held before calling commitShard [stale, suspect — re-check]",
+        "  context: off-version — established on another line (9f8e7d6c5b4a)",
+    ]
+
+
+# --- contract v2: atomicity — a fact line and its context drop together -----------
+
+
+def test_context_line_counts_in_budget_and_drops_atomically(
+    stub_masora: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fact 2's context line is what tips the block over the budget: without
+    it both fact lines fit. The block (fact + context) drops TOGETHER and
+    the cap is reported — the context never renders orphaned and never
+    hides from the estimate (est_tokens runs over the joined text)."""
+    monkeypatch.setenv("CPPGRAPH_MASORA", "1")
+    triggering = {
+        "lineage": "b",
+        "summary": "word " * 24,  # 120 chars — the §3 cap
+        "resolution": "current",
+        "verification": "verified(llm)",
+        "flags": "-",
+        "established_relation": "out_of_line",
+        "established_commit": "1a1a8e1f4e5a",
+        "off_version": True,
+        "context_ordering": "exact",
+    }
+    silent = {
+        **triggering,
+        "established_relation": "in_line",
+        "off_version": False,
+    }
+    first = {
+        "lineage": "a",
+        "summary": "fact number 0",
+        "resolution": "current",
+        "verification": "unverified",
+        "flags": "-",
+        **CTX_SILENT,
+    }
+    monkeypatch.setenv("MASORA_STUB_STDOUT", json.dumps(doc_with(first, triggering)))
+    lines = masora.query_lines({}, FOO, env=dict(os.environ))
+    assert lines == ["masora: fact number 0 [current]", "… +1 more — masora search"]
+    # The control: the same two facts at a silent stamp fit together —
+    # the context line is what pushed fact 2 out.
+    monkeypatch.setenv("MASORA_STUB_STDOUT", json.dumps(doc_with(first, silent)))
+    assert masora.query_lines({}, FOO, env=dict(os.environ)) == [
+        "masora: fact number 0 [current]",
+        f"masora: {'word ' * 24} [current, verified(llm)]",
+    ]
+
+
+def test_single_oversized_block_with_context_still_renders(
+    stub_masora: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The never-zero rule covers the whole block: one fact whose fact line
+    AND context line together exceed the budget still renders — both lines
+    (a lone oversized fact beats a bare cap, context included)."""
+    monkeypatch.setenv("CPPGRAPH_MASORA", "1")
+    doc = doc_with(
+        {
+            "lineage": "z",
+            "summary": "語" * 120,
+            "resolution": "current",
+            "verification": "unverified",
+            "flags": "-",
+            "established_relation": "out_of_line",
+            "established_commit": "9f8e7d6c5b4a",
+            "off_version": True,
+            "context_ordering": "exact",
+        }
+    )
+    monkeypatch.setenv("MASORA_STUB_STDOUT", json.dumps(doc))
+    lines = masora.query_lines({}, FOO, env=dict(os.environ))
+    assert len(lines) == 2
+    assert lines[0].startswith("masora: ")
+    assert lines[1] == "  context: off-version — established on another line (9f8e7d6c5b4a)"
 
 
 # --- CLI surface wiring ----------------------------------------------------------
@@ -738,6 +1172,7 @@ def test_summary_with_newline_or_control_char_rejected(summary: str) -> None:
             "resolution": "current",
             "verification": "unverified",
             "flags": "-",
+            **CTX_SILENT,
         }
     )
     assert masora.parse_contract(json.dumps(doc)) is None
@@ -751,6 +1186,7 @@ def test_summary_over_120_chars_rejected() -> None:
             "resolution": "current",
             "verification": "unverified",
             "flags": "-",
+            **CTX_SILENT,
         }
     )
     assert masora.parse_contract(json.dumps(doc)) is None
@@ -764,6 +1200,7 @@ def test_summary_at_120_chars_renders(stub_masora: Path, monkeypatch: pytest.Mon
             "resolution": "current",
             "verification": "unverified",
             "flags": "-",
+            **CTX_SILENT,
         }
     )
     monkeypatch.setenv("CPPGRAPH_MASORA", "1")
@@ -806,6 +1243,7 @@ def test_unknown_resolution_renders_verbatim(
             "resolution": "reopened",
             "verification": "unverified",
             "flags": "-",
+            **CTX_SILENT,
         }
     )
     monkeypatch.setenv("CPPGRAPH_MASORA", "1")
@@ -906,6 +1344,7 @@ def test_budget_holds_for_cjk_max_case(stub_masora: Path, monkeypatch: pytest.Mo
             "resolution": "current",
             "verification": "verified(llm)",
             "flags": "-",
+            **CTX_SILENT,
         },
         {
             "lineage": "b",
@@ -913,6 +1352,7 @@ def test_budget_holds_for_cjk_max_case(stub_masora: Path, monkeypatch: pytest.Mo
             "resolution": "current",
             "verification": "verified(llm)",
             "flags": "-",
+            **CTX_SILENT,
         },
     )
     monkeypatch.setenv("CPPGRAPH_MASORA", "1")
@@ -933,6 +1373,7 @@ def _confidence_doc(**fact_overrides: Any) -> dict[str, Any]:
         "resolution": "current",
         "verification": "unverified",
         "flags": "-",
+        **CTX_SILENT,
     }
     fact.update(fact_overrides)
     return doc_with(fact)
@@ -1123,6 +1564,10 @@ def test_confidence_label_counts_toward_the_token_budget() -> None:
                 resolution="current",
                 verification="verified(llm)",
                 flags=(),
+                established_relation="in_line",
+                established_commit="1a1a8e1f4e5a",
+                off_version=False,
+                context_ordering="exact",
                 effort="low",
             ),
             masora.Fact(
@@ -1131,6 +1576,10 @@ def test_confidence_label_counts_toward_the_token_budget() -> None:
                 resolution="current",
                 verification="verified(llm)",
                 flags=(),
+                established_relation="in_line",
+                established_commit="1a1a8e1f4e5a",
+                off_version=False,
+                context_ordering="exact",
                 effort="low",
             ),
         ),
@@ -1156,6 +1605,10 @@ def _many_fact_contract(n: int, *, summary: str = "") -> masora.Contract:
                 resolution="current",
                 verification="unverified",
                 flags=(),
+                established_relation="in_line",
+                established_commit="1a1a8e1f4e5a",
+                off_version=False,
+                context_ordering="exact",
             )
             for i in range(n)
         ),
@@ -1173,6 +1626,7 @@ def _many_facts_doc(n: int) -> dict[str, Any]:
                 "resolution": "current",
                 "verification": "unverified",
                 "flags": "-",
+                **CTX_SILENT,
             }
             for i in range(n)
         ]
@@ -1317,6 +1771,7 @@ def test_budget_wins_over_max_facts_three_cjk(
                 "resolution": "current",
                 "verification": "verified(llm)",
                 "flags": "-",
+                **CTX_SILENT,
             }
             for i in range(3)
         ]
