@@ -4,6 +4,44 @@ All notable changes to cppgraph. The format follows
 [Keep a Changelog](https://keepachangelog.com/). This project is pre-1.0; the
 on-disk store also carries its own `schema_version` for forward-compatibility.
 
+## [0.4.8] - 2026-10-02
+
+### Added
+
+- **Masora facts contract v2** — masora's `facts` output now emits
+  `contract_version: 2` and cppgraph accepts exactly 2: there is no
+  dual-version window (the contract's ruling is "v2 or nothing"), so a v1
+  document renders nothing, like any other unknown major. Each fact now
+  REQUIRES the four context stamps — `established_relation`
+  (`in_line`/`ahead`/`out_of_line`/`unknown` or null; an unrecognized string
+  value is parser-inert), `established_commit` (short 12-hex,
+  presentation-only), `off_version` (a strict bool — a JSON int/str is a
+  violation) and `context_ordering` (`exact`/`degraded`; unrecognized values
+  parser-inert) — and a fact missing one rejects the WHOLE document,
+  fail-closed as every other shape error. When a trigger fires
+  (`off_version`, a non-`in_line` relation, or a `degraded` ordering — never
+  a null relation alone, and never on a `resolution: "none"` fact), an
+  indented context line renders under the fact line from the stamps only,
+  e.g. `  context: off-version — established on another line (9f8e7d6c5b4a)`
+  (unrecognized relation values render verbatim in the neutral template,
+  never guessed). The fact line and its context line are atomic in the
+  budget/dedup logic — they render together or drop together, the context
+  line counting in the 60-token estimate — and the stamps never
+  gate/upgrade/downgrade a status label, never reorder or dedup facts (the
+  key stays `lineage`), and no branch name is ever rendered.
+
+- **Masora version-mismatch advisory** — a deliberate carve-out from the
+  silent skip: when a spawned `masora facts` answers with a strict-integer
+  `contract_version` other than 2 (a JSON bool is rejected), the injection
+  returns exactly one advisory line instead of facts —
+  `masora: [facts contract v3 unsupported — update cppgraph]` for a newer
+  contract, `masora: [facts contract v1 — update masora]` for an older one —
+  so a stale toolchain is visible instead of silently injecting nothing.
+  Every other failure mode (unparsable output, bool/missing version, spawn
+  failures, timeouts) stays silent, and no facts from an unknown shape are
+  ever rendered. Both surfaces go through the same `masora.query_lines`
+  (`mismatch_advisory`), so the advisory is identical on the CLI and MCP.
+
 ## [0.4.7] - 2026-10-01
 
 ### Added

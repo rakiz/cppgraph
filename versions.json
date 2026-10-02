@@ -11,7 +11,7 @@
       "scip-clang-x86_64-linux": "06fd18c576f979a726c651594644ec4a35db4f471f2160b3f72eb89fa6001784"
     }
   },
-  "latest": "0.4.7",
+  "latest": "0.4.8",
   "releases": [
     {
       "version": "0.1.0",
@@ -84,6 +84,12 @@
       "rebuild": "none",
       "notes": "No schema change (still v5), safe to update in place. A bundled `/cppgraph` agent slash command ships in-repo (`commands/cppgraph.md`) and `cppgraph setup` installs it into the Claude Code and opencode user command dirs (stage S3c, same detection and keep-if-identical statuses as the bundled skill); it routes on the first word of `$ARGUMENTS` — `status` (drift + update advice), `help`, `index` (the agent-driven non-interactive index flow), `update` (non-destructive re-run with the recorded scope), else a free-form graph query. `scripts/uninstall.sh` now also offers to remove the installed skill and command files, fixing the skill's pre-existing uninstall gap (one ask, `--dry-run`-aware, a skill dir removed only when left empty). Full detail in `CHANGELOG.md`.",
       "url": "https://github.com/rakiz/cppgraph/releases/tag/v0.4.7"
+    },
+    {
+      "version": "0.4.8",
+      "rebuild": "none",
+      "notes": "No schema change (still v5), safe to update in place. Masora fact injection (opt-in via `CPPGRAPH_MASORA`) moves to facts contract v2: each fact now carries four git-context stamps (`established_relation`/`established_commit`/`off_version`/`context_ordering`, required — a fact missing one rejects the document, fail-closed), and when the context matters an indented `context:` line renders under the fact line (off-version, established ahead / on another line, unproven, degraded ordering) — statuses are never re-judged from the stamps. A `masora` binary answering with any other contract version now surfaces a one-line update advisory (update cppgraph / update masora) instead of silently injecting nothing. Full detail in `CHANGELOG.md`.",
+      "url": "https://github.com/rakiz/cppgraph/releases/tag/v0.4.8"
     }
   ]
 }
