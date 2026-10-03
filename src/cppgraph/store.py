@@ -165,6 +165,19 @@ _FILE_LINE_RE = re.compile(r"^(.+):([1-9][0-9]*)$")
 # meta flag). Released in v0.3.0.
 SCHEMA_VERSION = 5
 
+# The symbol identity format is versioned like the store schema (masora
+# contract §9.12 — docs/CPPGRAPH_INTEGRATION.md): the decorated
+# `cxx . . $ pkg/…#m(hash).` anchor strings are load-bearing across repos and
+# rebuilds — masora embeds them verbatim into base event files (which persist
+# for years) and re-fingerprinting matches them verbatim against
+# `symbols.symbol`. Masora's reader gates on this meta row exactly like
+# `schema_version`: absent = legacy store (reads as format 1), present must
+# equal its learned constant, anything else refuses the store.
+# GOVERNANCE: any change to the symbol identity format bumps SYMBOL_FORMAT in
+# the SAME change — a silent format drift would let reads succeed while old
+# anchors silently mismatch, which is exactly what the gate exists to prevent.
+SYMBOL_FORMAT = 1
+
 
 class IncompatibleStoreError(RuntimeError):
     """Raised opening a store written by a newer cppgraph than this one."""
@@ -474,7 +487,9 @@ def write_sqlite(graph: Graph, path: str | Path, *, meta: dict[str, str] | None 
     any existing file at `path`.
 
     `meta` is provenance (see `build_provenance`) stored in the `meta` table;
-    `node_count`/`edge_count` are always recorded from the graph itself.
+    `node_count`/`edge_count` are always recorded from the graph itself, as
+    are the version rows `schema_version` and `symbol_format` (the symbol
+    identity format masora gates on — see `SYMBOL_FORMAT`).
     """
     path = Path(path)
     if path.exists():
@@ -537,6 +552,7 @@ def write_sqlite(graph: Graph, path: str | Path, *, meta: dict[str, str] | None 
 
         all_meta = dict(meta or {})
         all_meta["schema_version"] = str(SCHEMA_VERSION)
+        all_meta["symbol_format"] = str(SYMBOL_FORMAT)
         all_meta.setdefault("node_count", str(len(graph.nodes)))
         all_meta.setdefault("edge_count", str(len(graph.edges)))
         # Definition body extents present => the binary emitted enclosing_range
@@ -783,6 +799,7 @@ def enrich_references(path: str | Path, index: scip_pb2.Index) -> tuple[int, int
             ("has_access_roles", "true" if roles_set else "false"),
             ("has_symbol_kind", "true" if kinds_set else "false"),
             ("schema_version", str(SCHEMA_VERSION)),
+            ("symbol_format", str(SYMBOL_FORMAT)),
         ):
             con.execute(
                 "INSERT INTO meta(key, value) VALUES (?, ?) "

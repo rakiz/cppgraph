@@ -30,6 +30,14 @@ on-disk store also carries its own `schema_version` for forward-compatibility.
   mismatch renders the advisory alone. The stale-index note still renders
   only alongside facts, so a stale index with zero facts renders the hint
   alone.
+- **`symbol_format` meta row** (contract §9.12) — the symbol identity
+  format is versioned like the store schema: every freshly built store's
+  meta now carries `symbol_format` (= 1, the current decorated
+  `cxx . . $ pkg/…#m(hash).` identity format), written by `write_sqlite`
+  and re-stamped by `enrich-refs` — mirroring `schema_version` per site.
+  Masora's reader gates on it (absent = legacy = format 1); the
+  governance rule is binding: any change to the symbol identity format
+  bumps `SYMBOL_FORMAT` in the same change.
 
 ## [0.4.8] - 2026-10-02
 

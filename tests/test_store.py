@@ -16,6 +16,7 @@ from cppgraph.model import Graph, Node
 from cppgraph.proto import scip_pb2
 from cppgraph.store import (
     SCHEMA_VERSION,
+    SYMBOL_FORMAT,
     GraphStore,
     IncompatibleStoreError,
     build_provenance,
@@ -2677,6 +2678,53 @@ def test_meta_roundtrips_provided_provenance(tmp_path: Path) -> None:
     meta = GraphStore(db).meta()
     assert meta["source_commit"] == "deadbeef"
     assert meta["project_root"] == "file:///x"
+
+
+def test_fresh_store_carries_symbol_format(tmp_path: Path) -> None:
+    """Masora contract §9.12: the symbol identity format is versioned like the
+    schema — a freshly built store's meta carries the `symbol_format` row
+    (masora's reader gates on it; absent = legacy store = format 1)."""
+    db = tmp_path / "graph.db"
+    graph = Graph()
+    graph.add_edge("calls", CALLER, METHOD, file="foo.cpp", line=9)
+    write_sqlite(graph, db)
+    assert GraphStore(db).meta()["symbol_format"] == str(SYMBOL_FORMAT)
+
+
+def test_symbol_format_is_the_learned_constant_one() -> None:
+    """The decorated `cxx . . $ pkg/…#m(hash).` anchor identity format is
+    format 1 — masora's reader accepts exactly this constant; any other value
+    (or an unparsable one) has it refuse the store."""
+    assert SYMBOL_FORMAT == 1
+
+
+def test_enrich_references_restamps_symbol_format(tmp_path: Path) -> None:
+    """enrich-refs rewrites the store in place and stamps `schema_version` —
+    it stamps `symbol_format` the same way, so a legacy store upgraded in
+    place reads as the current format afterwards."""
+    typ = "cxx . . $ pkg/Widget#"
+    user = "cxx . . $ pkg/render(r1)."
+    doc = scip_pb2.Document(relative_path="render.cpp")
+    user_def = scip_pb2.Occurrence(symbol=user, symbol_roles=scip_pb2.SymbolRole.Definition)
+    user_def.range.extend([5, 0, 10])
+    user_def.enclosing_range.extend([5, 0, 20, 0])
+    use = scip_pb2.Occurrence(symbol=typ)
+    use.range.extend([8, 0, 6])
+    doc.occurrences.extend([user_def, use])
+    index = scip_pb2.Index(documents=[doc])
+
+    graph = build_graph(index, attribute_references=False)
+    db = tmp_path / "g.db"
+    write_sqlite(graph, db)
+    con = sqlite3.connect(db)
+    con.execute("DELETE FROM meta WHERE key = 'symbol_format'")  # simulate legacy
+    con.commit()
+    con.close()
+
+    from cppgraph.store import enrich_references
+
+    enrich_references(db, index)
+    assert GraphStore(db).meta()["symbol_format"] == str(SYMBOL_FORMAT)
 
 
 def test_meta_empty_for_store_without_meta_table(tmp_path: Path) -> None:
