@@ -4,6 +4,33 @@ All notable changes to cppgraph. The format follows
 [Keep a Changelog](https://keepachangelog.com/). This project is pre-1.0; the
 on-disk store also carries its own `schema_version` for forward-compatibility.
 
+## [Unreleased]
+
+### Added
+
+- **Masora multi-symbol batched spawn** (contract §9.10) — `find` and
+  `outline` now inject too: ONE `masora facts` spawn per response carrying
+  every result symbol as repeated `--symbol` flags (§2's OR-matching; the
+  shared `queries.response_symbols` collects a find response's entries plus
+  each overload arm, ordered and deduplicated — the compact outline reads
+  its symbols straight from the store, since `full_symbols=False`
+  definitions carry no raw symbol strings). The ≤ 2-fact / ≤ 60-token
+  budget stays per RESPONSE across all batched symbols, with the visible
+  truncation line unchanged; two symbols anchoring the same lineage still
+  render that one fact once. A response with zero result symbols spawns
+  nothing.
+- **Masora presence hint** (contract §9.11) — when Masora is PRESENT for
+  the checkout (flag on, binary found, root resolved, contract parsed) and
+  ZERO facts rendered, exactly one capability line renders:
+  `masora: present for this checkout — the masora search / explain /
+  list_stale MCP tools recall recorded knowledge.` — at most once per
+  response (single- or multi-symbol), never knowledge or advice. The
+  absent modes render nothing, not even the hint: flag off, binary
+  missing, unresolvable base, spawn failure, unparsable output; a version
+  mismatch renders the advisory alone. The stale-index note still renders
+  only alongside facts, so a stale index with zero facts renders the hint
+  alone.
+
 ## [0.4.8] - 2026-10-02
 
 ### Added

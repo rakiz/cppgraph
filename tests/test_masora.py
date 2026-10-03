@@ -26,6 +26,12 @@ CALLER = "cxx . . $ mongo/Foo#caller(a2)."
 
 STUB_SCRIPT = """\
 #!/bin/sh
+if [ -n "$MASORA_STUB_COUNT_FILE" ]; then
+  echo x >> "$MASORA_STUB_COUNT_FILE"
+fi
+if [ -n "$MASORA_STUB_ARGS_FILE" ]; then
+  printf '%s' "$*" >> "$MASORA_STUB_ARGS_FILE"
+fi
 if [ -n "$MASORA_STUB_ECHO_ARGS" ]; then
   printf '%s' "$*"
   exit 0
@@ -101,6 +107,18 @@ def graph_path(tmp_path: Path) -> Path:
     graph.add_node(FOO, display_name="makeResumeToken")
     graph.add_edge("calls", CALLER, FOO, file="foo.cpp", line=9)
     path = tmp_path / "graph.db"
+    write_sqlite(graph, path, meta={"project_root": str(tmp_path)})
+    return path
+
+
+@pytest.fixture
+def outline_graph_path(tmp_path: Path) -> Path:
+    """A graph whose nodes carry foo.cpp positions — `outline`-addressable
+    (the `graph_path` nodes have no file, so its outline is empty)."""
+    graph = Graph()
+    graph.nodes[FOO] = Node(symbol=FOO, display_name="makeResumeToken", file="foo.cpp", line=0)
+    graph.nodes[CALLER] = Node(symbol=CALLER, display_name="caller", file="foo.cpp", line=9)
+    path = tmp_path / "outline-graph.db"
     write_sqlite(graph, path, meta={"project_root": str(tmp_path)})
     return path
 
@@ -277,10 +295,14 @@ def test_duplicate_lineages_deduped(stub_masora: Path, monkeypatch: pytest.Monke
     assert lines == ["masora: first [current]"]
 
 
-def test_empty_facts_render_nothing(stub_masora: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_empty_facts_render_the_presence_hint(
+    stub_masora: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§9.11: masora present (flag on, binary found, root resolved, contract
+    parsed) and zero facts rendered — exactly ONE capability hint line."""
     monkeypatch.setenv("CPPGRAPH_MASORA", "1")
     monkeypatch.setenv("MASORA_STUB_STDOUT", json.dumps(doc_with()))
-    assert masora.query_lines({}, FOO, env=dict(os.environ)) == []
+    assert masora.query_lines({}, FOO, env=dict(os.environ)) == [masora.HINT_LINE]
 
 
 # --- (b) stale warning ---------------------------------------------------------
@@ -307,14 +329,16 @@ def test_stale_warning_rendered_terse_and_first(
     assert lines[1] == "masora: some claim [current]"
 
 
-def test_stale_warning_false_and_null_render_nothing(
+def test_stale_warning_false_and_null_render_the_presence_hint(
     stub_masora: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Zero facts + a non-firing stale value: the presence hint is the one
+    line (the stale note renders only alongside facts)."""
     monkeypatch.setenv("CPPGRAPH_MASORA", "1")
     for value in (False, None):
         doc = doc_with(stale_warning=value)
         monkeypatch.setenv("MASORA_STUB_STDOUT", json.dumps(doc))
-        assert masora.query_lines({}, FOO, env=dict(os.environ)) == []
+        assert masora.query_lines({}, FOO, env=dict(os.environ)) == [masora.HINT_LINE]
 
 
 # --- (c) non-zero exit ---------------------------------------------------------
@@ -699,12 +723,15 @@ def test_stale_warning_with_no_facts_renders_nothing() -> None:
     assert masora.render_lines(contract) == []
 
 
-def test_stale_warning_with_no_facts_nothing_injected(
+def test_stale_warning_with_no_facts_hint_only(
     stub_masora: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """A stale index with zero matching facts renders no stale note (§6: only
+    alongside facts) — but masora IS present and the contract parsed, so the
+    one-line presence hint renders (§9.11)."""
     monkeypatch.setenv("CPPGRAPH_MASORA", "1")
     monkeypatch.setenv("MASORA_STUB_STDOUT", json.dumps(doc_with(stale_warning=True)))
-    assert masora.query_lines({}, FOO, env=dict(os.environ)) == []
+    assert masora.query_lines({}, FOO, env=dict(os.environ)) == [masora.HINT_LINE]
 
 
 # --- (h) token budget + masora NOT rendering ------------------------------------
@@ -1784,3 +1811,421 @@ def test_budget_wins_over_max_facts_three_cjk(
     assert total <= masora.TOKEN_BUDGET
     assert len(lines) == 2
     assert lines[-1] == "… +2 more — masora search"
+
+
+# --- §9.10: multi-symbol batched spawn (find / outline) --------------------------
+
+
+def _two_lineage_doc() -> dict[str, Any]:
+    """One batched-response document: two facts from different lineages."""
+    return doc_with(
+        {
+            "lineage": "a",
+            "summary": "first claim",
+            "resolution": "current",
+            "verification": "unverified",
+            "flags": "-",
+            **CTX_SILENT,
+        },
+        {
+            "lineage": "b",
+            "summary": "second claim",
+            "resolution": "stale",
+            "verification": "unverified",
+            "flags": "-",
+            **CTX_SILENT,
+        },
+    )
+
+
+def test_run_masora_facts_repeats_the_symbol_flag(
+    stub_masora: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """§2/§9.10: `--symbol` is repeatable — one spawn carries one flag per
+    result symbol, in order."""
+    monkeypatch.setenv("MASORA_STUB_ECHO_ARGS", "1")
+    argv = masora.run_masora_facts(str(tmp_path), [FOO, CALLER], timeout=2.0)
+    assert argv == f"facts --repo {tmp_path} --symbol {FOO} --symbol {CALLER}"
+
+
+def test_query_lines_dedups_repeated_symbols_in_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    received: list[Any] = []
+
+    def recording(repo: str, symbols: Any, timeout: float) -> str | None:
+        received.append(symbols)
+        return json.dumps(fact_doc())
+
+    lines = masora.query_lines(
+        {"project_root": str(tmp_path)},
+        [FOO, CALLER, FOO],
+        env={"CPPGRAPH_MASORA": "1"},
+        which=lambda name: "/fake/masora",
+        runner=recording,
+    )
+    assert received == [[FOO, CALLER]]  # order-preserving distinct, ONE batch
+    assert lines == [
+        "masora: Resume token invalidated by a shard key change [current, verified(llm)]"
+    ]
+
+
+def test_query_lines_empty_symbol_list_skips_the_spawn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A response with zero result symbols asks nothing: no spawn at all —
+    spawning flag-less would return every lineage of the matching base(s),
+    not what an empty find/outline means."""
+    calls: list[str] = []
+
+    def recording(repo: str, symbols: Any, timeout: float) -> str | None:
+        calls.append(repo)
+        return json.dumps(fact_doc())
+
+    lines = masora.query_lines(
+        {"project_root": str(tmp_path)},
+        [],
+        env={"CPPGRAPH_MASORA": "1"},
+        which=lambda name: "/fake/masora",
+        runner=recording,
+    )
+    assert lines == []
+    assert calls == []
+
+
+def test_response_symbols_collects_entries_and_overload_arms() -> None:
+    from cppgraph.queries import response_symbols
+
+    result = {
+        "results": [
+            {"symbol": FOO, "name": "makeResumeToken"},
+            {
+                "symbol": CALLER,
+                "overloads": 2,
+                "signatures": [{"symbol": CALLER}, {"symbol": FOO}],
+            },
+        ]
+    }
+    assert response_symbols(result) == [FOO, CALLER]  # ordered-distinct, arms included
+
+
+def test_response_symbols_on_error_or_empty_results() -> None:
+    from cppgraph.queries import response_symbols
+
+    for result in ({"error": "no graph"}, {"results": []}, {}):
+        assert response_symbols(result) == []
+
+
+def test_cli_find_batches_all_result_symbols_in_one_spawn(
+    graph_path: Path,
+    stub_masora: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    """§9.10: find injects with ONE batched spawn carrying every result
+    symbol (`--symbol` repeated); facts from different lineages of the
+    batched symbols all render."""
+    monkeypatch.setenv("CPPGRAPH_MASORA", "1")
+    monkeypatch.setenv("MASORA_STUB_STDOUT", json.dumps(_two_lineage_doc()))
+    count = tmp_path / "spawns"
+    args_file = tmp_path / "args"
+    monkeypatch.setenv("MASORA_STUB_COUNT_FILE", str(count))
+    monkeypatch.setenv("MASORA_STUB_ARGS_FILE", str(args_file))
+    assert main(["find", "--graph", str(graph_path), "Foo"]) == 0
+    out = capsys.readouterr().out
+    assert "masora: first claim [current]" in out
+    assert "masora: second claim [stale — re-check]" in out
+    assert count.read_text() == "x\n"  # exactly one spawn for the whole response
+    argv = args_file.read_text()
+    assert f"--symbol {FOO}" in argv
+    assert f"--symbol {CALLER}" in argv
+
+
+def test_cli_find_budget_is_per_response(
+    graph_path: Path,
+    stub_masora: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    """§9.10: the ≤ 2-fact / ≤ 60-token budget is per RESPONSE across all
+    batched symbols, and the truncation line stays visible."""
+    monkeypatch.setenv("CPPGRAPH_MASORA", "1")
+    monkeypatch.setenv("MASORA_STUB_STDOUT", json.dumps(_many_facts_doc(5)))
+    count = tmp_path / "spawns"
+    monkeypatch.setenv("MASORA_STUB_COUNT_FILE", str(count))
+    assert main(["find", "--graph", str(graph_path), "Foo"]) == 0
+    out = capsys.readouterr().out
+    assert "masora: fact number 0 [current]" in out
+    assert "masora: fact number 1 [current]" in out
+    assert "… +3 more — masora search" in out
+    assert count.read_text() == "x\n"
+
+
+def test_cli_find_two_symbols_same_lineage_render_one_fact(
+    graph_path: Path,
+    stub_masora: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    """Two batched symbols anchoring the SAME lineage render that one fact
+    once (lineage dedup over the one batched document)."""
+    doc = fact_doc()
+    doc["facts"].append({**doc["facts"][0], "summary": "first again"})
+    monkeypatch.setenv("CPPGRAPH_MASORA", "1")
+    monkeypatch.setenv("MASORA_STUB_STDOUT", json.dumps(doc))
+    count = tmp_path / "spawns"
+    monkeypatch.setenv("MASORA_STUB_COUNT_FILE", str(count))
+    assert main(["find", "--graph", str(graph_path), "Foo"]) == 0
+    out = capsys.readouterr().out
+    assert out.count("masora: Resume token invalidated") == 1
+    assert count.read_text() == "x\n"
+
+
+def test_cli_outline_batches_all_defined_symbols(
+    outline_graph_path: Path,
+    stub_masora: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    """§9.10: outline injects too — ONE batched spawn with every defined
+    symbol of the outlined file."""
+    monkeypatch.setenv("CPPGRAPH_MASORA", "1")
+    monkeypatch.setenv("MASORA_STUB_STDOUT", json.dumps(_two_lineage_doc()))
+    count = tmp_path / "spawns"
+    args_file = tmp_path / "args"
+    monkeypatch.setenv("MASORA_STUB_COUNT_FILE", str(count))
+    monkeypatch.setenv("MASORA_STUB_ARGS_FILE", str(args_file))
+    assert main(["outline", "--graph", str(outline_graph_path), "foo.cpp"]) == 0
+    out = capsys.readouterr().out
+    assert "masora: first claim [current]" in out
+    assert "masora: second claim [stale — re-check]" in out
+    assert count.read_text() == "x\n"
+    argv = args_file.read_text()
+    assert f"--symbol {FOO}" in argv
+    assert f"--symbol {CALLER}" in argv
+
+
+def test_cli_find_zero_results_spawns_nothing(
+    graph_path: Path,
+    stub_masora: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """No result symbols → no spawn (and no hint): nothing to anchor on."""
+    monkeypatch.setenv("CPPGRAPH_MASORA", "1")
+    count = tmp_path / "spawns"
+    monkeypatch.setenv("MASORA_STUB_COUNT_FILE", str(count))
+    assert main(["find", "--graph", str(graph_path), "zzzzqqqq"]) == 1
+    assert not count.exists()
+
+
+def test_mcp_find_batches_all_result_symbols(
+    mcp_store: Path, stub_masora: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("CPPGRAPH_MASORA", "1")
+    monkeypatch.setenv("MASORA_STUB_STDOUT", json.dumps(_two_lineage_doc()))
+    count = tmp_path / "spawns"
+    args_file = tmp_path / "args"
+    monkeypatch.setenv("MASORA_STUB_COUNT_FILE", str(count))
+    monkeypatch.setenv("MASORA_STUB_ARGS_FILE", str(args_file))
+    server = mcp_server.build_server(str(mcp_store))
+    result = _tool(server, "find")(query="Foo")
+    assert result["masora"] == (
+        "masora: first claim [current]\nmasora: second claim [stale — re-check]"
+    )
+    assert count.read_text() == "x\n"
+    argv = args_file.read_text()
+    assert f"--symbol {FOO}" in argv
+    assert f"--symbol {CALLER}" in argv
+
+
+def test_mcp_outline_batches_all_definitions(
+    mcp_store: Path, stub_masora: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The compact outline (full_symbols=False — definitions carry no raw
+    symbol strings) still injects: the batched symbols come straight from
+    the store."""
+    monkeypatch.setenv("CPPGRAPH_MASORA", "1")
+    monkeypatch.setenv("MASORA_STUB_STDOUT", json.dumps(_two_lineage_doc()))
+    count = tmp_path / "spawns"
+    args_file = tmp_path / "args"
+    monkeypatch.setenv("MASORA_STUB_COUNT_FILE", str(count))
+    monkeypatch.setenv("MASORA_STUB_ARGS_FILE", str(args_file))
+    server = mcp_server.build_server(str(mcp_store))
+    result = _tool(server, "outline")(file="foo.cpp")
+    assert result["masora"] == (
+        "masora: first claim [current]\nmasora: second claim [stale — re-check]"
+    )
+    assert count.read_text() == "x\n"
+    argv = args_file.read_text()
+    assert f"--symbol {FOO}" in argv
+    assert f"--symbol {CALLER}" in argv
+
+
+def test_mcp_find_outline_empty_results_spawn_nothing(
+    mcp_store: Path, stub_masora: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("CPPGRAPH_MASORA", "1")
+    count = tmp_path / "spawns"
+    monkeypatch.setenv("MASORA_STUB_COUNT_FILE", str(count))
+    server = mcp_server.build_server(str(mcp_store))
+    find_result = _tool(server, "find")(query="zzzzqqqq")
+    assert "masora" not in find_result
+    outline_result = _tool(server, "outline")(file="no-such-file.cpp")
+    assert "masora" not in outline_result
+    assert not count.exists()
+
+
+# --- §9.11: the presence hint ----------------------------------------------------
+
+
+def test_presence_hint_once_per_response_for_all_symbols(
+    stub_masora: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """At most once per response, whatever the number of batched symbols."""
+    monkeypatch.setenv("CPPGRAPH_MASORA", "1")
+    monkeypatch.setenv("MASORA_STUB_STDOUT", json.dumps(doc_with()))
+    assert masora.query_lines({}, [FOO, CALLER], env=dict(os.environ)) == [masora.HINT_LINE]
+
+
+def test_presence_hint_absent_without_the_binary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Absent-mode (no binary): nothing renders — not even the hint."""
+    empty = tmp_path / "empty-bin"
+    empty.mkdir()
+    monkeypatch.setenv("PATH", str(empty))
+    monkeypatch.setenv("CPPGRAPH_MASORA", "1")
+    assert masora.query_lines({}, FOO, env=dict(os.environ)) == []
+
+
+def test_presence_hint_absent_with_the_flag_off(
+    stub_masora: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("CPPGRAPH_MASORA", raising=False)
+    monkeypatch.setenv("MASORA_STUB_STDOUT", json.dumps(doc_with()))
+    assert masora.query_lines({}, FOO, env=dict(os.environ)) == []
+
+
+def test_presence_hint_absent_with_unresolvable_base(
+    stub_masora: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls: list[str] = []
+
+    def recording(repo: str, symbols: Any, timeout: float) -> str | None:
+        calls.append(repo)
+        return None
+
+    lines = masora.query_lines(
+        {"project_root": str(tmp_path / "gone")},
+        FOO,
+        env={"CPPGRAPH_MASORA": "1"},
+        which=lambda name: "/fake/masora",
+        runner=recording,
+    )
+    assert lines == []
+    assert calls == []
+
+
+@pytest.mark.parametrize("stdout", ["", "not json", '{"contract_version": true}'])
+def test_presence_hint_not_on_unparsable_output(
+    stub_masora: Path, monkeypatch: pytest.MonkeyPatch, stdout: str
+) -> None:
+    """The hint needs a PARSED contract; an unparsable one stays silent."""
+    monkeypatch.setenv("CPPGRAPH_MASORA", "1")
+    monkeypatch.setenv("MASORA_STUB_STDOUT", stdout)
+    assert masora.query_lines({}, FOO, env=dict(os.environ)) == []
+
+
+def test_presence_hint_not_on_spawn_failure(
+    stub_masora: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("CPPGRAPH_MASORA", "1")
+    monkeypatch.setenv("MASORA_STUB_EXIT", "1")
+    monkeypatch.setenv("MASORA_STUB_STDOUT", json.dumps(doc_with()))
+    assert masora.query_lines({}, FOO, env=dict(os.environ)) == []
+
+
+def test_presence_hint_not_on_version_mismatch(
+    stub_masora: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The advisory is the response's one line — the hint does not join it."""
+    monkeypatch.setenv("CPPGRAPH_MASORA", "1")
+    doc = fact_doc()
+    doc["contract_version"] = 3
+    monkeypatch.setenv("MASORA_STUB_STDOUT", json.dumps(doc))
+    assert masora.query_lines({}, FOO, env=dict(os.environ)) == [
+        "masora: [facts contract v3 unsupported — update cppgraph]"
+    ]
+
+
+def test_presence_hint_never_alongside_facts(
+    stub_masora: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("CPPGRAPH_MASORA", "1")
+    monkeypatch.setenv("MASORA_STUB_STDOUT", json.dumps(fact_doc()))
+    lines = masora.query_lines({}, FOO, env=dict(os.environ))
+    assert lines == [
+        "masora: Resume token invalidated by a shard key change [current, verified(llm)]"
+    ]
+    assert masora.HINT_LINE not in lines
+
+
+def test_cli_single_symbol_tools_render_the_hint_on_zero_facts(
+    graph_path: Path,
+    stub_masora: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """§9.11 covers every injected tool, single-symbol ones included."""
+    monkeypatch.setenv("CPPGRAPH_MASORA", "1")
+    monkeypatch.setenv("MASORA_STUB_STDOUT", json.dumps(doc_with()))
+    for command, sym in (("callers", CALLER), ("callees", CALLER), ("explain", FOO)):
+        assert main([command, "--graph", str(graph_path), sym]) == 0
+        out = capsys.readouterr().out
+        assert out.count(masora.HINT_LINE) == 1, command
+
+
+def test_cli_find_and_outline_render_the_hint_on_zero_facts(
+    graph_path: Path,
+    outline_graph_path: Path,
+    stub_masora: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("CPPGRAPH_MASORA", "1")
+    monkeypatch.setenv("MASORA_STUB_STDOUT", json.dumps(doc_with()))
+    count = tmp_path / "spawns"
+    monkeypatch.setenv("MASORA_STUB_COUNT_FILE", str(count))
+    assert main(["find", "--graph", str(graph_path), "Foo"]) == 0
+    assert capsys.readouterr().out.count(masora.HINT_LINE) == 1
+    assert main(["outline", "--graph", str(outline_graph_path), "foo.cpp"]) == 0
+    assert capsys.readouterr().out.count(masora.HINT_LINE) == 1
+    assert count.read_text() == "x\nx\n"  # one batched spawn per response
+
+
+def test_mcp_find_and_outline_attach_the_hint_on_zero_facts(
+    mcp_store: Path, stub_masora: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("CPPGRAPH_MASORA", "1")
+    monkeypatch.setenv("MASORA_STUB_STDOUT", json.dumps(doc_with()))
+    server = mcp_server.build_server(str(mcp_store))
+    for tool, kwargs in (("find", {"query": "Foo"}), ("outline", {"file": "foo.cpp"})):
+        result = _tool(server, tool)(**kwargs)
+        assert result["masora"] == masora.HINT_LINE, tool
+
+
+def test_mcp_single_symbol_tools_attach_the_hint_on_zero_facts(
+    mcp_store: Path, stub_masora: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("CPPGRAPH_MASORA", "1")
+    monkeypatch.setenv("MASORA_STUB_STDOUT", json.dumps(doc_with()))
+    server = mcp_server.build_server(str(mcp_store))
+    for tool in ("who_calls", "what_it_calls", "explain_symbol"):
+        result = _tool(server, tool)(symbol=CALLER if tool != "explain_symbol" else FOO)
+        assert result["masora"] == masora.HINT_LINE, tool

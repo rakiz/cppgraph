@@ -13,6 +13,7 @@ checkout-rooted lookup helpers, no transport in sight.
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -303,3 +304,29 @@ def find_symbols(
         result["include_paths"] = include_paths
         result["exclude_paths"] = exclude_paths
     return result
+
+
+def response_symbols(result: Mapping[str, Any]) -> list[str]:
+    """The ordered-distinct result symbols of a multi-symbol response
+    (`find`): every result entry's raw `symbol`, plus every overload arm's
+    (`signatures[i].symbol`) — the list a batched Masora spawn passes as
+    repeated `--symbol` flags (§9.10, §2's OR-matching). `find_symbols`
+    always renders full symbols, so every entry carries the raw string here;
+    an error dict or a zero-result response yields []."""
+    out: list[str] = []
+    seen: set[str] = set()
+    entries = result.get("results")
+    if not isinstance(entries, list):
+        return out
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        symbols = [entry.get("symbol")]
+        arms = entry.get("signatures")
+        if isinstance(arms, list):
+            symbols.extend(arm.get("symbol") if isinstance(arm, dict) else None for arm in arms)
+        for symbol in symbols:
+            if isinstance(symbol, str) and symbol and symbol not in seen:
+                seen.add(symbol)
+                out.append(symbol)
+    return out

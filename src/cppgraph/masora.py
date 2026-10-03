@@ -4,12 +4,16 @@
 Masora is a git-backed knowledge base of claims anchored to code symbols.
 When a query response is centered on symbol S and the feature is enabled,
 cppgraph spawns `masora facts --repo <checkout-root> --symbol <S>` (one
-subprocess per response, 2 s wall-clock budget; the child's stdin is
+subprocess per response — for the multi-symbol responses `find`/`outline`,
+ONE batched spawn carrying every result symbol as repeated `--symbol`
+flags, §9.10; 2 s wall-clock budget; the child's stdin is
 DETACHED — when cppgraph runs as the MCP stdio server, fd 0 is the JSON-RPC
 stream — and its stdout is capped, overflow skipping the response), parses
 the JSON document, and appends at most 2 terse fact lines to the response —
 on both the CLI (printed text lines) and the MCP server (the `masora` string
 field, rendered lines joined with newlines; absent when nothing injects).
+On a present-but-zero-fact response exactly ONE presence-hint line renders
+instead (§9.11) — a capability notice, never knowledge or advice.
 
 Feature flag `CPPGRAPH_MASORA` (checked before any spawn):
 - unset → OFF (the default until the integration is validated);
@@ -119,6 +123,17 @@ Rendering decisions (§6 latitude, pinned here):
   (`… +N more — masora search`) — the visible cap wins over the suggested
   budget, never a silent drop. At least one fact always renders.
 - duplicate `lineage` ids are deduped (first occurrence wins).
+- presence hint (§9.11): when masora is PRESENT for the checkout (the flag
+  on, the binary found, the root resolved, the contract parsed) and ZERO
+  facts rendered for the response, exactly ONE capability line renders —
+  `HINT_LINE`, §6's suggested wording verbatim — at most once per response
+  (the injection is one call per response, whatever the number of batched
+  symbols), and never as knowledge or advice: it carries no claim, no
+  status and no context. The absent modes render nothing — not even the
+  hint: flag off, binary missing, unresolvable root, spawn failure,
+  unparsable output; a version mismatch renders the advisory line only.
+  The stale-index note still renders only alongside facts, so a stale index
+  with zero facts renders the hint alone.
 
 Contract enrichment (additive-optional since v1, carried into v2
 unchanged): each fact may carry
@@ -163,7 +178,7 @@ import signal
 import subprocess
 import threading
 import unicodedata
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -178,9 +193,13 @@ TOKEN_BUDGET = 60
 MAX_SUMMARY_CHARS = 120
 MAX_OUTPUT_BYTES = 1_048_576  # 1 MiB — far above any legitimate contract document
 STALE_WARNING_LINE = "masora: [stale index — facts may be outdated]"
+HINT_LINE = (
+    "masora: present for this checkout — the masora search / explain / "
+    "list_stale MCP tools recall recorded knowledge."
+)
 _TRUNCATION_LINE = "… +{n} more — masora search"
 
-Runner = Callable[[str, str | None, float], str | None]
+Runner = Callable[[str, "str | Sequence[str] | None", float], str | None]
 Which = Callable[[str], str | None]
 
 
@@ -278,22 +297,28 @@ def _kill_tree(proc: subprocess.Popen) -> None:
         pass
 
 
-def run_masora_facts(repo_root: str, symbol: str | None, timeout: float) -> str | None:
-    """Spawn `masora facts --repo <root> [--symbol <scip>]`; return stdout, or
-    None on any failure (spawn error, non-zero exit — including the
-    binary-missing 127 — timeout: the process TREE is killed and nothing
-    renders; or an stdout stream beyond MAX_OUTPUT_BYTES, which is treated as
-    unparsable rather than buffered unboundedly). The child's stdin is
-    DEVNULL: cppgraph's own fd 0 may be the MCP stdio transport, and a masora
-    reading it would eat protocol frames.
+def run_masora_facts(
+    repo_root: str, symbols: str | Sequence[str] | None, timeout: float
+) -> str | None:
+    """Spawn `masora facts --repo <root> [--symbol <scip> [--symbol <scip> …]]`;
+    return stdout, or None on any failure (spawn error, non-zero exit —
+    including the binary-missing 127 — timeout: the process TREE is killed and
+    nothing renders; or an stdout stream beyond MAX_OUTPUT_BYTES, which is
+    treated as unparsable rather than buffered unboundedly). `symbols` is one
+    SCIP string, a sequence of them (§2's repeatable flag: ONE batched spawn
+    for a multi-symbol response's result symbols, OR-matched by masora), or
+    None (no flag — every lineage of the matching base(s)). The child's stdin
+    is DEVNULL: cppgraph's own fd 0 may be the MCP stdio transport, and a
+    masora reading it would eat protocol frames.
 
     Worst case ~2× the timeout budget on the orphaned-grandchild edge (the
     child exits fast but a grandchild holds the stdout write end, so the
     post-kill `reader.join` re-blocks up to the full timeout): still silent,
     still bounded, still no injection."""
     cmd = ["masora", "facts", "--repo", repo_root]
-    if symbol is not None:
-        cmd += ["--symbol", symbol]
+    if symbols is not None:
+        for symbol in [symbols] if isinstance(symbols, str) else symbols:
+            cmd += ["--symbol", symbol]
     try:
         proc = subprocess.Popen(
             cmd,
@@ -655,7 +680,7 @@ def mismatch_advisory(stdout: str) -> str | None:
 
 def query_lines(
     meta: Mapping[str, str],
-    symbol: str | None,
+    symbols: str | Sequence[str] | None,
     *,
     env: Mapping[str, str] | None = None,
     which: Which = shutil.which,
@@ -664,13 +689,25 @@ def query_lines(
 ) -> list[str]:
     """The entry point query responses call to inject Masora facts: flag
     check → binary detection → one `masora facts` spawn for the resolved
-    symbol → version-mismatch advisory (the one-line carve-out from silent
+    symbol(s) → version-mismatch advisory (the one-line carve-out from silent
     skip — see `mismatch_advisory`) → contract-v2 parse → §6 render (the
     fact count resolved from `CPPGRAPH_MASORA_MAX_FACTS` in the same env the
-    flag is read from). Returns the rendered lines — `[]` whenever the
-    feature is off or nothing injects, the single advisory line on a strict-
-    integer version mismatch, and never a raise (the zero-change
-    guarantee)."""
+    flag is read from).
+
+    `symbols` is the single symbol a single-symbol response centers on, or
+    every result symbol of a multi-symbol response (`find`/`outline`): ONE
+    batched spawn carries them all as repeated `--symbol` flags (§9.10),
+    deduplicated in order; the ≤ 2-fact / ≤ 60-token budget is per RESPONSE,
+    not per symbol. An EMPTY symbol list skips the spawn entirely — a
+    response with no result symbols asks nothing (spawning flag-less would
+    return every lineage of the matching base(s), which is not what an empty
+    find/outline means).
+
+    Returns the rendered lines — `[]` whenever the feature is off or nothing
+    injects, the single advisory line on a strict-integer version mismatch,
+    and on a parsed-but-zero-fact response exactly ONE presence-hint line
+    (§9.11: masora is present, it just has nothing anchored here) — and
+    never a raise (the zero-change guarantee)."""
     if not enabled(env):
         return []
     if which("masora") is None:
@@ -679,7 +716,16 @@ def query_lines(
         root = repo_root(meta)
         if root is None:
             return []
-        stdout = runner(root, symbol, timeout)
+        batch: Sequence[str] | None
+        if isinstance(symbols, str):
+            batch = [symbols]
+        elif symbols is None:
+            batch = None
+        elif not symbols:
+            return []
+        else:
+            batch = list(dict.fromkeys(symbols))
+        stdout = runner(root, batch, timeout)
         if stdout is None:
             return []
         advisory = mismatch_advisory(stdout)
@@ -691,6 +737,13 @@ def query_lines(
         contract = parse_contract(stdout)
         if contract is None:
             return []
-        return render_lines(contract, max_facts=max_facts(env))
+        lines = render_lines(contract, max_facts=max_facts(env))
+        if not lines:
+            # §9.11: masora is present (flag on, binary found, root resolved,
+            # contract parsed) and zero facts rendered — exactly one
+            # capability line, at most once per response (this is called once
+            # per response), never knowledge or advice.
+            return [HINT_LINE]
+        return lines
     except Exception:
         return []

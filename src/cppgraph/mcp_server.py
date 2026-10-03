@@ -55,7 +55,7 @@ from cppgraph.filters import matches_path_prefix as _matches_path_prefix
 from cppgraph.filters import path_prefix_error as _path_prefix_error
 from cppgraph.filters import short_label as _short_label
 from cppgraph.queries import capped as _capped
-from cppgraph.queries import extract_signature, find_symbols, read_source_snippet
+from cppgraph.queries import extract_signature, find_symbols, read_source_snippet, response_symbols
 from cppgraph.queries import label as _label
 from cppgraph.queries import line1 as _line1
 from cppgraph.queries import node_dict as _node_dict
@@ -1669,20 +1669,33 @@ _NO_GRAPH = {
 }
 
 
-def _masora_field(result: dict[str, Any], store: GraphStore | None) -> None:
+def _masora_field(
+    result: dict[str, Any],
+    store: GraphStore | None,
+    symbols: list[str] | None = None,
+) -> None:
     """Attach Masora fact lines (contract v2, see `cppgraph.masora`) to a
-    single-symbol query response as the `masora` string field — the rendered
-    §6 lines joined with newlines. Present only when something actually
-    injected (flag on, binary found, contract parsed); absent otherwise, and
-    never an error (the zero-change guarantee). Applies to the initial
-    injection scope only (`who_calls`/`what_it_calls`/`explain_symbol`); the
-    CLI appends the same lines as printed text (`cli._print_masora_lines`)."""
+    query response as the `masora` string field — the rendered §6 lines
+    joined with newlines. Single-symbol responses pass nothing and take the
+    symbol from `result["symbol"]`; multi-symbol responses (`find`/`outline`)
+    pass the response's result symbols — ONE batched spawn for the whole
+    response (§9.10). A parsed-but-zero-fact response carries the one-line
+    presence hint instead (§9.11). Present only when something actually
+    injects (flag on, binary found, contract parsed); absent otherwise, and
+    never an error (the zero-change guarantee). The CLI appends the same
+    lines as printed text (`cli._print_masora_lines`)."""
     if store is None:
         return
-    symbol = result.get("symbol")
-    if not isinstance(symbol, str) or not symbol:
-        return
-    lines = masora.query_lines(store.meta(), symbol)
+    if symbols is None:
+        symbol = result.get("symbol")
+        if not (isinstance(symbol, str) and symbol):
+            return
+        query: str | list[str] = symbol
+    else:
+        if not symbols:
+            return
+        query = symbols
+    lines = masora.query_lines(store.meta(), query)
     if lines:
         result["masora"] = "\n".join(lines)
 
@@ -1920,8 +1933,12 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         generated-code clutter (IDL Spec/getter classes and the like), scope it
         with these prefixes; the tool won't auto-detect "generated code".
         `limit` caps the list
-        (default 40): lower it to spend fewer tokens, raise it when `truncated`."""
-        return _call(
+        (default 40): lower it to spend fewer tokens, raise it when `truncated`.
+        When the `CPPGRAPH_MASORA` flag is on, matching Masora facts ride along
+        as the `masora` field — ONE batched spawn for all result symbols
+        (§9.10); a one-line presence hint when zero facts match (§9.11);
+        absent when nothing injects."""
+        result = _call(
             find_symbols,
             query,
             limit=limit,
@@ -1930,6 +1947,8 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
             include_paths=include_paths,
             exclude_paths=exclude_paths,
         )
+        _masora_field(result, stores.get(), symbols=response_symbols(result))
+        return result
 
     @mcp.tool()
     def who_calls(
@@ -1950,8 +1969,9 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         `limit` caps the list (default 40): lower it to spend fewer tokens when a
         few callers are enough, raise it when `truncated` is true.
         When the `CPPGRAPH_MASORA` flag is on, matching Masora facts ride
-        along as the `masora` field (rendered lines; absent when nothing
-        injected — the same lines the CLI's `callers` appends)."""
+        along as the `masora` field (rendered lines; a one-line presence
+        hint when zero facts match; absent when nothing injected — the same
+        lines the CLI's `callers` appends)."""
         result = _call(
             callers,
             symbol,
@@ -1993,8 +2013,9 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         order.
 
         When the `CPPGRAPH_MASORA` flag is on, matching Masora facts ride
-        along as the `masora` field (rendered lines; absent when nothing
-        injected — the same lines the CLI's `callees` appends)."""
+        along as the `masora` field (rendered lines; a one-line presence
+        hint when zero facts match; absent when nothing injected — the same
+        lines the CLI's `callees` appends)."""
         result = _call(
             callees,
             symbol,
@@ -2491,13 +2512,24 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         """Use this instead of Read/opening a file to see what's in it: the
         outline of one file — every symbol defined in it, sorted by line. A
         compact symbol list that replaces reading a 1400-line file, exact and
-        available on any graph. `file` is the exact path as recorded in the
+        available on any graph.         `file` is the exact path as recorded in the
         index (relative, e.g. `src/app.cpp`, not a prefix) — `stats` lists the
         indexed files; an empty result carries a note explaining that, never a
         bare zero. Compact `name` + `file:line` by default (`full_symbols=True`
         for raw SCIP). `limit` caps the list (default 40): raise it when
-        `truncated` — `total` always reports the full count."""
-        return _call(file_outline_report, file, limit=limit, full_symbols=full_symbols)
+        `truncated` — `total` always reports the full count. When the
+        `CPPGRAPH_MASORA` flag is on, matching Masora facts ride along as the
+        `masora` field — ONE batched spawn for all defined symbols (§9.10);
+        a one-line presence hint when zero facts match (§9.11); absent when
+        nothing injects."""
+        result = _call(file_outline_report, file, limit=limit, full_symbols=full_symbols)
+        store = stores.get()
+        if store is not None:
+            # The batched symbols come straight from the store: the compact
+            # report (full_symbols=False) carries no raw symbol strings.
+            nodes, _total = store.outline(file, limit=limit)
+            _masora_field(result, store, symbols=[node.symbol for node in nodes])
+        return result
 
     @mcp.tool()
     def class_members(
@@ -2600,8 +2632,9 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         unattributable call site, so only a #504 0 is exact; a nonzero count
         carries no caveat (over-capture is the safe direction).
         When the `CPPGRAPH_MASORA` flag is on, matching Masora facts ride
-        along as the `masora` field (rendered lines; absent when nothing
-        injected — the same lines the CLI's `explain` appends)."""
+        along as the `masora` field (rendered lines; a one-line presence
+        hint when zero facts match; absent when nothing injected — the same
+        lines the CLI's `explain` appends)."""
         result = _call(
             explain,
             symbol,

@@ -6,7 +6,7 @@ import argparse
 import json
 import sys
 import textwrap
-from collections.abc import Collection
+from collections.abc import Collection, Sequence
 from pathlib import Path
 
 from cppgraph import masora
@@ -30,7 +30,7 @@ from cppgraph.filters import (
 )
 from cppgraph.model import Edge, Node
 from cppgraph.proto import scip_pb2
-from cppgraph.queries import extract_signature, find_symbols, read_source_snippet
+from cppgraph.queries import extract_signature, find_symbols, read_source_snippet, response_symbols
 from cppgraph.queries import label as _node_label  # aliased: main() has local `label`s
 from cppgraph.store import (
     GraphStore,
@@ -340,13 +340,15 @@ def _resolve_symbol(
     parser.error(f"ambiguous {what}: {query}")
 
 
-def _print_masora_lines(store: GraphStore, symbol: str) -> None:
+def _print_masora_lines(store: GraphStore, symbols: str | Sequence[str]) -> None:
     """Append Masora fact lines (contract v2, see `cppgraph.masora`) to a
-    single-symbol query's text output — the CLI half of the shared
-    `masora.query_lines`. Prints nothing when the feature is off or nothing
-    injects (missing binary, failure, no matching base): the zero-change
-    guarantee means this can add lines, never errors."""
-    for line in masora.query_lines(store.meta(), symbol):
+    query's text output — the CLI half of the shared `masora.query_lines`.
+    `symbols` is the single resolved symbol of a single-symbol query, or every
+    result symbol of a multi-symbol response (`find`/`outline`: ONE batched
+    spawn, §9.10). Prints nothing when the feature is off or nothing injects;
+    a parsed-but-zero-fact response prints the one-line presence hint (§9.11);
+    never an error (the zero-change guarantee)."""
+    for line in masora.query_lines(store.meta(), symbols):
         print(line)
 
 
@@ -1999,6 +2001,7 @@ def main(argv: list[str] | None = None) -> int:
             print(
                 f"  ({r['trivial_hidden']} trivial hit(s) hidden — drop --hide-trivial to see them)"
             )
+        _print_masora_lines(store, response_symbols(r))
         return 0
 
     if args.command == "callers":
@@ -2483,6 +2486,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[cppgraph] {len(nodes)} of {total} definition(s) in {args.file}, by line")
         for node in nodes:
             _print_node(node, full_symbols=args.full_symbols)
+        if total > len(nodes):
+            print(f"  ... and {total - len(nodes)} more (raise --limit to see them)")
+        if nodes:
+            _print_masora_lines(store, [node.symbol for node in nodes])
         if total == 0:
             print(
                 "  note: no symbols defined in this file in the index — the path must "
