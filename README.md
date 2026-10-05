@@ -88,8 +88,11 @@ UI), then run the script non-interactively with those choices as flags.**
    re-install it into another project's environment — that creates a second
    divergent install with its own dependency versions that can conflict with the
    committed generated bindings (observed: a project venv's pinned `protobuf`
-   vs cppgraph's). Convenience alias for the user's shell rc (`~/.bashrc` /
-   `~/.zshrc`):
+   vs cppgraph's). Setup also links the binary into `~/.local/bin` automatically
+   (skipped when a `cppgraph` is already on PATH), so a bare `cppgraph` works
+   after setup; the shell alias below remains an alternative (e.g. for older
+   installs predating the link). Convenience alias for the user's shell rc
+   (`~/.bashrc` / `~/.zshrc`):
    ```bash
    alias cppgraph="${XDG_DATA_HOME:-$HOME/.local/share}/cppgraph/repo/.venv/bin/cppgraph"
    ```
@@ -103,7 +106,9 @@ choice (whole tree / a subtree) + a yes/no on tests; then (c) you run it and rep
 progress; (d) when done, they open a new Claude Code session.
 
 1. **Get the scope options:** run `~/.local/share/cppgraph/repo/scripts/index.sh
-   --plan-json` (a bare `cppgraph` isn't on PATH) from the project dir; it
+   --plan-json` (a bare `cppgraph` works when setup linked it into `~/.local/bin`;
+   otherwise use the full path `~/.local/share/cppgraph/repo/.venv/bin/cppgraph`,
+   the fallback on older installs) from the project dir; it
    auto-locates the `compile_commands.json` — if it reports none, generate one, see
    [AGENTS.md](AGENTS.md) → "Fallback", after the user's OK. It returns the compdb
    breakdown, the questions (subtree / tests / attribution), and `artifacts` (whether

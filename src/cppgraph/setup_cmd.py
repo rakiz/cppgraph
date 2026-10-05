@@ -477,6 +477,55 @@ def install_command(p: Prompter) -> dict[str, str]:
     return _install_agent_file(_repo_root() / "commands" / "cppgraph.md", targets, "command", p)
 
 
+def ensure_cli_on_path(
+    p: Prompter, *, venv_bin: Path | None = None, link_dir: Path | None = None
+) -> str:
+    """Stage S3d. Symlinks the venv's `cppgraph` binary into the user's personal
+    bin dir so shells and spawned agents — which do not inherit MCP servers —
+    find a bare `cppgraph` on PATH; never clobbers a non-symlink file. Returns
+    `present` (a cppgraph is already on PATH), `installed`, `kept`, `skipped`
+    (the link path holds a real file), or `failed` (venv binary missing)."""
+    venv_bin = venv_bin or _repo_root() / ".venv" / "bin" / "cppgraph"
+    link_dir = link_dir or Path.home() / ".local" / "bin"
+    found = shutil.which("cppgraph")
+    if found is not None:
+        p.note(f"note: `cppgraph` is already on PATH at {found} — leaving it alone.")
+        return "present"
+    if not venv_bin.is_file():
+        p.note(f"note: {venv_bin} not found — is the venv set up? Skipping the PATH link.")
+        return "failed"
+    link = link_dir / "cppgraph"
+    try:
+        if link.is_symlink():
+            if os.readlink(link) == str(venv_bin):
+                p.note(f"==> Linked the cppgraph command onto PATH: {link} -> {venv_bin}")
+                status = "kept"
+            else:
+                link.unlink()
+                link.symlink_to(venv_bin)
+                p.note(f"==> Linked the cppgraph command onto PATH: {link} -> {venv_bin}")
+                status = "installed"
+        elif link.exists():
+            p.note(f"note: {link} already exists and is not a symlink — skipping the PATH link.")
+            status = "skipped"
+        else:
+            link_dir.mkdir(parents=True, exist_ok=True)
+            link.symlink_to(venv_bin)
+            p.note(f"==> Linked the cppgraph command onto PATH: {link} -> {venv_bin}")
+            status = "installed"
+    except OSError as exc:
+        p.note(f"error: could not link {link} -> {venv_bin}: {exc}")
+        return "failed"
+    if status in ("installed", "kept") and str(link_dir) not in os.environ.get("PATH", "").split(
+        os.pathsep
+    ):
+        p.note(
+            f"note: {link_dir} is not on your PATH — "
+            "add it to your shell rc for the link to take effect."
+        )
+    return status
+
+
 def run_setup(
     *,
     prompter: Prompter | None = None,
@@ -508,6 +557,7 @@ def run_setup(
 
     install_skill(p)
     install_command(p)
+    ensure_cli_on_path(p)
 
     p.note("", "Tool setup complete.")
     if not chain_index:

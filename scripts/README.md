@@ -85,8 +85,10 @@ requires a usable `compile_commands.json`; it does not create one.
 ## `uninstall.sh`
 
 The safe, interactive counterpart to `setup.sh`. It offers removal of the user
-MCP registration, the per-machine `scip-clang` binary, the cppgraph checkout and
-venv, and the current project's `.cppgraph/` data. Project graph data is kept
+MCP registration, the installed skill + `/cppgraph` command, the
+`~/.local/bin/cppgraph` command link (only when it points into the tool's venv),
+the per-machine `scip-clang` binary, the cppgraph checkout and venv, and the
+current project's `.cppgraph/` data. Project graph data is kept
 by default because a `.scip` file can take hours to rebuild; other projects are
 not touched.
 
@@ -97,8 +99,9 @@ scripts/uninstall.sh --yes
 scripts/uninstall.sh --purge
 ```
 
-`--dry-run` makes no changes. `--yes` removes the MCP registration, binary, and
-tool while keeping project data. `--purge` (or `--all`) also removes the current
+`--dry-run` makes no changes. `--yes` removes the MCP registration, the agent
+extras, the `~/.local/bin/cppgraph` command link, the binary, and the tool while
+keeping project data. `--purge` (or `--all`) also removes the current
 project's data. `${XDG_DATA_HOME:-$HOME/.local/share}` selects the data root and
 `CPPGRAPH_BIN_DIR` overrides the binary directory.
 

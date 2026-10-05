@@ -314,8 +314,10 @@ version stays fixed and regeneration is reproducible.
 
 `scripts/uninstall.sh` mirrors setup — it asks, per item, what to remove (nothing
 goes without a yes): the MCP registration (`claude mcp remove cppgraph`), the
-scip-clang binary, the tool checkout + venv, and (default **no**) this project's
-`./.cppgraph` graph data. Project graphs live in each project's own
+installed skill + `/cppgraph` command, the `~/.local/bin/cppgraph` command link
+(only when it points into the tool's venv), the scip-clang binary, the tool
+checkout + venv, and (default **no**) this project's `./.cppgraph` graph data.
+Project graphs live in each project's own
 `<project>/.cppgraph/`; the script only offers the current one — remove the rest
 per-project.
 
@@ -326,7 +328,7 @@ dev checkout):
 UNINST=~/.local/share/cppgraph/repo/scripts/uninstall.sh
 "$UNINST"            # interactive (recommended)
 "$UNINST" --dry-run  # show what would happen, change nothing
-"$UNINST" --yes      # non-interactive: MCP + binary + tool, keep data
+"$UNINST" --yes      # non-interactive: MCP + extras + CLI link + binary + tool, keep data
 "$UNINST" --purge    # non-interactive: everything, incl. project data
 ```
 

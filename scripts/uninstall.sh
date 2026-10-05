@@ -9,7 +9,10 @@ set -euo pipefail
 #      copied into the detected agent tools' per-user dirs);
 #   3. the scip-clang binary (per-machine, in the bin dir);
 #   4. the tool itself (the cppgraph checkout + its venv);
-#   5. this project's graph data (./.cppgraph), if run from a project.
+#   5. the CLI command link (~/.local/bin/cppgraph), only when it is a symlink
+#      pointing into $REPO's venv (never a foreign or real file, and never the
+#      ~/.local/bin dir itself — a standard user dir that predates cppgraph);
+#   6. this project's graph data (./.cppgraph), if run from a project.
 #
 # Project graphs live in each project's own <project>/.cppgraph/ — this script
 # only offers the one in the current directory (it can't know the others); delete
@@ -17,8 +20,8 @@ set -euo pipefail
 #
 # Usage:
 #   scripts/uninstall.sh            interactive (recommended)
-#   scripts/uninstall.sh --yes      non-interactive: remove MCP + agent extras +
-#                                   binary + tool, KEEP project data (the safe defaults)
+#   scripts/uninstall.sh --yes      non-interactive: remove MCP + agent extras + the CLI
+#                                   command link + binary + tool, KEEP project data (safe defaults)
 #   scripts/uninstall.sh --purge    non-interactive: remove EVERYTHING, including
 #                                   this project's .cppgraph data (--all is a synonym)
 #   scripts/uninstall.sh --dry-run  print what would happen, change nothing
@@ -38,6 +41,11 @@ CLAUDE_CMD="$HOME/.claude/commands/cppgraph.md"
 OPENCODE_ROOT="${XDG_CONFIG_HOME:-$HOME/.config}/opencode"
 OPENCODE_SKILL="$OPENCODE_ROOT/skills/cppgraph/SKILL.md"
 OPENCODE_CMD="$OPENCODE_ROOT/command/cppgraph.md"
+# The CLI command link setup_cmd.ensure_cli_on_path creates. Only a symlink
+# pointing into $REPO's venv is ever touched — a foreign file/link at this path
+# (masora and other tools live in ~/.local/bin) is left alone, and the dir
+# itself is never removed (it predates cppgraph; it is not ours to delete).
+CLI_LINK="$HOME/.local/bin/cppgraph"
 
 ASSUME_YES=0
 DRY_RUN=0
@@ -48,7 +56,7 @@ for arg in "$@"; do
     --purge | --all) PURGE=1; ASSUME_YES=1 ;;
     --dry-run) DRY_RUN=1 ;;
     -h | --help)
-      sed -n '2,27p' "$0"
+      sed -n '2,28p' "$0"
       exit 0
       ;;
     *)
@@ -127,6 +135,19 @@ else
   echo "  installed agent extras: (absent)"
 fi
 echo "  this project's graph:  $PROJECT_CPG $([[ -d $PROJECT_CPG ]] && echo '(present)' || echo '(absent)')"
+# Ours = a symlink into $REPO's venv (dangling counts: -L + readlink, not -e,
+# which is false for a dangling link).
+cli_link_state="(absent)"
+if [[ -L "$CLI_LINK" ]]; then
+  if [[ "$(readlink "$CLI_LINK" 2>/dev/null)" == "$REPO/.venv/bin/cppgraph" ]]; then
+    cli_link_state="(present, ours)"
+  else
+    cli_link_state="(not-ours)"
+  fi
+elif [[ -e "$CLI_LINK" ]]; then
+  cli_link_state="(not-ours)"
+fi
+echo "  CLI command link:      $CLI_LINK $cli_link_state"
 echo
 
 # 1. MCP registration.
@@ -185,7 +206,17 @@ if [[ -d "$REPO" ]]; then
   fi
 fi
 
-# 5. This project's graph data — default NO (data is precious; other projects
+# 5. The CLI command link — checked OUTSIDE the `[[ -d $REPO ]]` guard above:
+#    the link can dangle when the repo was removed another way. Only a symlink
+#    into $REPO's venv is offered (a foreign file/link stays untouched);
+#    ~/.local/bin itself is never removed — a standard user dir, not ours.
+if [[ -L "$CLI_LINK" && "$(readlink "$CLI_LINK" 2>/dev/null)" == "$REPO/.venv/bin/cppgraph" ]]; then
+  if ask "Remove the CLI command link at $CLI_LINK?" y; then
+    rm_path "CLI command link" "$CLI_LINK"
+  fi
+fi
+
+# 6. This project's graph data — default NO (data is precious; other projects
 #    have their own .cppgraph to remove separately).
 if [[ -d "$PROJECT_CPG" ]]; then
   # Default no (data is precious) — unless --purge/--all was asked, which means

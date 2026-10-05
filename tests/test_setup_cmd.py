@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 from cppgraph import setup_cmd
@@ -674,3 +675,103 @@ def test_install_command_missing_source_fails(tmp_path: Path, monkeypatch) -> No
     assert not claude_dest.exists()
     assert not opencode_dest.exists()
     assert any("skipping command install" in line for line in out)
+
+
+def _path_env(tmp_path: Path, monkeypatch) -> Path:
+    """Isolate HOME/PATH (empty PATH dir, nothing on it); create a fake venv
+    `cppgraph` binary and return its path."""
+    home = tmp_path / "home"
+    (home / ".local").mkdir(parents=True)
+    path_bin = tmp_path / "path-bin"
+    path_bin.mkdir()
+    venv_bin = tmp_path / "venv" / "bin" / "cppgraph"
+    venv_bin.parent.mkdir(parents=True)
+    venv_bin.write_text("#!/bin/sh\n")
+    venv_bin.chmod(0o755)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("PATH", str(path_bin))
+    return venv_bin
+
+
+def test_ensure_cli_on_path_installs_symlink(tmp_path: Path, monkeypatch) -> None:
+    """With nothing named cppgraph on PATH and a link dir not on PATH, the venv
+    binary is symlinked into the link dir and the user is told the dir isn't on PATH."""
+    venv_bin = _path_env(tmp_path, monkeypatch)
+    link_dir = tmp_path / "home" / ".local" / "bin"
+    p, out = _scripted_prompter([])
+    assert setup_cmd.ensure_cli_on_path(p, venv_bin=venv_bin, link_dir=link_dir) == "installed"
+    link = link_dir / "cppgraph"
+    assert os.readlink(link) == str(venv_bin)
+    assert any("not on your PATH" in line for line in out)
+
+
+def test_ensure_cli_on_path_already_on_path(tmp_path: Path, monkeypatch) -> None:
+    """A `cppgraph` already on PATH wins: no link is created in the link dir."""
+    venv_bin = _path_env(tmp_path, monkeypatch)
+    link_dir = tmp_path / "home" / ".local" / "bin"
+    path_bin = Path(os.environ["PATH"])
+    (path_bin / "cppgraph").write_text("#!/bin/sh\n")
+    (path_bin / "cppgraph").chmod(0o755)
+    p, _ = _scripted_prompter([])
+    assert setup_cmd.ensure_cli_on_path(p, venv_bin=venv_bin, link_dir=link_dir) == "present"
+    assert not (link_dir / "cppgraph").exists()
+
+
+def test_ensure_cli_on_path_keeps_correct_link(tmp_path: Path, monkeypatch) -> None:
+    """An existing symlink already pointing at the venv binary is kept as-is."""
+    venv_bin = _path_env(tmp_path, monkeypatch)
+    link_dir = tmp_path / "home" / ".local" / "bin"
+    link_dir.mkdir(parents=True)
+    link = link_dir / "cppgraph"
+    link.symlink_to(venv_bin)
+    p, _ = _scripted_prompter([])
+    assert setup_cmd.ensure_cli_on_path(p, venv_bin=venv_bin, link_dir=link_dir) == "kept"
+    assert os.readlink(link) == str(venv_bin)
+
+
+def test_ensure_cli_on_path_skips_real_file(tmp_path: Path, monkeypatch) -> None:
+    """A real (non-symlink) file at the link path is never clobbered."""
+    venv_bin = _path_env(tmp_path, monkeypatch)
+    link_dir = tmp_path / "home" / ".local" / "bin"
+    link_dir.mkdir(parents=True)
+    link = link_dir / "cppgraph"
+    link.write_text("precious\n")
+    p, out = _scripted_prompter([])
+    assert setup_cmd.ensure_cli_on_path(p, venv_bin=venv_bin, link_dir=link_dir) == "skipped"
+    assert link.read_text() == "precious\n"
+    assert any("not a symlink" in line for line in out)
+
+
+def test_ensure_cli_on_path_repairs_stale_link(tmp_path: Path, monkeypatch) -> None:
+    """A symlink pointing elsewhere (stale or dangling) is repointed at the venv
+    binary."""
+    venv_bin = _path_env(tmp_path, monkeypatch)
+    link_dir = tmp_path / "home" / ".local" / "bin"
+    link_dir.mkdir(parents=True)
+    link = link_dir / "cppgraph"
+    link.symlink_to(tmp_path / "gone" / "old-cppgraph")
+    p, _ = _scripted_prompter([])
+    assert setup_cmd.ensure_cli_on_path(p, venv_bin=venv_bin, link_dir=link_dir) == "installed"
+    assert os.readlink(link) == str(venv_bin)
+
+
+def test_ensure_cli_on_path_missing_venv_binary_fails(tmp_path: Path, monkeypatch) -> None:
+    """No venv binary (venv not set up): report failure and create no link."""
+    _path_env(tmp_path, monkeypatch)
+    venv_bin = tmp_path / "venv" / "bin" / "cppgraph"
+    venv_bin.unlink()
+    link_dir = tmp_path / "home" / ".local" / "bin"
+    p, out = _scripted_prompter([])
+    assert setup_cmd.ensure_cli_on_path(p, venv_bin=venv_bin, link_dir=link_dir) == "failed"
+    assert not (link_dir / "cppgraph").exists()
+    assert any("is the venv set up?" in line for line in out)
+
+
+def test_ensure_cli_on_path_no_hint_when_dir_on_path(tmp_path: Path, monkeypatch) -> None:
+    """When the link dir itself is already on PATH, the not-on-PATH hint is
+    suppressed."""
+    venv_bin = _path_env(tmp_path, monkeypatch)
+    link_dir = Path(os.environ["PATH"])
+    p, out = _scripted_prompter([])
+    assert setup_cmd.ensure_cli_on_path(p, venv_bin=venv_bin, link_dir=link_dir) == "installed"
+    assert not any("not on your PATH" in line for line in out)

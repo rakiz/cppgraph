@@ -3,8 +3,9 @@ description: Query, index or update the current project's C++ cppgraph call grap
 ---
 
 You drive cppgraph (C++ call graph indexed via scip-clang) for the current
-project. The binary is `~/.local/share/cppgraph/repo/.venv/bin/cppgraph` (a
-bare `cppgraph` may not be on PATH). Based on the first word of "$ARGUMENTS":
+project. The binary is on PATH as a bare `cppgraph` for installs where setup
+linked it into `~/.local/bin`; on older installs, fall back to the full path
+`~/.local/share/cppgraph/repo/.venv/bin/cppgraph`. Based on the first word of "$ARGUMENTS":
 
 ## status
 

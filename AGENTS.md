@@ -146,7 +146,8 @@ Keep the commands and JSON out of the conversation entirely.
 
 1. **Get the options:** run `cppgraph index --plan-json` from the project directory
    (use the installed binary: `~/.local/share/cppgraph/repo/.venv/bin/cppgraph`, or
-   `scripts/index.sh --plan-json` — a bare `cppgraph` is not on PATH).
+   `scripts/index.sh --plan-json` — a bare `cppgraph` works when setup linked it
+   into `~/.local/bin`; older installs fall back to the full path).
    It auto-locates the `compile_commands.json` (root / `build/` / up the tree) and
    returns the compdb breakdown plus a `questions[]` array (`filter`, `no_tests`,
    `attributed_refs`), each with its `info`, `default`, and — for `filter` —
@@ -267,7 +268,8 @@ when it's stale (it reflects the build graph at generation time).
 - **Never `pip install cppgraph` (or add it as a dependency) into a target
   project's own venv/virtualenv.** It's a single per-machine tool with one
   dedicated venv (`~/.local/share/cppgraph/repo/.venv`); invoke its binaries from
-  there directly (optionally alias `cppgraph` to that binary), never re-install it
+  there directly (setup links `cppgraph` into `~/.local/bin`, so a bare
+  `cppgraph` usually works; an alias is the alternative on older installs), never re-install it
   into another project's environment — that creates a second divergent install
   with its own dependency versions that can conflict with the committed generated
   bindings (observed: a project venv's pinned `protobuf` vs cppgraph's).
