@@ -8,6 +8,20 @@ on-disk store also carries its own `schema_version` for forward-compatibility.
 
 ### Added
 
+- **Masora facts contract v3** — cppgraph now parses exactly
+  `contract_version: 3` (no dual-version window, same posture as the v2
+  ruling: a v2 producer gets the one-line "update masora" advisory, a
+  newer one "update cppgraph"). The document carries
+  `lineages_examined` / `lineages_matched` (strict ints) and masora's
+  `presence_hint`; each fact carries `anchor_leaf` (the short leaf masora
+  derives from the first matched anchor identity — masora owns the
+  identity format, cppgraph renders it and never re-derives). All are
+  REQUIRED in v3, fail-closed like every shape error (nullable except the
+  counters). The multi-symbol responses (`find`/`outline`) now render
+  each fact as `masora: <summary> [status] — <anchor_leaf>` when the leaf
+  is non-null — the reader can tell WHICH queried symbol a fact answers
+  for; single-symbol responses render the plain form unchanged; the
+  suffix counts in the ≤ 60-token envelope and the atomic-block rule.
 - **Masora multi-symbol batched spawn** (contract §9.10) — `find` and
   `outline` now inject too: ONE `masora facts` spawn per response carrying
   every result symbol as repeated `--symbol` flags (§2's OR-matching; the
@@ -19,17 +33,20 @@ on-disk store also carries its own `schema_version` for forward-compatibility.
   truncation line unchanged; two symbols anchoring the same lineage still
   render that one fact once. A response with zero result symbols spawns
   nothing.
-- **Masora presence hint** (contract §9.11) — when Masora is PRESENT for
-  the checkout (flag on, binary found, root resolved, contract parsed) and
-  ZERO facts rendered, exactly one capability line renders:
-  `masora: present for this checkout — the masora search / explain /
-  list_stale MCP tools recall recorded knowledge.` — at most once per
-  response (single- or multi-symbol), never knowledge or advice. The
-  absent modes render nothing, not even the hint: flag off, binary
-  missing, unresolvable base, spawn failure, unparsable output; a version
-  mismatch renders the advisory alone. The stale-index note still renders
-  only alongside facts, so a stale index with zero facts renders the hint
-  alone.
+- **Differentiated zero-fact rendering** (contract §9.11 as refined by v3)
+  — when Masora is PRESENT for the checkout (flag on, binary found, root
+  resolved, contract parsed) and ZERO facts render, the counters decide
+  the flavor, one line at most per response, never knowledge or advice:
+  an EMPTY base (`lineages_examined == 0`) renders masora's
+  `presence_hint` VERBATIM — masora owns the wording (tool names
+  included), so a rename is a masora-side change and cppgraph's hardcoded
+  hint literal is GONE; a filtered no-match against a non-empty base
+  renders the cppgraph-derived staleness line
+  `masora: <n> lineage(s) examined, none matched — the base may predate
+  this rebuild.` — no tool names. The absent modes render nothing, not
+  even a hint: flag off, binary missing, unresolvable base, spawn
+  failure, unparsable output; a version mismatch renders the advisory
+  alone. The stale-index note still renders only alongside facts.
 - **`symbol_format` meta row** (contract §9.12) — the symbol identity
   format is versioned like the store schema: every freshly built store's
   meta now carries `symbol_format` (= 1, the current decorated

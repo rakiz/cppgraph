@@ -341,13 +341,14 @@ def _resolve_symbol(
 
 
 def _print_masora_lines(store: GraphStore, symbols: str | Sequence[str]) -> None:
-    """Append Masora fact lines (contract v2, see `cppgraph.masora`) to a
+    """Append Masora fact lines (contract v3, see `cppgraph.masora`) to a
     query's text output — the CLI half of the shared `masora.query_lines`.
     `symbols` is the single resolved symbol of a single-symbol query, or every
     result symbol of a multi-symbol response (`find`/`outline`: ONE batched
     spawn, §9.10). Prints nothing when the feature is off or nothing injects;
-    a parsed-but-zero-fact response prints the one-line presence hint (§9.11);
-    never an error (the zero-change guarantee)."""
+    a zero-fact response prints one of §6's v3 differentiated notices —
+    masora's presence_hint verbatim on an empty base, the derived staleness
+    line otherwise; never an error (the zero-change guarantee)."""
     for line in masora.query_lines(store.meta(), symbols):
         print(line)
 

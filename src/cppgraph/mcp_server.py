@@ -1674,13 +1674,15 @@ def _masora_field(
     store: GraphStore | None,
     symbols: list[str] | None = None,
 ) -> None:
-    """Attach Masora fact lines (contract v2, see `cppgraph.masora`) to a
+    """Attach Masora fact lines (contract v3, see `cppgraph.masora`) to a
     query response as the `masora` string field — the rendered §6 lines
     joined with newlines. Single-symbol responses pass nothing and take the
     symbol from `result["symbol"]`; multi-symbol responses (`find`/`outline`)
     pass the response's result symbols — ONE batched spawn for the whole
-    response (§9.10). A parsed-but-zero-fact response carries the one-line
-    presence hint instead (§9.11). Present only when something actually
+    response (§9.10). A zero-fact response carries one of §6's v3 notices
+    instead — masora's `presence_hint` verbatim on an empty base, the
+    derived staleness line otherwise (§9.13). Present only when something
+    actually
     injects (flag on, binary found, contract parsed); absent otherwise, and
     never an error (the zero-change guarantee). The CLI appends the same
     lines as printed text (`cli._print_masora_lines`)."""
@@ -1936,8 +1938,9 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         (default 40): lower it to spend fewer tokens, raise it when `truncated`.
         When the `CPPGRAPH_MASORA` flag is on, matching Masora facts ride along
         as the `masora` field — ONE batched spawn for all result symbols
-        (§9.10); a one-line presence hint when zero facts match (§9.11);
-        absent when nothing injects."""
+        (§9.10); a zero-fact response carries one of §6's v3 notices —
+        masora's presence hint verbatim on an empty base, the derived
+        staleness line otherwise; absent when nothing injects."""
         result = _call(
             find_symbols,
             query,
@@ -1969,8 +1972,9 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         `limit` caps the list (default 40): lower it to spend fewer tokens when a
         few callers are enough, raise it when `truncated` is true.
         When the `CPPGRAPH_MASORA` flag is on, matching Masora facts ride
-        along as the `masora` field (rendered lines; a one-line presence
-        hint when zero facts match; absent when nothing injected — the same
+        along as the `masora` field (rendered lines; a zero-fact response
+        carries one of §6's v3 notices — masora's presence hint verbatim or
+        the derived staleness line; absent when nothing injected — the same
         lines the CLI's `callers` appends)."""
         result = _call(
             callers,
@@ -2013,8 +2017,9 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         order.
 
         When the `CPPGRAPH_MASORA` flag is on, matching Masora facts ride
-        along as the `masora` field (rendered lines; a one-line presence
-        hint when zero facts match; absent when nothing injected — the same
+        along as the `masora` field (rendered lines; a zero-fact response
+        carries one of §6's v3 notices — masora's presence hint verbatim or
+        the derived staleness line; absent when nothing injected — the same
         lines the CLI's `callees` appends)."""
         result = _call(
             callees,
@@ -2520,8 +2525,9 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         `truncated` — `total` always reports the full count. When the
         `CPPGRAPH_MASORA` flag is on, matching Masora facts ride along as the
         `masora` field — ONE batched spawn for all defined symbols (§9.10);
-        a one-line presence hint when zero facts match (§9.11); absent when
-        nothing injects."""
+        a zero-fact response carries one of §6's v3 notices — masora's
+        presence hint verbatim on an empty base, the derived staleness line
+        otherwise; absent when nothing injects."""
         result = _call(file_outline_report, file, limit=limit, full_symbols=full_symbols)
         store = stores.get()
         if store is not None:
@@ -2632,8 +2638,9 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         unattributable call site, so only a #504 0 is exact; a nonzero count
         carries no caveat (over-capture is the safe direction).
         When the `CPPGRAPH_MASORA` flag is on, matching Masora facts ride
-        along as the `masora` field (rendered lines; a one-line presence
-        hint when zero facts match; absent when nothing injected — the same
+        along as the `masora` field (rendered lines; a zero-fact response
+        carries one of §6's v3 notices — masora's presence hint verbatim or
+        the derived staleness line; absent when nothing injected — the same
         lines the CLI's `explain` appends)."""
         result = _call(
             explain,

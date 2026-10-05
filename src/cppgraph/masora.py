@@ -1,5 +1,5 @@
 """Masora fact injection — the cppgraph side of the integration contract
-(documented in masora's `docs/CPPGRAPH_INTEGRATION.md`, contract shape v2).
+(documented in masora's `docs/CPPGRAPH_INTEGRATION.md`, contract shape v3).
 
 Masora is a git-backed knowledge base of claims anchored to code symbols.
 When a query response is centered on symbol S and the feature is enabled,
@@ -12,8 +12,11 @@ stream — and its stdout is capped, overflow skipping the response), parses
 the JSON document, and appends at most 2 terse fact lines to the response —
 on both the CLI (printed text lines) and the MCP server (the `masora` string
 field, rendered lines joined with newlines; absent when nothing injects).
-On a present-but-zero-fact response exactly ONE presence-hint line renders
-instead (§9.11) — a capability notice, never knowledge or advice.
+On a zero-fact response the rendering is DIFFERENTIATED (§6, v3): an empty
+base renders masora's own `presence_hint` VERBATIM (masora owns the wording
+— cppgraph never hardcodes it), a filtered no-match against a non-empty
+base renders the cppgraph-derived staleness line from the counters — both
+capability/absence notices, never knowledge or advice.
 
 Feature flag `CPPGRAPH_MASORA` (checked before any spawn):
 - unset → OFF (the default until the integration is validated);
@@ -30,20 +33,28 @@ every other failure here). The ≤ 60-token budget guidance STANDS: it wins
 over the fact count, so a higher count renders fewer lines plus the visible
 truncation line whenever the budget runs out first.
 
-Contract shape v2 (the current shape; NO dual-version window — masora ruled
-"v2 or nothing", so cppgraph accepts exactly `contract_version: 2` and
-rejects v1 and every other major like any unknown version): each fact
-additionally REQUIRES the four context stamps — `established_relation`
-(`str | null`; the known enum is `in_line | ahead | out_of_line | unknown`,
-and an unrecognized string value is parser-inert), `established_commit`
-(`str | null`, short 12 hex chars, presentation-only — a pointer for the
-rendered context, never an input to any comparison), `off_version` (a
-STRICT `bool` — a JSON int/str is a violation) and `context_ordering`
-(`str`; known enum `exact | degraded`, an unrecognized value is
-parser-inert). A fact MISSING any of the four is a shape violation → the
-WHOLE document rejects, fail-closed as every other shape error; explicit
-`null` is accepted for the two nullable stamps (`established_relation`,
-`established_commit`) but `context_ordering` null is a violation.
+Contract shape v3 (the current shape; NO dual-version window — masora
+ruled at v2 "v2 or nothing" and kept the posture, so cppgraph accepts
+exactly `contract_version: 3` and rejects v2 and every other major like
+any unknown version — an older producer gets the "update masora"
+advisory): each fact REQUIRES the four context stamps —
+`established_relation` (`str | null`; the known enum is
+`in_line | ahead | out_of_line | unknown`, and an unrecognized string
+value is parser-inert), `established_commit` (`str | null`, short 12 hex
+chars, presentation-only — a pointer for the rendered context, never an
+input to any comparison), `off_version` (a STRICT `bool` — a JSON int/str
+is a violation) and `context_ordering` (`str`; known enum
+`exact | degraded`, an unrecognized value is parser-inert) — plus the v3
+`anchor_leaf` (`str | null`; the SHORT leaf masora derived from the first
+matched anchor identity, a RENDERING INPUT for §6's multi-symbol rule;
+null when no `--symbol` was passed). A fact MISSING any of the five is a
+shape violation → the WHOLE document rejects, fail-closed as every other
+shape error; explicit `null` is accepted for the three nullable ones
+(`established_relation`, `established_commit`, `anchor_leaf`) but
+`context_ordering` null is a violation. The DOCUMENT likewise REQUIRES
+the v3 fields: `lineages_examined` / `lineages_matched` (STRICT ints — a
+JSON bool is a violation) and `presence_hint` (`str | null`; masora owns
+the wording — cppgraph renders it verbatim and never hardcodes it).
 
 Context rendering (§6 — "Masora evaluates, cppgraph renders"; the stamps
 are the trigger, cppgraph never computes git state): an indented context
@@ -75,8 +86,8 @@ text).
 Version-mismatch advisory — a deliberate carve-out from the silent skip:
 after a successful spawn, a stdout that parses as a JSON dict whose
 `contract_version` is a strict integer (a JSON bool is invalid even where
-the language conflates bool and int) OTHER than 2 returns exactly ONE
-advisory line instead of facts — newer: `masora: [facts contract v{n}
+the language conflates bool and int) OTHER than 3 returns exactly ONE
+advisory line instead of facts — newer: `masora: [facts contract v{n}`
 unsupported — update cppgraph]`; older: `masora: [facts contract v{n} —
 update masora]`. Every other failure mode stays silent. Contract friction
 to relay to masora: the contract's letter says an unknown major version
@@ -123,17 +134,33 @@ Rendering decisions (§6 latitude, pinned here):
   (`… +N more — masora search`) — the visible cap wins over the suggested
   budget, never a silent drop. At least one fact always renders.
 - duplicate `lineage` ids are deduped (first occurrence wins).
-- presence hint (§9.11): when masora is PRESENT for the checkout (the flag
-  on, the binary found, the root resolved, the contract parsed) and ZERO
-  facts rendered for the response, exactly ONE capability line renders —
-  `HINT_LINE`, §6's suggested wording verbatim — at most once per response
-  (the injection is one call per response, whatever the number of batched
-  symbols), and never as knowledge or advice: it carries no claim, no
-  status and no context. The absent modes render nothing — not even the
-  hint: flag off, binary missing, unresolvable root, spawn failure,
+- the multi-symbol leaf suffix (§6, v3): on a MULTI-symbol response
+  (`find`/`outline` batched spawn), a fact with a non-null `anchor_leaf`
+  renders `masora: <summary> [status] — <anchor_leaf>` — the leaf
+  disambiguates WHICH queried symbol the fact answers for (masora derives
+  it because masora owns the identity format; cppgraph renders it, never
+  re-derives it). A null leaf renders the plain form; single-symbol
+  responses are unchanged (no suffix whatever the leaf); the NOT: envelope
+  takes the suffix too ("each fact"). The suffix is part of the fact line —
+  it counts in the token estimate and the atomic block rule.
+- the zero-fact rendering is DIFFERENTIATED by the counters (§6, v3) —
+  masora is PRESENT for the checkout (the flag on, the binary found, the
+  root resolved, the contract parsed) and ZERO facts rendered, in either
+  flavor: `lineages_examined == 0` (empty base) → masora's `presence_hint`
+  renders VERBATIM — the exact string masora shipped, cppgraph never
+  hardcodes the wording (a tool rename is a masora-side change, never a
+  cppgraph literal drift); `lineages_examined > 0` (a filtered no-match
+  against a non-empty base) → the cppgraph-derived staleness line
+  `<n> lineage(s) examined, none matched — the base may predate this
+  rebuild.`, derived from the counters, naming NO tools. Either line
+  renders at most once per response, whatever the number of batched
+  symbols, and both are capability/absence notices, NEVER knowledge and
+  NEVER code advice — no claim, no status, no context. The counters are
+  the trigger: a drifted non-null hint does not render once lineages were
+  examined, and a null hint at zero examined stays silent (cppgraph never
+  invents capability wording). The absent modes render nothing — not even
+  a hint: flag off, binary missing, unresolvable root, spawn failure,
   unparsable output; a version mismatch renders the advisory line only.
-  The stale-index note still renders only alongside facts, so a stale index
-  with zero facts renders the hint alone.
 
 Contract enrichment (additive-optional since v1, carried into v2
 unchanged): each fact may carry
@@ -186,16 +213,18 @@ from cppgraph.store import project_root_path
 
 ENV_VAR = "CPPGRAPH_MASORA"
 MAX_FACTS_ENV_VAR = "CPPGRAPH_MASORA_MAX_FACTS"
-CONTRACT_VERSION = 2
+CONTRACT_VERSION = 3
 FACTS_TIMEOUT_S = 2.0
 MAX_FACTS = 2
 TOKEN_BUDGET = 60
 MAX_SUMMARY_CHARS = 120
 MAX_OUTPUT_BYTES = 1_048_576  # 1 MiB — far above any legitimate contract document
 STALE_WARNING_LINE = "masora: [stale index — facts may be outdated]"
-HINT_LINE = (
-    "masora: present for this checkout — the masora search / explain / "
-    "list_stale MCP tools recall recorded knowledge."
+# The DERIVED half of §6's zero-fact flavors (v3): cppgraph's own wording —
+# unlike masora's `presence_hint`, which renders verbatim and is never
+# hardcoded here. Names no tools: it is an absence notice, not a capability.
+_ZERO_MATCH_LINE = (
+    "masora: {n} lineage(s) examined, none matched — the base may predate this rebuild."
 )
 _TRUNCATION_LINE = "… +{n} more — masora search"
 
@@ -213,7 +242,9 @@ class Fact:
     qualify the display. Of the v1 enrichment fields only `effort` is stored
     (it feeds the confidence matrix); `source`, `name`, and `anchors` — like
     `anchors_matched` — are type-validated in `parse_contract` and never
-    consumed for rendering.
+    consumed for rendering. The v3 `anchor_leaf` IS a rendering input: the
+    short leaf masora derived from the first matched anchor identity,
+    suffixed on multi-symbol responses only (§6).
     """
 
     lineage: str
@@ -226,14 +257,25 @@ class Fact:
     off_version: bool
     context_ordering: str
     effort: str | None = None
+    anchor_leaf: str | None = None
 
 
 @dataclass(frozen=True)
 class Contract:
-    """The §3 document, parsed. Only contract shape v2 parses to one."""
+    """The §3 document, parsed. Only contract shape v3 parses to one.
+
+    The v3 fields: `lineages_examined` (the population masora's matching
+    loop walked, 0 on an empty base), `lineages_matched` (always ==
+    len(facts) — masora's emission guarantee, sanity-tested, not
+    enforced), and `presence_hint` — masora's capability line, rendered
+    VERBATIM when zero facts render and zero lineages were examined
+    (§6's differentiated zero-fact rule)."""
 
     facts: tuple[Fact, ...]
     stale_warning: bool | None
+    lineages_examined: int = 0
+    lineages_matched: int = 0
+    presence_hint: str | None = None
 
 
 def enabled(env: Mapping[str, str] | None = None) -> bool:
@@ -376,24 +418,26 @@ def run_masora_facts(
 
 
 def parse_contract(stdout: str) -> Contract | None:
-    """Parse the §3 JSON document; None when it is not a contract-v2 document
-    (unparsable, wrong shape, unknown/missing major version — v2 or nothing:
-    there is no dual-version window, so a v1 document rejects like any other
-    unknown version) — fail-closed, the caller renders nothing. Per-fact
-    fields are equally strict: a present field of the wrong type (`summary`,
-    `resolution`, `lineage`, `flags`, `verification`, `anchors_matched`) AND
-    a MISSING required field (the four v2 context stamps —
-    `established_relation`, `established_commit`, `off_version`,
-    `context_ordering`) reject the WHOLE document — no partial delivery.
-    Nullable requirements: explicit `null` is accepted for the two nullable
-    stamps (`established_relation`, `established_commit`); `context_ordering`
-    null is a violation. Enum VALUES are not shape: an unrecognized
+    """Parse the §3 JSON document; None when it is not a contract-v3 document
+    (unparsable, wrong shape, unknown/missing major version — no dual-version
+    window: a v2 document rejects like any other unknown version) —
+    fail-closed, the caller renders nothing. Per-fact fields are equally
+    strict: a present field of the wrong type (`summary`, `resolution`,
+    `lineage`, `flags`, `verification`, `anchors_matched`) AND a MISSING
+    required field (the four v2 context stamps plus the v3 `anchor_leaf`) reject
+    the WHOLE document — no partial delivery. Nullable requirements: explicit
+    `null` is accepted for the three nullable ones (`established_relation`,
+    `established_commit`, `anchor_leaf`); `context_ordering` null is a
+    violation. Enum VALUES are not shape: an unrecognized
     `established_relation` / `context_ordering` (like an unknown
     `resolution` / `effort` / `source`) is parser-inert — rendering, not
     rejection, is where unknown values get a voice. Absent (or null)
     optional fields default instead: `lineage` to no-dedup, `flags` to none,
     `verification` to unrendered, `anchors_matched` to empty (it is
-    validated, never consumed — a str item list per §3)."""
+    validated, never consumed — a str item list per §3). The v3 DOCUMENT
+    fields are equally required and strictly typed: `lineages_examined` /
+    `lineages_matched` (strict int — a JSON bool is a violation) and
+    `presence_hint` (`str | null`, masora's wording, rendered verbatim)."""
     try:
         doc = json.loads(stdout)
     except (json.JSONDecodeError, ValueError):
@@ -404,6 +448,23 @@ def parse_contract(stdout: str) -> Contract | None:
     if isinstance(version, bool) or not isinstance(version, int):
         return None
     if version != CONTRACT_VERSION:
+        return None
+    # v3 document fields (§3, REQUIRED, fail-closed like every shape error):
+    # the counters are strict ints (a JSON bool would slip past a plain int
+    # check — the same strictness as `contract_version` itself), and
+    # `presence_hint` is str-or-null — masora's wording, never rewritten.
+    counters: dict[str, int] = {}
+    for field in ("lineages_examined", "lineages_matched"):
+        value = doc.get(field)
+        if isinstance(value, bool) or not isinstance(value, int):
+            return None
+        counters[field] = value
+    # REQUIRED-present (may be null): a missing key is a shape violation —
+    # only an explicit null means "masora shipped no capability line".
+    if "presence_hint" not in doc:
+        return None
+    presence_hint = doc.get("presence_hint")
+    if presence_hint is not None and not isinstance(presence_hint, str):
         return None
     raw_facts = doc.get("facts", [])
     if not isinstance(raw_facts, list):
@@ -494,6 +555,16 @@ def parse_contract(stdout: str) -> Contract | None:
             isinstance(a, str) for a in anchors_matched
         ):
             return None
+        # v3 per-fact field (§3, REQUIRED — a fact missing it is a shape
+        # violation, the same posture as the four v2 stamps): masora's
+        # derived short leaf of the first matched anchor identity — a
+        # RENDERING input for §6's multi-symbol rule, null when no
+        # `--symbol` was passed. cppgraph renders it, never re-derives it.
+        if "anchor_leaf" not in raw:
+            return None
+        anchor_leaf = raw["anchor_leaf"]
+        if anchor_leaf is not None and not isinstance(anchor_leaf, str):
+            return None
         facts.append(
             Fact(
                 lineage=lineage,
@@ -506,6 +577,7 @@ def parse_contract(stdout: str) -> Contract | None:
                 off_version=off_version,
                 context_ordering=context_ordering,
                 effort=effort,
+                anchor_leaf=anchor_leaf,
             )
         )
     stale = doc.get("stale_warning")
@@ -515,7 +587,13 @@ def parse_contract(stdout: str) -> Contract | None:
         # defaults to None.
         return None
     stale_warning = stale if isinstance(stale, bool) else None
-    return Contract(facts=tuple(facts), stale_warning=stale_warning)
+    return Contract(
+        facts=tuple(facts),
+        stale_warning=stale_warning,
+        lineages_examined=counters["lineages_examined"],
+        lineages_matched=counters["lineages_matched"],
+        presence_hint=presence_hint,
+    )
 
 
 def est_tokens(text: str) -> int:
@@ -605,16 +683,36 @@ def _context_line(fact: Fact) -> str | None:
     return "  context: " + " — ".join(parts)
 
 
-def render_lines(contract: Contract, *, max_facts: int = MAX_FACTS) -> list[str]:
+def render_lines(
+    contract: Contract, *, max_facts: int = MAX_FACTS, multi_symbol: bool = False
+) -> list[str]:
     """§6: at most `max_facts` fact lines within the token budget, one terse
     line each (plus its indented context line when the §6 v2 trigger fires —
     the pair is ATOMIC: it renders together or drops together, and the
     context line counts in the estimate), any cap reported visibly; the
     stale-index note (when present) renders first — but only alongside
-    facts: zero matching facts injects nothing at all, stale index or not
-    (§1: no output without matching facts). At least one fact renders even
-    when it alone exceeds the budget — a lone oversized fact (context line
-    included) is still worth more than a bare cap.
+    facts: zero matching facts renders the §6 v3 zero-fact flavors instead
+    (see below). At least one fact renders even when it alone exceeds the
+    budget — a lone oversized fact (context line included) is still worth
+    more than a bare cap.
+
+    On a MULTI-symbol response (`multi_symbol=True` — the `find`/`outline`
+    batched spawn), a fact with a non-null `anchor_leaf` renders the
+    `— <anchor_leaf>` suffix after its status bracket: the leaf
+    disambiguates WHICH queried symbol the fact answers for. A null leaf
+    renders the plain form; single-symbol responses (the default) are
+    unchanged — no suffix whatever the leaf. The suffix is part of the fact
+    line: it counts in the token estimate and drops with its block.
+
+    Zero facts rendered → the v3 differentiated flavors, keyed on the
+    counters: `lineages_examined == 0` (empty base) renders masora's
+    `presence_hint` VERBATIM — cppgraph never hardcodes or rewrites the
+    wording; a null hint there stays silent (nothing to render verbatim).
+    `lineages_examined > 0` (a filtered no-match) renders the derived
+    staleness line from the counters, naming no tools — and a drifted
+    non-null hint does not render once lineages were examined (the counters
+    are the trigger). Either flavor renders at most once per response and
+    is never knowledge or advice.
 
     `max_facts` is the configured count (`max_facts(env)` — default
     MAX_FACTS), and the token budget WINS over it: when rendering the
@@ -629,6 +727,11 @@ def render_lines(contract: Contract, *, max_facts: int = MAX_FACTS) -> list[str]
     cap = max(1, max_facts)
     for i, fact in enumerate(contract.facts):
         fact_line = _fact_line(fact)
+        if multi_symbol and fact.anchor_leaf:
+            # §6 v3: the leaf suffix — part of the fact line, so the budget
+            # estimate and the atomic block rule see it (est_tokens runs
+            # over the joined text).
+            fact_line += f" — {fact.anchor_leaf}"
         context = _context_line(fact)
         # The fact line and its context line are ATOMIC (§6): they render
         # together or drop together, and the context line counts in the
@@ -645,7 +748,12 @@ def render_lines(contract: Contract, *, max_facts: int = MAX_FACTS) -> list[str]
             lines.append(context)
         kept += 1
     if not kept:
-        return []
+        # §6 v3, the differentiated zero-fact flavors — the counters decide.
+        if contract.lineages_examined == 0:
+            # Empty base: masora's capability line, verbatim — or silence
+            # when masora shipped none (cppgraph never invents wording).
+            return [contract.presence_hint] if contract.presence_hint is not None else []
+        return [_ZERO_MATCH_LINE.format(n=contract.lineages_examined)]
     if dropped:
         lines.append(_TRUNCATION_LINE.format(n=dropped))
     return lines
@@ -690,7 +798,7 @@ def query_lines(
     """The entry point query responses call to inject Masora facts: flag
     check → binary detection → one `masora facts` spawn for the resolved
     symbol(s) → version-mismatch advisory (the one-line carve-out from silent
-    skip — see `mismatch_advisory`) → contract-v2 parse → §6 render (the
+    skip — see `mismatch_advisory`) → contract-v3 parse → §6 render (the
     fact count resolved from `CPPGRAPH_MASORA_MAX_FACTS` in the same env the
     flag is read from).
 
@@ -705,9 +813,10 @@ def query_lines(
 
     Returns the rendered lines — `[]` whenever the feature is off or nothing
     injects, the single advisory line on a strict-integer version mismatch,
-    and on a parsed-but-zero-fact response exactly ONE presence-hint line
-    (§9.11: masora is present, it just has nothing anchored here) — and
-    never a raise (the zero-change guarantee)."""
+    and on a zero-fact response one of §6's v3 differentiated flavors (the
+    counters decide: masora's `presence_hint` verbatim on an empty base, the
+    derived staleness line above zero examined) — and never a raise (the
+    zero-change guarantee)."""
     if not enabled(env):
         return []
     if which("masora") is None:
@@ -737,13 +846,10 @@ def query_lines(
         contract = parse_contract(stdout)
         if contract is None:
             return []
-        lines = render_lines(contract, max_facts=max_facts(env))
-        if not lines:
-            # §9.11: masora is present (flag on, binary found, root resolved,
-            # contract parsed) and zero facts rendered — exactly one
-            # capability line, at most once per response (this is called once
-            # per response), never knowledge or advice.
-            return [HINT_LINE]
-        return lines
+        # §6 v3: the leaf suffix renders on MULTI-symbol responses only — a
+        # one-symbol batch (or a flag-less full enumeration) is symbol-
+        # centered, the plain form.
+        multi = batch is not None and len(batch) > 1
+        return render_lines(contract, max_facts=max_facts(env), multi_symbol=multi)
     except Exception:
         return []

@@ -1,4 +1,4 @@
-"""Tests for the Masora fact injection (contract v2, masora.py).
+"""Tests for the Masora fact injection (contract v3, masora.py).
 
 Everything runs against a stub `masora` executable (an env-var-driven shell
 script on PATH) or injected runner callables — never a real Masora install.
@@ -65,8 +65,16 @@ required per fact — and this combination renders byte-identically to v1.
 Missing-field tests deliberately do NOT use this spread."""
 
 
+HINT = (
+    "masora: present for this checkout — the masora search / explain / "
+    "list_stale MCP tools recall recorded knowledge."
+)
+"""Masora's own capability line (contract v3 `presence_hint`) — cppgraph
+renders it VERBATIM, never hardcodes it (masora owns the wording)."""
+
+
 def fact_doc(**overrides: Any) -> dict[str, Any]:
-    """One contract-v2 fact shaped like §3's first example (silent stamp)."""
+    """One contract-v3 fact shaped like §3's first example (silent stamp)."""
     fact = {
         "lineage": "01J8Z3K0000000000000000000",
         "summary": "Resume token invalidated by a shard key change",
@@ -74,17 +82,41 @@ def fact_doc(**overrides: Any) -> dict[str, Any]:
         "verification": "verified(llm)",
         "flags": "-",
         "anchors_matched": ["scip-clang cxx . . mongo/ResumeTokenData#makeResumeToken()."],
+        "anchor_leaf": "makeResumeToken",
         "established_relation": "in_line",
         "established_commit": "1a1a8e1f4e5a",
         "off_version": False,
         "context_ordering": "exact",
     }
     fact.update(overrides)
-    return {"contract_version": 2, "stale_warning": False, "facts": [fact]}
+    return {
+        "contract_version": 3,
+        "stale_warning": False,
+        "lineages_examined": 1,
+        "lineages_matched": 1,
+        "presence_hint": None,
+        "facts": [fact],
+    }
 
 
 def doc_with(*facts: dict[str, Any], **doc_overrides: Any) -> dict[str, Any]:
-    doc = {"contract_version": 2, "stale_warning": False, "facts": list(facts)}
+    """A contract-v3 document. Auto-fills the v3-REQUIRED per-fact
+    `anchor_leaf` with a default leaf when a hand-built fact omits it, so
+    inline facts stay focused on what they test; pass `anchor_leaf=None`
+    explicitly for the no-`--symbol` case, or set it per fact for the
+    multi-symbol rendering tests. The missing-`anchor_leaf` rejection is
+    pinned separately (via `fact_doc` + `del`)."""
+    filled = [
+        {**fact, "anchor_leaf": "leaf"} if "anchor_leaf" not in fact else fact for fact in facts
+    ]
+    doc = {
+        "contract_version": 3,
+        "stale_warning": False,
+        "lineages_examined": 0,
+        "lineages_matched": 0,
+        "presence_hint": None,
+        "facts": filled,
+    }
     doc.update(doc_overrides)
     return doc
 
@@ -230,6 +262,7 @@ def test_max_two_facts_kept_and_truncation_visible(
             "resolution": "current",
             "verification": "unverified",
             "flags": "-",
+            "anchor_leaf": "leaf",
             **CTX_SILENT,
         }
         for i in range(5)
@@ -298,11 +331,56 @@ def test_duplicate_lineages_deduped(stub_masora: Path, monkeypatch: pytest.Monke
 def test_empty_facts_render_the_presence_hint(
     stub_masora: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """§9.11: masora present (flag on, binary found, root resolved, contract
-    parsed) and zero facts rendered — exactly ONE capability hint line."""
+    """§9.13: masora present (flag on, binary found, root resolved, contract
+    parsed), ZERO facts AND zero lineages examined (empty base) — the hint
+    renders VERBATIM, the exact string masora shipped: cppgraph never
+    hardcodes the wording, a masora tool rename is never a cppgraph drift."""
+    monkeypatch.setenv("CPPGRAPH_MASORA", "1")
+    monkeypatch.setenv("MASORA_STUB_STDOUT", json.dumps(doc_with(presence_hint=HINT)))
+    assert masora.query_lines({}, FOO, env=dict(os.environ)) == [HINT]
+
+
+def test_zero_facts_with_examined_lineages_render_the_derived_staleness_line(
+    stub_masora: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§9.13, the differentiated flavor: zero facts but lineages WERE
+    examined (a filtered no-match against a non-empty base) — cppgraph
+    derives the staleness line from the counters; it names NO tools (it is
+    not the capability hint)."""
+    monkeypatch.setenv("CPPGRAPH_MASORA", "1")
+    monkeypatch.setenv(
+        "MASORA_STUB_STDOUT",
+        json.dumps(doc_with(lineages_examined=3, lineages_matched=0)),
+    )
+    assert masora.query_lines({}, FOO, env=dict(os.environ)) == [
+        "masora: 3 lineage(s) examined, none matched — the base may predate this rebuild."
+    ]
+
+
+def test_zero_facts_zero_examined_null_hint_renders_nothing(
+    stub_masora: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A null hint at zero examined leaves nothing to render verbatim —
+    silence: cppgraph never invents capability wording."""
     monkeypatch.setenv("CPPGRAPH_MASORA", "1")
     monkeypatch.setenv("MASORA_STUB_STDOUT", json.dumps(doc_with()))
-    assert masora.query_lines({}, FOO, env=dict(os.environ)) == [masora.HINT_LINE]
+    assert masora.query_lines({}, FOO, env=dict(os.environ)) == []
+
+
+def test_derived_line_wins_when_the_hint_drifts_non_null(
+    stub_masora: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The counters are the trigger: the hint is contractually null whenever
+    lineages were examined — a drifted non-null hint does not render, the
+    derived line does."""
+    monkeypatch.setenv("CPPGRAPH_MASORA", "1")
+    monkeypatch.setenv(
+        "MASORA_STUB_STDOUT",
+        json.dumps(doc_with(presence_hint=HINT, lineages_examined=2, lineages_matched=0)),
+    )
+    assert masora.query_lines({}, FOO, env=dict(os.environ)) == [
+        "masora: 2 lineage(s) examined, none matched — the base may predate this rebuild."
+    ]
 
 
 # --- (b) stale warning ---------------------------------------------------------
@@ -336,9 +414,9 @@ def test_stale_warning_false_and_null_render_the_presence_hint(
     line (the stale note renders only alongside facts)."""
     monkeypatch.setenv("CPPGRAPH_MASORA", "1")
     for value in (False, None):
-        doc = doc_with(stale_warning=value)
+        doc = doc_with(stale_warning=value, presence_hint=HINT)
         monkeypatch.setenv("MASORA_STUB_STDOUT", json.dumps(doc))
-        assert masora.query_lines({}, FOO, env=dict(os.environ)) == [masora.HINT_LINE]
+        assert masora.query_lines({}, FOO, env=dict(os.environ)) == [HINT]
 
 
 # --- (c) non-zero exit ---------------------------------------------------------
@@ -451,11 +529,15 @@ def test_mismatch_advisory_matrix() -> None:
     update cppgraph; older: update masora). Everything else — unparsable
     JSON, non-dict document, missing/bool/str version, and 2 itself — is
     silence."""
-    assert masora.mismatch_advisory(json.dumps({"contract_version": 3})) == (
-        "masora: [facts contract v3 unsupported — update cppgraph]"
-    )
+    assert masora.mismatch_advisory(json.dumps({"contract_version": 3})) is None
     assert masora.mismatch_advisory(json.dumps({"contract_version": 99})) == (
         "masora: [facts contract v99 unsupported — update cppgraph]"
+    )
+    assert masora.mismatch_advisory(json.dumps({"contract_version": 4})) == (
+        "masora: [facts contract v4 unsupported — update cppgraph]"
+    )
+    assert masora.mismatch_advisory(json.dumps({"contract_version": 2})) == (
+        "masora: [facts contract v2 — update masora]"
     )
     assert masora.mismatch_advisory(json.dumps({"contract_version": 1})) == (
         "masora: [facts contract v1 — update masora]"
@@ -463,7 +545,7 @@ def test_mismatch_advisory_matrix() -> None:
     assert masora.mismatch_advisory(json.dumps({"contract_version": 0})) == (
         "masora: [facts contract v0 — update masora]"
     )
-    assert masora.mismatch_advisory(json.dumps({"contract_version": 2})) is None
+    assert masora.mismatch_advisory(json.dumps({"contract_version": 3})) is None
     for silent in (
         "",
         "not json",
@@ -484,10 +566,25 @@ def test_advisory_newer_version_renders_one_line_no_facts(
 ) -> None:
     monkeypatch.setenv("CPPGRAPH_MASORA", "1")
     doc = fact_doc()
-    doc["contract_version"] = 3
+    doc["contract_version"] = 4
     monkeypatch.setenv("MASORA_STUB_STDOUT", json.dumps(doc))
     assert masora.query_lines({}, FOO, env=dict(os.environ)) == [
-        "masora: [facts contract v3 unsupported — update cppgraph]"
+        "masora: [facts contract v4 unsupported — update cppgraph]"
+    ]
+
+
+def test_advisory_v2_is_now_the_older_version(
+    stub_masora: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No dual-version window: cppgraph parses exactly v3 — a v2 document (a
+    pre-update masora) is an older major, the one-line "update masora"
+    advisory."""
+    monkeypatch.setenv("CPPGRAPH_MASORA", "1")
+    doc = fact_doc()
+    doc["contract_version"] = 2
+    monkeypatch.setenv("MASORA_STUB_STDOUT", json.dumps(doc))
+    assert masora.query_lines({}, FOO, env=dict(os.environ)) == [
+        "masora: [facts contract v2 — update masora]"
     ]
 
 
@@ -557,9 +654,18 @@ def test_absent_flag_fields_tolerated() -> None:
     """Absent (or null) optional fact fields default; only a present-but-wrong
     type rejects the document. The four v2 context fields are REQUIRED — they
     ride along explicitly here."""
-    fact = {"summary": "s", "resolution": "current", **CTX_SILENT}
+    fact = {"summary": "s", "resolution": "current", "anchor_leaf": None, **CTX_SILENT}
     contract = masora.parse_contract(
-        json.dumps({"contract_version": 2, "stale_warning": False, "facts": [fact]})
+        json.dumps(
+            {
+                "contract_version": 3,
+                "stale_warning": False,
+                "lineages_examined": 1,
+                "lineages_matched": 1,
+                "presence_hint": None,
+                "facts": [fact],
+            }
+        )
     )
     assert contract is not None
     assert contract.facts == (
@@ -596,10 +702,10 @@ def test_query_with_one_valid_one_malformed_fact_injects_nothing(
     assert masora.query_lines({}, FOO, env=dict(os.environ)) == []
 
 
-# --- contract v2: the four context fields (parser) -------------------------------
+# --- contract v3: the four context fields (parser) -------------------------------
 
 
-def test_v2_document_parses_with_context_fields() -> None:
+def test_v3_document_parses_with_context_fields() -> None:
     contract = masora.parse_contract(json.dumps(fact_doc()))
     assert contract is not None
     fact = contract.facts[0]
@@ -610,7 +716,7 @@ def test_v2_document_parses_with_context_fields() -> None:
 
 
 def test_v1_document_rejected() -> None:
-    """No dual-version window: the contract is v2 or nothing — a v1 document
+    """No dual-version window: the contract is v3 or nothing — a v1 document
     is an unknown major, rejected like any other."""
     doc = fact_doc()
     doc["contract_version"] = 1
@@ -618,7 +724,7 @@ def test_v1_document_rejected() -> None:
 
 
 @pytest.mark.parametrize("version", [True, False])
-def test_v2_boolean_version_rejected_at_parse(version: bool) -> None:
+def test_v3_boolean_version_rejected_at_parse(version: bool) -> None:
     """A JSON bool would compare == 1 numerically; the parser rejects it
     before any version comparison."""
     doc = fact_doc()
@@ -730,8 +836,10 @@ def test_stale_warning_with_no_facts_hint_only(
     alongside facts) — but masora IS present and the contract parsed, so the
     one-line presence hint renders (§9.11)."""
     monkeypatch.setenv("CPPGRAPH_MASORA", "1")
-    monkeypatch.setenv("MASORA_STUB_STDOUT", json.dumps(doc_with(stale_warning=True)))
-    assert masora.query_lines({}, FOO, env=dict(os.environ)) == [masora.HINT_LINE]
+    monkeypatch.setenv(
+        "MASORA_STUB_STDOUT", json.dumps(doc_with(stale_warning=True, presence_hint=HINT))
+    )
+    assert masora.query_lines({}, FOO, env=dict(os.environ)) == [HINT]
 
 
 # --- (h) token budget + masora NOT rendering ------------------------------------
@@ -804,7 +912,7 @@ def test_status_labels_surface_as_such(stub_masora: Path, monkeypatch: pytest.Mo
     ]
 
 
-# --- contract v2: the context line (rendering matrix) -----------------------------
+# --- contract v3: the context line (rendering matrix) -----------------------------
 
 
 def _fact(**overrides: Any) -> masora.Fact:
@@ -909,7 +1017,7 @@ def test_null_relation_degraded_renders_unproven_and_degraded() -> None:
     ]
 
 
-# --- contract v2: the worked example (§6), byte-exact -----------------------------
+# --- contract v3: the worked example (§6), byte-exact -----------------------------
 
 
 WORKED_EXAMPLE_FACT: dict[str, Any] = {
@@ -940,7 +1048,7 @@ def test_contract_worked_example_renders_exactly(
     ]
 
 
-# --- contract v2: atomicity — a fact line and its context drop together -----------
+# --- contract v3: atomicity — a fact line and its context drop together -----------
 
 
 def test_context_line_counts_in_budget_and_drops_atomically(
@@ -1867,6 +1975,7 @@ def test_query_lines_dedups_repeated_symbols_in_order(
     assert received == [[FOO, CALLER]]  # order-preserving distinct, ONE batch
     assert lines == [
         "masora: Resume token invalidated by a shard key change [current, verified(llm)]"
+        " — makeResumeToken"
     ]
 
 
@@ -2035,7 +2144,7 @@ def test_mcp_find_batches_all_result_symbols(
     server = mcp_server.build_server(str(mcp_store))
     result = _tool(server, "find")(query="Foo")
     assert result["masora"] == (
-        "masora: first claim [current]\nmasora: second claim [stale — re-check]"
+        "masora: first claim [current] — leaf\nmasora: second claim [stale — re-check] — leaf"
     )
     assert count.read_text() == "x\n"
     argv = args_file.read_text()
@@ -2058,7 +2167,7 @@ def test_mcp_outline_batches_all_definitions(
     server = mcp_server.build_server(str(mcp_store))
     result = _tool(server, "outline")(file="foo.cpp")
     assert result["masora"] == (
-        "masora: first claim [current]\nmasora: second claim [stale — re-check]"
+        "masora: first claim [current] — leaf\nmasora: second claim [stale — re-check] — leaf"
     )
     assert count.read_text() == "x\n"
     argv = args_file.read_text()
@@ -2088,8 +2197,8 @@ def test_presence_hint_once_per_response_for_all_symbols(
 ) -> None:
     """At most once per response, whatever the number of batched symbols."""
     monkeypatch.setenv("CPPGRAPH_MASORA", "1")
-    monkeypatch.setenv("MASORA_STUB_STDOUT", json.dumps(doc_with()))
-    assert masora.query_lines({}, [FOO, CALLER], env=dict(os.environ)) == [masora.HINT_LINE]
+    monkeypatch.setenv("MASORA_STUB_STDOUT", json.dumps(doc_with(presence_hint=HINT)))
+    assert masora.query_lines({}, [FOO, CALLER], env=dict(os.environ)) == [HINT]
 
 
 def test_presence_hint_absent_without_the_binary(
@@ -2107,7 +2216,7 @@ def test_presence_hint_absent_with_the_flag_off(
     stub_masora: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.delenv("CPPGRAPH_MASORA", raising=False)
-    monkeypatch.setenv("MASORA_STUB_STDOUT", json.dumps(doc_with()))
+    monkeypatch.setenv("MASORA_STUB_STDOUT", json.dumps(doc_with(presence_hint=HINT)))
     assert masora.query_lines({}, FOO, env=dict(os.environ)) == []
 
 
@@ -2146,7 +2255,7 @@ def test_presence_hint_not_on_spawn_failure(
 ) -> None:
     monkeypatch.setenv("CPPGRAPH_MASORA", "1")
     monkeypatch.setenv("MASORA_STUB_EXIT", "1")
-    monkeypatch.setenv("MASORA_STUB_STDOUT", json.dumps(doc_with()))
+    monkeypatch.setenv("MASORA_STUB_STDOUT", json.dumps(doc_with(presence_hint=HINT)))
     assert masora.query_lines({}, FOO, env=dict(os.environ)) == []
 
 
@@ -2156,10 +2265,10 @@ def test_presence_hint_not_on_version_mismatch(
     """The advisory is the response's one line — the hint does not join it."""
     monkeypatch.setenv("CPPGRAPH_MASORA", "1")
     doc = fact_doc()
-    doc["contract_version"] = 3
+    doc["contract_version"] = 4
     monkeypatch.setenv("MASORA_STUB_STDOUT", json.dumps(doc))
     assert masora.query_lines({}, FOO, env=dict(os.environ)) == [
-        "masora: [facts contract v3 unsupported — update cppgraph]"
+        "masora: [facts contract v4 unsupported — update cppgraph]"
     ]
 
 
@@ -2172,7 +2281,7 @@ def test_presence_hint_never_alongside_facts(
     assert lines == [
         "masora: Resume token invalidated by a shard key change [current, verified(llm)]"
     ]
-    assert masora.HINT_LINE not in lines
+    assert HINT not in lines
 
 
 def test_cli_single_symbol_tools_render_the_hint_on_zero_facts(
@@ -2183,11 +2292,11 @@ def test_cli_single_symbol_tools_render_the_hint_on_zero_facts(
 ) -> None:
     """§9.11 covers every injected tool, single-symbol ones included."""
     monkeypatch.setenv("CPPGRAPH_MASORA", "1")
-    monkeypatch.setenv("MASORA_STUB_STDOUT", json.dumps(doc_with()))
+    monkeypatch.setenv("MASORA_STUB_STDOUT", json.dumps(doc_with(presence_hint=HINT)))
     for command, sym in (("callers", CALLER), ("callees", CALLER), ("explain", FOO)):
         assert main([command, "--graph", str(graph_path), sym]) == 0
         out = capsys.readouterr().out
-        assert out.count(masora.HINT_LINE) == 1, command
+        assert out.count(HINT) == 1, command
 
 
 def test_cli_find_and_outline_render_the_hint_on_zero_facts(
@@ -2199,13 +2308,13 @@ def test_cli_find_and_outline_render_the_hint_on_zero_facts(
     tmp_path: Path,
 ) -> None:
     monkeypatch.setenv("CPPGRAPH_MASORA", "1")
-    monkeypatch.setenv("MASORA_STUB_STDOUT", json.dumps(doc_with()))
+    monkeypatch.setenv("MASORA_STUB_STDOUT", json.dumps(doc_with(presence_hint=HINT)))
     count = tmp_path / "spawns"
     monkeypatch.setenv("MASORA_STUB_COUNT_FILE", str(count))
     assert main(["find", "--graph", str(graph_path), "Foo"]) == 0
-    assert capsys.readouterr().out.count(masora.HINT_LINE) == 1
+    assert capsys.readouterr().out.count(HINT) == 1
     assert main(["outline", "--graph", str(outline_graph_path), "foo.cpp"]) == 0
-    assert capsys.readouterr().out.count(masora.HINT_LINE) == 1
+    assert capsys.readouterr().out.count(HINT) == 1
     assert count.read_text() == "x\nx\n"  # one batched spawn per response
 
 
@@ -2213,19 +2322,250 @@ def test_mcp_find_and_outline_attach_the_hint_on_zero_facts(
     mcp_store: Path, stub_masora: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("CPPGRAPH_MASORA", "1")
-    monkeypatch.setenv("MASORA_STUB_STDOUT", json.dumps(doc_with()))
+    monkeypatch.setenv("MASORA_STUB_STDOUT", json.dumps(doc_with(presence_hint=HINT)))
     server = mcp_server.build_server(str(mcp_store))
     for tool, kwargs in (("find", {"query": "Foo"}), ("outline", {"file": "foo.cpp"})):
         result = _tool(server, tool)(**kwargs)
-        assert result["masora"] == masora.HINT_LINE, tool
+        assert result["masora"] == HINT, tool
 
 
 def test_mcp_single_symbol_tools_attach_the_hint_on_zero_facts(
     mcp_store: Path, stub_masora: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("CPPGRAPH_MASORA", "1")
-    monkeypatch.setenv("MASORA_STUB_STDOUT", json.dumps(doc_with()))
+    monkeypatch.setenv("MASORA_STUB_STDOUT", json.dumps(doc_with(presence_hint=HINT)))
     server = mcp_server.build_server(str(mcp_store))
     for tool in ("who_calls", "what_it_calls", "explain_symbol"):
         result = _tool(server, tool)(symbol=CALLER if tool != "explain_symbol" else FOO)
-        assert result["masora"] == masora.HINT_LINE, tool
+        assert result["masora"] == HINT, tool
+
+
+# --- contract v3: the v3 document fields (parser, fail-closed) -------------------
+
+
+def test_v3_document_fields_parse_into_the_contract() -> None:
+    """The three v3 document fields ride into the parsed Contract: the
+    counters and masora's presence_hint (null on a fact-bearing response,
+    per masora's guarantee)."""
+    contract = masora.parse_contract(json.dumps(fact_doc()))
+    assert contract is not None
+    assert contract.lineages_examined == 1
+    assert contract.lineages_matched == 1
+    assert contract.presence_hint is None
+    empty = masora.parse_contract(json.dumps(doc_with(presence_hint=HINT)))
+    assert empty is not None
+    assert empty.facts == ()
+    assert empty.presence_hint == HINT
+    assert empty.lineages_examined == 0
+
+
+@pytest.mark.parametrize("field", ["lineages_examined", "lineages_matched", "presence_hint"])
+def test_missing_v3_document_field_rejects_whole_document(field: str) -> None:
+    """The v3 fields are REQUIRED on the document — a missing one is a shape
+    violation → the whole document rejects (fail-closed, no partial
+    delivery)."""
+    doc = fact_doc()
+    del doc[field]
+    assert masora.parse_contract(json.dumps(doc)) is None
+
+
+@pytest.mark.parametrize(
+    "field_override",
+    [
+        {"lineages_examined": True},  # strict int — a bool is not an int here
+        {"lineages_examined": "3"},
+        {"lineages_examined": None},
+        {"lineages_matched": True},
+        {"lineages_matched": "0"},
+        {"lineages_matched": 1.5},
+        {"presence_hint": 7},
+        {"presence_hint": ["masora: …"]},
+    ],
+)
+def test_v3_document_field_wrong_type_rejects_whole_document(
+    field_override: dict[str, Any],
+) -> None:
+    doc = fact_doc()
+    doc.update(field_override)
+    assert masora.parse_contract(json.dumps(doc)) is None
+
+
+def test_missing_anchor_leaf_rejects_whole_document() -> None:
+    """`anchor_leaf` is v3-REQUIRED per fact (present, nullable) — a fact
+    missing it rejects the whole document, same fail-closed posture as the
+    four v2 stamps."""
+    doc = fact_doc()
+    del doc["facts"][0]["anchor_leaf"]
+    assert masora.parse_contract(json.dumps(doc)) is None
+
+
+@pytest.mark.parametrize("bad", [7, ["tick"], {"leaf": 1}, True])
+def test_anchor_leaf_wrong_type_rejects_whole_document(bad: Any) -> None:
+    doc = fact_doc()
+    doc["facts"][0]["anchor_leaf"] = bad
+    assert masora.parse_contract(json.dumps(doc)) is None
+
+
+def test_anchor_leaf_null_accepted() -> None:
+    """Null is the no-`--symbol` case (full enumeration) — legal, never
+    rendered as a suffix."""
+    doc = fact_doc(anchor_leaf=None)
+    contract = masora.parse_contract(json.dumps(doc))
+    assert contract is not None
+    assert contract.facts[0].anchor_leaf is None
+
+
+# --- contract v3: the anchor_leaf suffix (multi-symbol rendering) -----------------
+
+
+def test_multi_symbol_renders_the_anchor_leaf_suffix() -> None:
+    """§6's v3 multi-symbol rule: on a multi-symbol response a fact with a
+    non-null `anchor_leaf` renders `… [status] — <anchor_leaf>` — the leaf
+    disambiguates WHICH queried symbol the fact answers for."""
+    contract = masora.Contract(
+        facts=(_fact(anchor_leaf="makeResumeToken"),),
+        stale_warning=False,
+    )
+    assert masora.render_lines(contract, multi_symbol=True) == [
+        "masora: claim [current] — makeResumeToken"
+    ]
+
+
+def test_single_symbol_renders_the_plain_form_even_with_a_leaf() -> None:
+    """Single-symbol responses are unchanged: no suffix whatever the leaf —
+    the response is already symbol-centered."""
+    contract = masora.Contract(
+        facts=(_fact(anchor_leaf="makeResumeToken"),),
+        stale_warning=False,
+    )
+    assert masora.render_lines(contract) == ["masora: claim [current]"]
+
+
+def test_multi_symbol_null_leaf_renders_the_plain_form() -> None:
+    """A null leaf (masora's no-`--symbol` case) never renders a suffix —
+    not even on a multi-symbol response."""
+    contract = masora.Contract(
+        facts=(_fact(anchor_leaf=None),),
+        stale_warning=False,
+    )
+    assert masora.render_lines(contract, multi_symbol=True) == ["masora: claim [current]"]
+
+
+def test_not_line_takes_the_leaf_suffix_on_multi_symbol() -> None:
+    """'Each fact' includes the NOT envelope: the leaf disambiguates which
+    queried symbol the refutation answers for — still a label, never advice."""
+    contract = masora.Contract(
+        facts=(_fact(resolution="none", anchor_leaf="tick"),),
+        stale_warning=False,
+    )
+    assert masora.render_lines(contract, multi_symbol=True) == [
+        "masora NOT: claim [refuted] — tick"
+    ]
+
+
+def test_leaf_suffix_counts_in_the_budget() -> None:
+    """The suffix is rendered text: two max-length summaries with leaves
+    cannot both fit — the second drops with the visible cap (the envelope is
+    per response, suffix included)."""
+    summary = "word " * 24  # 120 chars — the §3 cap
+    contract = masora.Contract(
+        facts=(
+            _fact(lineage="a", summary=summary, verification="verified(llm)", anchor_leaf="one"),
+            _fact(lineage="b", summary=summary, verification="verified(llm)", anchor_leaf="two"),
+        ),
+        stale_warning=False,
+    )
+    lines = masora.render_lines(contract, multi_symbol=True)
+    total = sum(masora.est_tokens(line) for line in lines)
+    assert total <= masora.TOKEN_BUDGET
+    assert lines[-1] == "… +1 more — masora search"
+    assert lines[0].endswith("— one")
+
+
+def test_context_line_unchanged_by_the_leaf() -> None:
+    """The leaf suffixes the FACT line only — the context line keeps its
+    exact v2 rendering, and the block stays atomic in the budget."""
+    contract = masora.Contract(
+        facts=(_fact(off_version=True, anchor_leaf="commitShard"),),
+        stale_warning=False,
+    )
+    assert masora.render_lines(contract, multi_symbol=True) == [
+        "masora: claim [current] — commitShard",
+        "  context: off-version",
+    ]
+
+
+def test_query_lines_multi_symbol_renders_suffixes_single_symbol_does_not(
+    stub_masora: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End-to-end through the batch: a TWO-symbol query renders the suffix
+    each fact's leaf; the SAME document on a one-symbol query renders the
+    plain form."""
+    doc = doc_with(
+        {
+            "lineage": "a",
+            "summary": "first claim",
+            "resolution": "current",
+            "verification": "unverified",
+            "flags": "-",
+            "anchor_leaf": "makeResumeToken",
+            **CTX_SILENT,
+        },
+        {
+            "lineage": "b",
+            "summary": "second claim",
+            "resolution": "stale",
+            "verification": "unverified",
+            "flags": "-",
+            "anchor_leaf": "caller",
+            **CTX_SILENT,
+        },
+    )
+    monkeypatch.setenv("CPPGRAPH_MASORA", "1")
+    monkeypatch.setenv("MASORA_STUB_STDOUT", json.dumps(doc))
+    multi = masora.query_lines({}, [FOO, CALLER], env=dict(os.environ))
+    assert multi == [
+        "masora: first claim [current] — makeResumeToken",
+        "masora: second claim [stale — re-check] — caller",
+    ]
+    single = masora.query_lines({}, FOO, env=dict(os.environ))
+    assert single == [
+        "masora: first claim [current]",
+        "masora: second claim [stale — re-check]",
+    ]
+
+
+def test_cli_find_batched_facts_render_leaf_suffixes(
+    graph_path: Path,
+    stub_masora: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """§9.13 e2e: the batched find response's facts carry their anchor leaf —
+    the reader can tell WHICH result symbol each fact answers for."""
+    doc = doc_with(
+        {
+            "lineage": "a",
+            "summary": "first claim",
+            "resolution": "current",
+            "verification": "unverified",
+            "flags": "-",
+            "anchor_leaf": "makeResumeToken",
+            **CTX_SILENT,
+        },
+        {
+            "lineage": "b",
+            "summary": "second claim",
+            "resolution": "stale",
+            "verification": "unverified",
+            "flags": "-",
+            "anchor_leaf": "caller",
+            **CTX_SILENT,
+        },
+    )
+    monkeypatch.setenv("CPPGRAPH_MASORA", "1")
+    monkeypatch.setenv("MASORA_STUB_STDOUT", json.dumps(doc))
+    assert main(["find", "--graph", str(graph_path), "Foo"]) == 0
+    out = capsys.readouterr().out
+    assert "masora: first claim [current] — makeResumeToken" in out
+    assert "masora: second claim [stale — re-check] — caller" in out
