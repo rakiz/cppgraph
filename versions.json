@@ -11,7 +11,7 @@
       "scip-clang-x86_64-linux": "06fd18c576f979a726c651594644ec4a35db4f471f2160b3f72eb89fa6001784"
     }
   },
-  "latest": "0.4.9",
+  "latest": "0.4.10",
   "releases": [
     {
       "version": "0.1.0",
@@ -96,6 +96,12 @@
       "rebuild": "none",
       "notes": "No schema change (still v5), safe to update in place. Masora injection adapts to facts contract v3: `find`/`outline` inject too — ONE batched `masora facts` spawn per response carrying every result symbol as repeated `--symbol` flags (the ≤2-facts / ≤60-token budget stays per response, the truncation line visible); each fact on a multi-symbol response renders `— <anchor_leaf>` so the reader knows WHICH queried symbol it answers for; the zero-fact rendering is differentiated — masora's `presence_hint` renders verbatim on an empty base (masora owns the wording, the cppgraph hardcoded literal is gone) and a filtered no-match renders the derived `<n> lineage(s) examined, none matched` staleness line; every freshly built store now writes the `symbol_format` meta row (= 1), which masora's reader gates on like the schema version. Strict v3 parsing, no dual-version window: a v2 producer surfaces the 'update masora' advisory. Full detail in `CHANGELOG.md`.",
       "url": "https://github.com/rakiz/cppgraph/releases/tag/v0.4.9"
+    },
+    {
+      "version": "0.4.10",
+      "rebuild": "none",
+      "notes": "No schema change (still v5), safe to update in place. `cppgraph setup` now links the CLI onto PATH: the venv's `cppgraph` binary is symlinked into `~/.local/bin` (where other per-user tools like masora already live), so shells and spawned sub-agents — which do not inherit MCP servers — can invoke a bare `cppgraph`. Skipped when a `cppgraph` is already on PATH; never clobbers a non-symlink file; repoints a stale/dangling link; notes when the dir isn't on PATH. `scripts/uninstall.sh` detects the link (only when it points into the repo's venv, dangling included) and offers to remove it — the `~/.local/bin` dir itself is never touched. Full detail in `CHANGELOG.md`.",
+      "url": "https://github.com/rakiz/cppgraph/releases/tag/v0.4.10"
     }
   ]
 }

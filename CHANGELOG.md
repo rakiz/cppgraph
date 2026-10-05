@@ -4,6 +4,16 @@ All notable changes to cppgraph. The format follows
 [Keep a Changelog](https://keepachangelog.com/). This project is pre-1.0; the
 on-disk store also carries its own `schema_version` for forward-compatibility.
 
+## [0.4.10] - 2026-10-05
+
+### Added
+
+- Setup gained a stage linking the `cppgraph` CLI into `~/.local/bin` (skipped
+  when a `cppgraph` is already on PATH; never clobbers a non-symlink file; notes
+  when the dir isn't on PATH) so sub-agents and shells that don't inherit MCP
+  servers can invoke the CLI by bare name. The uninstaller detects the link
+  (only when it points into the repo's venv) and offers to remove it.
+
 ## [0.4.9] - 2026-10-05
 
 ### Added
