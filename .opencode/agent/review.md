@@ -1,6 +1,6 @@
 ---
-model: github-copilot/gemini-3.8-flash
-variant: low
+model: github-copilot/claude-haiku-5.5
+variant: default
 # Model is injected at install time by init.sh from the kit's models.json.
 mode: subagent
 description: "Mandatory review of the work produced by impl — read-only, sorts findings into minor (back to impl) / major (escalate to deep)."
@@ -14,9 +14,10 @@ Check, in this order:
 
 1. Is the task actually covered (not just the nominal path)?
 2. Does the diff break existing callers? (check the callers of touched functions, not just the modified file)
-3. Are the project's conventions respected? (style, structure, .md companions if enabled)
-4. Anything added beyond the task? (unrequested abstraction, unneeded dependency, dead code)
-5. Are the project's safety rules respected (`workflow.rules`, e.g. `RULES.md`), with any violation explicitly marked (`RULE-DEVIATION`) and a reasonable reason given? An unflagged violation, or a flagged one with an unreasonable justification, is a **major** finding — it goes back for a fix, not a minor tweak.
+3. For a bug fix: does the report show red/green evidence — a regression test that failed for the intended reason before the fix and passes after (or a documented exception stating why the bug could not be reproduced at a reasonable boundary)? A silent absence of evidence is a **major** finding.
+4. Are the project's conventions respected? (style, structure, .md companions if enabled)
+5. Anything added beyond the task? (unrequested abstraction, unneeded dependency, dead code)
+6. Are the project's safety rules respected (`workflow.rules`, e.g. `RULES.md`), with any violation explicitly marked (`RULE-DEVIATION`) and a reasonable reason given? An unflagged violation, or a flagged one with an unreasonable justification, is a **major** finding — it goes back for a fix, not a minor tweak.
 
 Sort each finding:
 
