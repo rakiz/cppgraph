@@ -1674,7 +1674,7 @@ def _masora_field(
     store: GraphStore | None,
     symbols: list[str] | None = None,
 ) -> None:
-    """Attach Masora fact lines (contract v3, see `cppgraph.masora`) to a
+    """Attach Masora fact lines (contract v3/v4, see `cppgraph.masora`) to a
     query response as the `masora` string field — the rendered §6 lines
     joined with newlines. Single-symbol responses pass nothing and take the
     symbol from `result["symbol"]`; multi-symbol responses (`find`/`outline`)

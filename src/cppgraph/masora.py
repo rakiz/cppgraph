@@ -1,5 +1,6 @@
 """Masora fact injection — the cppgraph side of the integration contract
-(documented in masora's `docs/CPPGRAPH_INTEGRATION.md`, contract shape v3).
+(documented in masora's `docs/CPPGRAPH_INTEGRATION.md`, contract shapes v3
+and v4).
 
 Masora is a git-backed knowledge base of claims anchored to code symbols.
 When a query response is centered on symbol S and the feature is enabled,
@@ -33,11 +34,29 @@ every other failure here). The ≤ 60-token budget guidance STANDS: it wins
 over the fact count, so a higher count renders fewer lines plus the visible
 truncation line whenever the budget runs out first.
 
-Contract shape v3 (the current shape; NO dual-version window — masora
-ruled at v2 "v2 or nothing" and kept the posture, so cppgraph accepts
-exactly `contract_version: 3` and rejects v2 and every other major like
-any unknown version — an older producer gets the "update masora"
-advisory): each fact REQUIRES the four context stamps —
+Contract shape v4 (§3.0 — v3's shape PLUS exactly two per-fact additions;
+every v3 rule stands): each fact REQUIRES `alias_of` (`str | null`; the
+canonical LINEAGE ULID when the fact's lineage is actively aliased, `null`
+on every normal fact — a v4 fact missing the key rejects the whole
+document, as does a v3 fact CARRYING it, an undeclared semantic). When
+`alias_of` is non-null the fact is a POINTER ONLY (no knowledge, no
+negative knowledge from its own content): its `resolution` must be `none`
+and its `summary` the pinned envelope `SAME-AS: <summary> — duplicate of
+lineage <canonical-ULID>` (the global ≤ 120-char + printable check covers
+the 121-char case); `anchors` / `anchors_matched` must be empty; the v2
+context stamps are not validated on a pointer fact and render nothing —
+the reader renders it verbatim as `masora: SAME-AS: … [refuted]`
+(following the NOT:-envelope conventions, never advice), it counts in the
+≤ 2-facts / ≤ 60-token budget like any fact, and an `alias_of` VALUE
+matching no lineage in the document is inert — accepted, rendered
+verbatim, never guessed at.
+
+Contract shape v3 (still supported — masora emits v4 only when the base
+contains an active alias, so v3-only readers stay useful; NO dual-version
+window beyond these two: cppgraph accepts exactly `contract_version` 3 or
+4 and rejects every other major — an older producer gets the "update
+masora" advisory, a newer one the "update cppgraph" advisory): each fact
+REQUIRES the four context stamps —
 `established_relation` (`str | null`; the known enum is
 `in_line | ahead | out_of_line | unknown`, and an unrecognized string
 value is parser-inert), `established_commit` (`str | null`, short 12 hex
@@ -86,10 +105,11 @@ text).
 Version-mismatch advisory — a deliberate carve-out from the silent skip:
 after a successful spawn, a stdout that parses as a JSON dict whose
 `contract_version` is a strict integer (a JSON bool is invalid even where
-the language conflates bool and int) OTHER than 3 returns exactly ONE
-advisory line instead of facts — newer: `masora: [facts contract v{n}`
-unsupported — update cppgraph]`; older: `masora: [facts contract v{n} —
-update masora]`. Every other failure mode stays silent. Contract friction
+the language conflates bool and int) OUTSIDE the supported window (3..4)
+returns exactly ONE advisory line instead of facts — newer: `masora:
+[facts contract v{n} unsupported — update cppgraph]`; older: `masora:
+[facts contract v{n} — update masora]`. Every other failure mode stays
+silent. Contract friction
 to relay to masora: the contract's letter says an unknown major version
 "renders nothing" — cppgraph renders no FACTS from an unknown shape (that
 posture is unchanged), but surfaces the toolchain mismatch itself, one
@@ -213,7 +233,9 @@ from cppgraph.store import project_root_path
 
 ENV_VAR = "CPPGRAPH_MASORA"
 MAX_FACTS_ENV_VAR = "CPPGRAPH_MASORA_MAX_FACTS"
-CONTRACT_VERSION = 3
+SUPPORTED_CONTRACT_VERSIONS = (3, 4)
+MIN_CONTRACT_VERSION = 3
+MAX_CONTRACT_VERSION = 4
 FACTS_TIMEOUT_S = 2.0
 MAX_FACTS = 2
 TOKEN_BUDGET = 60
@@ -258,11 +280,12 @@ class Fact:
     context_ordering: str
     effort: str | None = None
     anchor_leaf: str | None = None
+    alias_of: str | None = None
 
 
 @dataclass(frozen=True)
 class Contract:
-    """The §3 document, parsed. Only contract shape v3 parses to one.
+    """The §3 document, parsed. Only contract shapes v3/v4 parse to one.
 
     The v3 fields: `lineages_examined` (the population masora's matching
     loop walked, 0 on an empty base), `lineages_matched` (always ==
@@ -418,9 +441,10 @@ def run_masora_facts(
 
 
 def parse_contract(stdout: str) -> Contract | None:
-    """Parse the §3 JSON document; None when it is not a contract-v3 document
-    (unparsable, wrong shape, unknown/missing major version — no dual-version
-    window: a v2 document rejects like any other unknown version) —
+    """Parse the §3 JSON document; None when it is not a contract-v3/v4
+    document (unparsable, wrong shape, unknown/missing major version — the
+    supported window is exactly 3..4: a v2 document rejects like any other
+    unknown version) —
     fail-closed, the caller renders nothing. Per-fact fields are equally
     strict: a present field of the wrong type (`summary`, `resolution`,
     `lineage`, `flags`, `verification`, `anchors_matched`) AND a MISSING
@@ -447,7 +471,7 @@ def parse_contract(stdout: str) -> Contract | None:
     version = doc.get("contract_version")
     if isinstance(version, bool) or not isinstance(version, int):
         return None
-    if version != CONTRACT_VERSION:
+    if version not in SUPPORTED_CONTRACT_VERSIONS:
         return None
     # v3 document fields (§3, REQUIRED, fail-closed like every shape error):
     # the counters are strict ints (a JSON bool would slip past a plain int
@@ -483,6 +507,77 @@ def parse_contract(stdout: str) -> Contract | None:
             # smuggle a rendered second line (an instruction — §6 forbids);
             # an overlong summary is a shape violation. Fail closed either way.
             return None
+        # v4 per-fact field (§3.0, validated BEFORE the lineage-dedup continue
+        # so a shape violation rejects even a fact that dedup would have
+        # skipped): REQUIRED in v4 (absent → whole-document reject), typed
+        # `str | None` (anything else → reject). In v3 the field MUST NOT be
+        # read — a v3 fact carrying it is an undeclared semantic, rejected
+        # fail-closed like every other shape error (never ignore-and-render).
+        if version == 4:
+            if "alias_of" not in raw:
+                return None
+            alias_of = raw["alias_of"]
+            if alias_of is not None and not isinstance(alias_of, str):
+                return None
+        elif "alias_of" in raw:
+            return None
+        else:
+            alias_of = None
+        if alias_of is not None:
+            # §3.0 pointer fact — a POINTER ONLY, no knowledge content: its
+            # resolution is pinned to `none` and its summary is the pinned
+            # SAME-AS envelope naming the canonical lineage (the global
+            # ≤ 120-char + printable check above already covers the
+            # 121-char case). anchors / anchors_matched must be empty (a
+            # content-bearing payload where the pointer is expected is a
+            # shape violation). The stamps (off_version /
+            # established_relation / established_commit /
+            # context_ordering) are NOT validated on a pointer fact, the
+            # ULID charset is not policed, and an alias_of VALUE matching
+            # no lineage in the document is INERT — accepted, rendered
+            # verbatim, never guessed at.
+            if resolution != "none":
+                return None
+            if not summary.startswith("SAME-AS: ") or not summary.endswith(
+                f" — duplicate of lineage {alias_of}"
+            ):
+                return None
+            for field in ("anchors", "anchors_matched"):
+                value = raw.get(field)
+                if value is None:
+                    value = []
+                if (
+                    not isinstance(value, list)
+                    or not all(isinstance(a, str) for a in value)
+                    or value
+                ):
+                    return None
+            # §7 fail-closed on every field, pointer or not: a wrong TYPE on
+            # any of these rejects the whole document too (only the four v2
+            # context stamps are exempt on a pointer fact — §3.0 renders
+            # nothing from them).
+            raw_flags = raw.get("flags")
+            if raw_flags is None:
+                raw_flags = "-"
+            if not isinstance(raw_flags, str):
+                return None
+            verification = raw.get("verification")
+            if verification is None:
+                verification = ""
+            if not isinstance(verification, str):
+                return None
+            source = raw.get("source")
+            if source is not None and not isinstance(source, str):
+                return None
+            name = raw.get("name")
+            if name is not None and not isinstance(name, str):
+                return None
+            effort = raw.get("effort")
+            if effort is not None and not isinstance(effort, str):
+                return None
+            anchor_leaf = raw.get("anchor_leaf")
+            if anchor_leaf is not None and not isinstance(anchor_leaf, str):
+                return None
         lineage = raw.get("lineage")
         if lineage is None:
             lineage = ""
@@ -492,6 +587,29 @@ def parse_contract(stdout: str) -> Contract | None:
             if lineage in seen:
                 continue
             seen.add(lineage)
+        if alias_of is not None:
+            # The pointer carries no knowledge content: the stamps are not
+            # validated on it and render nothing (the type-checked fields
+            # above default and never surface).
+            facts.append(
+                Fact(
+                    lineage=lineage,
+                    summary=summary,
+                    resolution=resolution,
+                    verification=verification,
+                    flags=tuple(
+                        f.strip() for f in raw_flags.split(",") if f.strip() and f.strip() != "-"
+                    ),
+                    established_relation=None,
+                    established_commit=None,
+                    off_version=False,
+                    context_ordering="exact",
+                    effort=effort,
+                    anchor_leaf=anchor_leaf,
+                    alias_of=alias_of,
+                )
+            )
+            continue
         raw_flags = raw.get("flags")
         if raw_flags is None:
             raw_flags = "-"
@@ -578,6 +696,7 @@ def parse_contract(stdout: str) -> Contract | None:
                 context_ordering=context_ordering,
                 effort=effort,
                 anchor_leaf=anchor_leaf,
+                alias_of=alias_of,
             )
         )
     stale = doc.get("stale_warning")
@@ -622,6 +741,13 @@ def _confidence_label(fact: Fact) -> str | None:
 
 
 def _fact_line(fact: Fact) -> str:
+    if fact.alias_of is not None:
+        # §3.0 v4 pointer fact: the summary IS the pinned SAME-AS envelope,
+        # rendered verbatim following the NOT:-envelope conventions — a
+        # label, never advice. Renders BEFORE the resolution=="none" branch
+        # (a pointer fact's resolution is `none` but is NOT the refuted-
+        # knowledge case).
+        return f"masora: {fact.summary} [refuted]"
     if fact.resolution == "none":
         # No confidence signal on the NOT line: a refutation is not softened
         # by the writer's trust.
@@ -652,7 +778,10 @@ def _context_line(fact: Fact) -> str | None:
     in the neutral forward-compatibility template, never guessed. The short
     `established_commit` renders beside the relation phrase as a pointer
     when non-null — with no relation phrase (an `in_line` fact) there is
-    nothing to point at, so it does not render."""
+    nothing to point at, so it does not render. A v4 pointer fact
+    (`alias_of` non-null, §3.0) never reaches the trigger test either: it
+    carries `resolution: "none"`, which short-circuits to None — the
+    SAME-AS envelope is the whole line, no context label."""
     if fact.resolution == "none":
         return None
     relation = fact.established_relation
@@ -763,12 +892,13 @@ def mismatch_advisory(stdout: str) -> str | None:
     """The version-mismatch advisory (a deliberate carve-out from the silent
     skip): when stdout parses as a JSON dict whose `contract_version` is a
     strict integer (a JSON bool is invalid even where the language conflates
-    bool and int) OTHER than `CONTRACT_VERSION`, return the one-line
+    bool and int) OUTSIDE the supported window (MIN..MAX_CONTRACT_VERSION,
+    i.e. 3..4), return the one-line
     advisory — a newer contract: `masora: [facts contract v{n} unsupported —
     update cppgraph]`; an older one: `masora: [facts contract v{n} — update
     masora]`. None — silence, the zero-change posture — for unparsable JSON,
-    a non-dict document, a missing/bool/non-integer version, and the
-    matching version itself. The advisory carries no facts: cppgraph knows
+    a non-dict document, a missing/bool/non-integer version, and every
+    supported version itself. The advisory carries no facts: cppgraph knows
     nothing about another major's shape, so nothing from it ever renders."""
     try:
         doc = json.loads(stdout)
@@ -779,9 +909,9 @@ def mismatch_advisory(stdout: str) -> str | None:
     version = doc.get("contract_version")
     if isinstance(version, bool) or not isinstance(version, int):
         return None
-    if version == CONTRACT_VERSION:
+    if MIN_CONTRACT_VERSION <= version <= MAX_CONTRACT_VERSION:
         return None
-    if version > CONTRACT_VERSION:
+    if version > MAX_CONTRACT_VERSION:
         return f"masora: [facts contract v{version} unsupported — update cppgraph]"
     return f"masora: [facts contract v{version} — update masora]"
 

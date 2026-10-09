@@ -3,6 +3,16 @@
 Read this first, then `DESIGN.md` (architecture). Completed work is in
 `CHANGELOG.md`; open tasks in `TODO.md`.
 
+## Ownership boundary (hard rule)
+
+**This agent works ONLY in this repo (cppgraph).** Other repos — Redwood,
+Masora, the dev-workflow kit — are NOT this agent's responsibility and must
+never be touched (no edits, no commits, no reindex/config changes there).
+Reading is fine (e.g. reading Masora's `docs/CPPGRAPH_INTEGRATION.md` as a
+contract). If a change in one of those repos is needed, do NOT make it: a
+`XXXX_integration` handoff document is produced and the agent owning that
+repo implements it.
+
 ## What this project is
 
 A semantically accurate code-graph tool for C++, built from a **compiler index**

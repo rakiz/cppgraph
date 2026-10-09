@@ -121,14 +121,32 @@ def doc_with(*facts: dict[str, Any], **doc_overrides: Any) -> dict[str, Any]:
     return doc
 
 
-@pytest.fixture
-def stub_masora(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
-    """A stub `masora` on PATH; behavior via MASORA_STUB_* env vars."""
-    bindir = tmp_path / "stub-bin"
-    bindir.mkdir()
+@pytest.fixture(scope="session")
+def stub_masora_bin(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """The stub `masora` executable, written ONCE per session (its behavior
+    is env-var-driven, so one script serves every test). A fresh executable
+    per test — each test used to write its own to tmp_path — means every
+    spawn is a FIRST exec of a brand-new inode, which on macOS intermittently
+    costs seconds (Gatekeeper/XProtect scan latency) and eats the 2 s
+    wall-clock budget in `run_masora_facts`, silently skipping the injection
+    (`lines == []`). One session-persistent file gets scanned once; the
+    immediate warm-up exec below pins that cost to setup."""
+    bindir = tmp_path_factory.mktemp("masora-stub-bin")
     script = bindir / "masora"
     script.write_text(STUB_SCRIPT)
     script.chmod(0o755)
+    # Warm-up exec (no MASORA_STUB_* set → prints nothing, exits 0): pays the
+    # one-time scan cost here, outside any test's 2 s budget.
+    subprocess.run([str(script)], capture_output=True, timeout=30, check=False)
+    return script
+
+
+@pytest.fixture
+def stub_masora(stub_masora_bin: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Put the session stub on PATH for this test only (PATH hygiene stays
+    per-test via monkeypatch; the stub's behavior comes from the
+    MASORA_STUB_* env vars each test sets)."""
+    bindir = stub_masora_bin.parent
     monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ.get('PATH', '')}")
     return bindir
 
@@ -525,16 +543,17 @@ def test_boolean_contract_version_rejected(
 
 
 def test_mismatch_advisory_matrix() -> None:
-    """A strict-int `contract_version` != 2 → the one-line advisory (newer:
-    update cppgraph; older: update masora). Everything else — unparsable
-    JSON, non-dict document, missing/bool/str version, and 2 itself — is
-    silence."""
+    """A strict-int `contract_version` outside the supported window (3..4)
+    → the one-line advisory (newer: update cppgraph; older: update masora).
+    Everything else — unparsable JSON, non-dict document, missing/bool/str
+    version, and 3 or 4 themselves — is silence."""
     assert masora.mismatch_advisory(json.dumps({"contract_version": 3})) is None
+    assert masora.mismatch_advisory(json.dumps({"contract_version": 4})) is None
     assert masora.mismatch_advisory(json.dumps({"contract_version": 99})) == (
         "masora: [facts contract v99 unsupported — update cppgraph]"
     )
-    assert masora.mismatch_advisory(json.dumps({"contract_version": 4})) == (
-        "masora: [facts contract v4 unsupported — update cppgraph]"
+    assert masora.mismatch_advisory(json.dumps({"contract_version": 5})) == (
+        "masora: [facts contract v5 unsupported — update cppgraph]"
     )
     assert masora.mismatch_advisory(json.dumps({"contract_version": 2})) == (
         "masora: [facts contract v2 — update masora]"
@@ -566,10 +585,10 @@ def test_advisory_newer_version_renders_one_line_no_facts(
 ) -> None:
     monkeypatch.setenv("CPPGRAPH_MASORA", "1")
     doc = fact_doc()
-    doc["contract_version"] = 4
+    doc["contract_version"] = 5
     monkeypatch.setenv("MASORA_STUB_STDOUT", json.dumps(doc))
     assert masora.query_lines({}, FOO, env=dict(os.environ)) == [
-        "masora: [facts contract v4 unsupported — update cppgraph]"
+        "masora: [facts contract v5 unsupported — update cppgraph]"
     ]
 
 
@@ -2265,10 +2284,10 @@ def test_presence_hint_not_on_version_mismatch(
     """The advisory is the response's one line — the hint does not join it."""
     monkeypatch.setenv("CPPGRAPH_MASORA", "1")
     doc = fact_doc()
-    doc["contract_version"] = 4
+    doc["contract_version"] = 5
     monkeypatch.setenv("MASORA_STUB_STDOUT", json.dumps(doc))
     assert masora.query_lines({}, FOO, env=dict(os.environ)) == [
-        "masora: [facts contract v4 unsupported — update cppgraph]"
+        "masora: [facts contract v5 unsupported — update cppgraph]"
     ]
 
 
@@ -2569,3 +2588,304 @@ def test_cli_find_batched_facts_render_leaf_suffixes(
     out = capsys.readouterr().out
     assert "masora: first claim [current] — makeResumeToken" in out
     assert "masora: second claim [stale — re-check] — caller" in out
+
+
+# --- contract v4: the alias_of / SAME-AS pointer extension (§3.0) -----------------
+
+
+CANON = "01J8Z3K0000000000000000000"
+"""The canonical lineage ULID the pointer facts below alias."""
+
+ALIAS = "01J8ZP20000000000000000000"
+"""The aliased (pointer) lineage ULID."""
+
+FOUNDER_SUMMARY = "Resume token invalidated by a shard key change"
+
+OTHER_ULID = "01OTHER000000000000000000"
+"""A different (fake) lineage ULID, for the wrong-suffix rejection case."""
+
+
+def envelope_summary(body: str, ulid: str = CANON) -> str:
+    """The pinned §3.0 pointer envelope: `SAME-AS: <body> — duplicate of
+    lineage <ULID>` (the body is the canonical founder's summary)."""
+    return f"SAME-AS: {body} — duplicate of lineage {ulid}"
+
+
+def pointer_fact(**overrides: Any) -> dict[str, Any]:
+    """A v4 pointer fact shaped like §3.0: `alias_of` non-null, resolution
+    `none`, the summary is the pinned SAME-AS envelope, no anchors."""
+    fact = {
+        "lineage": ALIAS,
+        "alias_of": CANON,
+        "summary": f"SAME-AS: {FOUNDER_SUMMARY} — duplicate of lineage {CANON}",
+        "resolution": "none",
+        "verification": "unverified",
+        "flags": "-",
+        "anchors": [],
+        "anchors_matched": [],
+        "anchor_leaf": None,
+        "established_relation": None,
+        "established_commit": None,
+        "off_version": False,
+        "context_ordering": "exact",
+    }
+    fact.update(overrides)
+    return fact
+
+
+def v4_doc_with(*facts: dict[str, Any], **doc_overrides: Any) -> dict[str, Any]:
+    """A contract-v4 document: like `doc_with` but version 4, and every
+    fact missing `alias_of` gets the normal-fact default None."""
+    filled = [{**fact, "alias_of": None} if "alias_of" not in fact else fact for fact in facts]
+    filled = [
+        {**fact, "anchor_leaf": "leaf"} if "anchor_leaf" not in fact else fact for fact in filled
+    ]
+    doc = {
+        "contract_version": 4,
+        "stale_warning": False,
+        "lineages_examined": 0,
+        "lineages_matched": 0,
+        "presence_hint": None,
+        "facts": filled,
+    }
+    doc.update(doc_overrides)
+    return doc
+
+
+def knowledge_fact(lineage: str, summary: str) -> dict[str, Any]:
+    return {
+        "lineage": lineage,
+        "summary": summary,
+        "resolution": "current",
+        "verification": "unverified",
+        "flags": "-",
+        **CTX_SILENT,
+    }
+
+
+@pytest.mark.parametrize("version", [True, False])
+def test_v4_boolean_version_rejected_at_parse(version: bool) -> None:
+    doc = v4_doc_with(knowledge_fact("a", "claim"))
+    doc["contract_version"] = version
+    assert masora.parse_contract(json.dumps(doc)) is None
+
+
+def test_v4_document_parses_no_advisory() -> None:
+    """A v4 document is a SUPPORTED version: it parses, and the mismatch
+    advisory stays silent for it."""
+    doc = v4_doc_with(pointer_fact(), knowledge_fact(CANON, FOUNDER_SUMMARY))
+    assert masora.parse_contract(json.dumps(doc)) is not None
+    assert masora.mismatch_advisory(json.dumps(doc)) is None
+
+
+@pytest.mark.parametrize("version", [5, 6])
+def test_advisory_newer_than_v4_says_update_cppgraph(version: int) -> None:
+    assert masora.mismatch_advisory(json.dumps({"contract_version": version})) == (
+        f"masora: [facts contract v{version} unsupported — update cppgraph]"
+    )
+
+
+def test_advisory_v2_still_says_update_masora() -> None:
+    assert masora.mismatch_advisory(json.dumps({"contract_version": 2})) == (
+        "masora: [facts contract v2 — update masora]"
+    )
+
+
+def test_advisory_bool_version_stays_silent() -> None:
+    assert masora.mismatch_advisory(json.dumps({"contract_version": True})) is None
+
+
+def test_v4_fact_missing_alias_of_rejects_whole_document() -> None:
+    """`alias_of` is v4-REQUIRED per fact: an absent key is a shape violation
+    → the whole document rejects (fail-closed, no partial delivery)."""
+    doc = v4_doc_with(knowledge_fact("a", "claim"))
+    del doc["facts"][0]["alias_of"]
+    assert masora.parse_contract(json.dumps(doc)) is None
+
+
+@pytest.mark.parametrize("bad", [7, True, ["x"], {"u": 1}, 3.5])
+def test_v4_alias_of_non_string_non_null_rejects_whole_document(bad: Any) -> None:
+    doc = v4_doc_with(knowledge_fact("a", "claim"))
+    doc["facts"][0]["alias_of"] = bad
+    assert masora.parse_contract(json.dumps(doc)) is None
+
+
+def test_pointer_fact_121_char_summary_rejected() -> None:
+    """A 121-char summary that is OTHERWISE a valid envelope fails only on
+    the length bound (§3.0: "a 121-char summary … is a shape violation")."""
+    summary = envelope_summary("a" * 62)  # exactly 121 chars, envelope shape intact
+    assert len(summary) == 121
+    doc = v4_doc_with(pointer_fact(summary=summary))
+    assert masora.parse_contract(json.dumps(doc)) is None
+
+
+def test_pointer_fact_120_char_summary_accepted() -> None:
+    """The control: the same envelope one char shorter (exactly 120) parses —
+    the rejection above is the length bound, not the envelope check."""
+    summary = envelope_summary("a" * 61)
+    assert len(summary) == 120
+    doc = v4_doc_with(pointer_fact(summary=summary))
+    contract = masora.parse_contract(json.dumps(doc))
+    assert contract is not None
+    assert contract.facts[0].summary == summary
+
+
+@pytest.mark.parametrize(
+    "summary",
+    [
+        f"NOPE: {FOUNDER_SUMMARY} — duplicate of lineage {CANON}",  # wrong prefix
+        f"SAME-AS: {FOUNDER_SUMMARY} — duplicate of",  # wrong suffix
+        f"SAME-AS: {FOUNDER_SUMMARY} — duplicate of lineage {OTHER_ULID}",  # other ULID
+        FOUNDER_SUMMARY,  # content-bearing payload, no envelope at all
+    ],
+)
+def test_pointer_fact_summary_not_the_envelope_rejects(summary: str) -> None:
+    doc = v4_doc_with(pointer_fact(summary=summary))
+    assert masora.parse_contract(json.dumps(doc)) is None
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"anchors": ["scip-clang cxx . . mongo/Util#tick()."]},
+        {"anchors_matched": ["scip-clang cxx . . mongo/Util#tick()."]},
+        {"anchors": ["a"], "anchors_matched": []},
+        {"anchors": [], "anchors_matched": ["a"]},
+    ],
+)
+def test_pointer_fact_with_non_empty_anchors_rejects(fields: dict[str, Any]) -> None:
+    doc = v4_doc_with(pointer_fact(**fields))
+    assert masora.parse_contract(json.dumps(doc)) is None
+
+
+def test_pointer_fact_resolution_other_than_none_rejects() -> None:
+    doc = v4_doc_with(pointer_fact(resolution="stale"))
+    assert masora.parse_contract(json.dumps(doc)) is None
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"verification": ["verified(llm)"]},
+        {"verification": 3.5},
+        {"flags": 123},
+        {"flags": ["suspect"]},
+        {"source": 1},
+        {"source": []},
+        {"name": 5},
+        {"name": {}},
+        {"effort": 1.5},
+        {"effort": []},
+        {"anchor_leaf": 7},
+        {"anchor_leaf": ["tick"]},
+    ],
+)
+def test_pointer_fact_wrong_typed_field_rejects_whole_document(fields: dict[str, Any]) -> None:
+    """§7 fail-closed on every field, pointer fact or not: only the four v2
+    context stamps are exempt on a pointer fact (§3.0 renders nothing from
+    them); any other wrong-typed field rejects the whole document."""
+    doc = v4_doc_with(pointer_fact(**fields))
+    assert masora.parse_contract(json.dumps(doc)) is None
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"verification": None},
+        {"flags": None},
+        {"flags": "-"},
+        {"source": None},
+        {"name": None},
+        {"effort": None},
+        {"anchor_leaf": None},
+        {"anchor_leaf": "tick"},
+    ],
+)
+def test_pointer_fact_nullable_or_valid_fields_tolerated(fields: dict[str, Any]) -> None:
+    doc = v4_doc_with(pointer_fact(**fields))
+    assert masora.parse_contract(json.dumps(doc)) is not None
+
+
+def test_v3_document_with_alias_of_rejects_whole_document() -> None:
+    """`alias_of` MUST NOT be read in v3 documents: a v3 fact carrying the
+    field is an undeclared semantic — fail closed, reject the whole
+    document (never ignore-and-render)."""
+    doc = fact_doc(alias_of=CANON)
+    assert masora.parse_contract(json.dumps(doc)) is None
+
+
+def test_pointer_fact_with_unknown_alias_is_inert_and_renders_verbatim() -> None:
+    """An `alias_of` ULID matching no lineage in the document is parser-inert:
+    accepted, rendered verbatim, never guessed at."""
+    unknown = "01UNKNOWN000000000000000000"
+    summary = f"SAME-AS: {FOUNDER_SUMMARY} — duplicate of lineage {unknown}"
+    doc = v4_doc_with(pointer_fact(alias_of=unknown, summary=summary))
+    contract = masora.parse_contract(json.dumps(doc))
+    assert contract is not None
+    assert contract.facts[0].alias_of == unknown
+    assert masora.render_lines(contract) == [f"masora: {summary} [refuted]"]
+
+
+def test_v4_pointer_then_canonical_renders_envelope_then_fact(
+    stub_masora: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§3.0 end-to-end: the pointer renders the SAME-AS envelope with the
+    canonical founder's summary, the canonical lineage's own fact follows;
+    the pointer counts in the 2-fact budget (the third fact truncates
+    visibly)."""
+    doc = v4_doc_with(
+        pointer_fact(anchor_leaf=None),
+        knowledge_fact(CANON, FOUNDER_SUMMARY),
+        knowledge_fact("b", "second claim"),
+        lineages_examined=3,
+        lineages_matched=3,
+    )
+    monkeypatch.setenv("CPPGRAPH_MASORA", "1")
+    monkeypatch.setenv("MASORA_STUB_STDOUT", json.dumps(doc))
+    lines = masora.query_lines({}, FOO, env=dict(os.environ))
+    assert lines == [
+        f"masora: SAME-AS: {FOUNDER_SUMMARY} — duplicate of lineage {CANON} [refuted]",
+        f"masora: {FOUNDER_SUMMARY} [current]",
+        "… +1 more — masora search",
+    ]
+    total = sum(masora.est_tokens(line) for line in lines)
+    assert total <= masora.TOKEN_BUDGET
+
+
+def test_pointer_fact_counts_in_the_2_fact_budget() -> None:
+    """§6, pure-unit: a pointer fact is ONE fact in the ≤ 2-fact /
+    ≤ 60-token budget — pointer + one knowledge fact render without a cap,
+    pointer + two knowledge facts truncate visibly with the pointer first."""
+    pointer = _fact(lineage=ALIAS, summary=envelope_summary(FOUNDER_SUMMARY), alias_of=CANON)
+    first = _fact(lineage=CANON, summary=FOUNDER_SUMMARY)
+    second = _fact(lineage="b", summary="second claim")
+    two = masora.render_lines(masora.Contract(facts=(pointer, first), stale_warning=False))
+    envelope_line = f"masora: {envelope_summary(FOUNDER_SUMMARY)} [refuted]"
+    assert two == [envelope_line, f"masora: {FOUNDER_SUMMARY} [current]"]
+    three = masora.render_lines(
+        masora.Contract(facts=(pointer, first, second), stale_warning=False)
+    )
+    assert three == [
+        envelope_line,
+        f"masora: {FOUNDER_SUMMARY} [current]",
+        "… +1 more — masora search",
+    ]
+    total = sum(masora.est_tokens(line) for line in three)
+    assert total <= masora.TOKEN_BUDGET
+
+
+def test_pointer_fact_renders_no_context_line() -> None:
+    """The v4-only exception: an aliased lineage's fact renders NO context
+    label — even with every stamp trigger set (off_version true, an
+    out_of_line relation, degraded ordering)."""
+    fact = pointer_fact(
+        off_version=True,
+        established_relation="out_of_line",
+        established_commit="9f8e7d6c5b4a",
+        context_ordering="degraded",
+    )
+    contract = masora.parse_contract(json.dumps(v4_doc_with(fact)))
+    assert contract is not None
+    assert masora.render_lines(contract) == [
+        f"masora: SAME-AS: {FOUNDER_SUMMARY} — duplicate of lineage {CANON} [refuted]"
+    ]

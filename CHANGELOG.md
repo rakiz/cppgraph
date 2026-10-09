@@ -4,6 +4,33 @@ All notable changes to cppgraph. The format follows
 [Keep a Changelog](https://keepachangelog.com/). This project is pre-1.0; the
 on-disk store also carries its own `schema_version` for forward-compatibility.
 
+## [Unreleased]
+
+### Added
+
+- **Masora facts contract v4 reader** (contract §3.0,
+  `docs/CPPGRAPH_INTEGRATION.md`) — the parser in the shared
+  `cppgraph/masora.py` now accepts `contract_version` **3 or 4** (bounds
+  `MIN_CONTRACT_VERSION` / `MAX_CONTRACT_VERSION`; anything outside the
+  window rejects and keeps the version-mismatch advisory: a newer contract
+  still says "update cppgraph", an older one "update masora" — v4 itself is
+  silent now). The v4-only per-fact `alias_of` field (`str | null`) is
+  REQUIRED in v4 — a fact missing it rejects the whole document — and MUST
+  NOT be read in v3: a v3 fact carrying the key is an undeclared semantic,
+  rejected fail-closed (never ignore-and-render). A fact with a non-null
+  `alias_of` is a POINTER ONLY: its `resolution` must be `none`, its
+  `summary` the pinned `SAME-AS: <summary> — duplicate of lineage <ULID>`
+  envelope (the ≤ 120-char + printable check covers the 121-char case), its
+  `anchors` / `anchors_matched` empty, and every other field type-checked
+  fail-closed like a normal fact (only the four v2 context stamps are
+  exempt — they render nothing on a pointer). It renders verbatim as
+  `masora: <SAME-AS envelope> [refuted]` (following the NOT:-envelope
+  conventions, never advice), with NO context line, and counts as one fact
+  in the ≤ 2-fact / ≤ 60-token budget. An `alias_of` ULID matching no
+  lineage in the document is inert — accepted and rendered verbatim, never
+  guessed at. The pointer branch validates before the lineage-dedup
+  continue, so a malformed pointer is never silently skipped by dedup.
+
 ## [0.4.10] - 2026-10-05
 
 ### Added
