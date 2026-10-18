@@ -9,19 +9,10 @@ Z"), in a handful of commands.
 - **Prereqs:** [`uv`](https://docs.astral.sh/uv/), `curl`, and a C++ project with
   a `compile_commands.json` (see [AGENTS.md](AGENTS.md) → "The compilation
   database" for how to produce one).
-- **Supported platforms for indexing** (limited by the `scip-clang` binary):
-  - macOS Apple Silicon (arm64) ✅
-  - Linux x86_64 ✅
-  - **ARM-Linux (aarch64, e.g. Ubuntu arm64)** ✅ — natively, via this project's
-    prebuilt **patched** binary (the setup wizard's `download-patched`, ~1 min, no
-    Docker). Alternatives: **build** scip-clang locally (~25–60 min, Docker), or
-    run the x86_64 binary via a container (emulated, slow — for a subsystem
-    only). See [INSTALL.md](INSTALL.md) → "Intel Mac / Windows: index via a
-    container" and `docker/build-scip-clang-patched-linux/`.
-  - **Windows** → run everything inside **WSL2 (Ubuntu)**; it behaves as Linux x86_64.
-  - **Intel Mac** → no native `scip-clang` binary — **only emulate** (index via
-    an x86 container, slower). You can still *use* a graph someone else built —
-    ask the maintainer for a prebuilt `graph.db` and jump to step 3.
+- **Platform support** (macOS arm64, Linux x86_64, Linux aarch64 index natively;
+  Windows via WSL2; Intel Mac via a container): the exact per-platform options,
+  costs, and fallbacks are in [INSTALL.md](INSTALL.md) → § 2 (and "Intel Mac /
+  Windows: index via a container").
 
 Two phases: **set up the machine once** (§1, light) then **index each project**
 (§2, the heavy one-time-per-project step). §1 is done once and reused for every
@@ -38,15 +29,14 @@ git clone https://github.com/rakiz/cppgraph "${XDG_DATA_HOME:-$HOME/.local/share
 "${XDG_DATA_HOME:-$HOME/.local/share}/cppgraph/repo/scripts/setup.sh"
 ```
 
-`setup.sh` (needs [`uv`](https://docs.astral.sh/uv/)) asks how to obtain scip-clang
-from a menu — **download-patched**, this project's prebuilt patched binary (~1 min,
-native, no Docker; macOS arm64 + Linux aarch64), **download** the stock prebuilt
-(~1 min; macOS arm64 / Linux x86_64), **build** it locally with PR #504 (~25–60
-min, Docker, Linux only), or **emulate** via an x86 container — with an "abort"
-choice throughout. It then
-registers the MCP server (globally, auto-discovering each project's `.cppgraph/` at
-launch) and hands off to the project index wizard. Every stage checks what already
-exists and asks before (re)doing it.
+`setup.sh` (needs [`uv`](https://docs.astral.sh/uv/)) asks how to obtain
+scip-clang from a menu of sources valid on this host (prebuilt patched binary,
+stock prebuilt, local build, or emulate — each with its cost shown; nothing is
+installed without an explicit pick), then registers the MCP server (globally,
+auto-discovering each project's `.cppgraph/` at launch) and hands off to the
+project index wizard. What each source does, which platforms get which, and the
+manual fallbacks: [INSTALL.md](INSTALL.md) → § 2. Every stage checks what
+already exists and asks before (re)doing it.
 
 ## 2. Index a project (once per project)
 
@@ -55,7 +45,7 @@ one), run the wizard from the project directory:
 
 ```bash
 "${XDG_DATA_HOME:-$HOME/.local/share}/cppgraph/repo/scripts/index.sh"
-# or, if the venv is on PATH:  cppgraph index
+# or, if the venv is on PATH:  cppgraph init
 ```
 
 It finds the `compile_commands.json`, shows what's indexable, and asks the scope
@@ -67,7 +57,7 @@ Prefer to see the breakdown first, or drive it non-interactively?
 
 ```bash
 cppgraph compdb-summary /path/to/project/compile_commands.json   # TUs, subtrees, tests %
-cppgraph index <compdb> -y --filter src/mongo --no-tests --run   # scope from flags, no prompts
+cppgraph init <compdb> -y --filter src/mongo --no-tests --run   # scope from flags, no prompts
 ```
 
 `--no-tests` is a trade-off, not a free win: tests are often a big share of TUs

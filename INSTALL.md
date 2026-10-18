@@ -334,7 +334,7 @@ UNINST=~/.local/share/cppgraph/repo/scripts/uninstall.sh
 
 ## 4. Indexing a project (any C++ project with a compile_commands.json)
 
-**Guided path: `scripts/index.sh` (or `cppgraph index`).** From the project
+**Guided path: `scripts/index.sh` (or `cppgraph init`).** From the project
 directory it locates the `compile_commands.json`, shows what's indexable, asks the
 scope questions (subtree / tests / attribution) in order — each with the info to
 choose well — then runs the compdb-filter → scip-clang → cppgraph-build pipeline.
@@ -347,13 +347,13 @@ For scripting or fine-tuning, drive it non-interactively:
 
 ```bash
 # A project's source subtree (filter to skip third_party/vendored code):
-cppgraph index /path/to/project/compile_commands.json -y --filter src/ --name myproject --run
+cppgraph init /path/to/project/compile_commands.json -y --filter src/ --name myproject --run
 
 # One subsystem instead (fast, good for iterating):
-cppgraph index /path/to/project/compile_commands.json -y --filter src/subsystem/ --name subsystem --run
+cppgraph init /path/to/project/compile_commands.json -y --filter src/subsystem/ --name subsystem --run
 
 # Everything in the compdb (no filter):
-cppgraph index /path/to/project/compile_commands.json -y --filter "" --run
+cppgraph init /path/to/project/compile_commands.json -y --filter "" --run
 ```
 
 Outputs land in the target project's own `.cppgraph/<name>.{compdb.json,scip,graph.db}`

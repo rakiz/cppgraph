@@ -13,6 +13,7 @@ from cppgraph.builder import (
     build_graph,
     is_callable_symbol,
     is_term_symbol,
+    is_type_symbol,
     real_documentation,
     signature_documentation_text,
 )
@@ -1065,3 +1066,15 @@ def test_build_graph_marks_external_symbols_capable_even_when_empty() -> None:
     graph = build_graph(scip_pb2.Index(documents=[doc]))
 
     assert graph.has_external_symbols is True
+
+
+def test_is_type_symbol_is_plain_endswith_no_rstrip() -> None:
+    """`is_type_symbol` is a plain `endswith('#')` on the SCIP string — it does
+    NOT strip whitespace first. SCIP symbol strings are grammar-built
+    (`<type> ::= <name> '#'`) and never carry trailing whitespace, so the
+    impact/reachable-from type gates and the CLI/MCP surfaces that import this
+    canonical predicate rely on exactly this semantics (pinned so a future
+    `.rstrip()` can't sneak back in untested)."""
+    assert is_type_symbol("cxx . . $ mongo/Foo#")
+    assert not is_type_symbol("cxx . . $ mongo/Foo#increment(a1).")
+    assert not is_type_symbol("cxx . . $ mongo/Foo# ")  # trailing space => not a type symbol

@@ -30,7 +30,7 @@ against two other tools, with numbers you can reproduce.
 
 | Tool | Version | Released | Basis |
 |---|---|---|---|
-| **cppgraph** (this repo) | 0.4.3 | 2026-09-23 | SCIP compiler index (`scip-clang` 0.4.0, patched, patchset 7) |
+| **cppgraph** (this repo) | 0.4.3 | 2026-09-23 (measured) | SCIP compiler index (`scip-clang` 0.4.0, patched, patchset 7) |
 | **graphify** | 0.9.66 | 2026-09-22 | tree-sitter AST, no compiler |
 | **Serena** | 1.7.0 | 2026-08-09 | clangd 19.1.2 Language Server (live) |
 
@@ -339,9 +339,10 @@ cppgraph exposes its query surface identically as CLI subcommands and MCP tools
   API surface, dependency cost, fan-in ranking). Costs a one-time index
   (~27 min for `src/mongo`) and is a snapshot that goes stale until refreshed
   (`cppgraph status --root` detects drift; `update --rescope` widens scope
-  without a full reindex). Its own limitations: calls in macro-generated bodies
-  (gtest `TEST`, macro-decorated inlines) are dropped, and `impact` does not
-  follow virtual dispatch.
+  without a full reindex). Its own limitations: on graphs predating patchset 7
+  (the macro `enclosing_range` fallback, § "Where cppgraph is wrong too"),
+  calls in macro-generated bodies (gtest `TEST`, macro-decorated inlines) were
+  dropped — fixed there; and `impact` does not follow virtual dispatch.
 
 ## Reproduce
 

@@ -250,10 +250,8 @@ when it's stale (it reflects the build graph at generation time).
      `! ~/.local/share/cppgraph/repo/scripts/setup.sh --list-sources` (pure bash, no
      venv needed): it prints this machine's OS/arch and the sources that actually
      apply (e.g. no `download` on ARM-Linux). **Ask the user to pick from exactly
-     those** — each has a cost: download-patched ~1 min (patched binary, no Docker;
-     macOS
-     arm64 + Linux aarch64 today), download ~1 min (native stock, unpatched), build
-     (patched) ~25–60 min Docker (Linux-only), emulate (slower indexing, container).
+     those** — what each source does, its cost, and the per-platform rules are
+     INSTALL.md's to state (§ 2): read them there, don't restate them here.
      Offering a source the tool didn't list will fail.
   4. Run `setup.sh` with their choice as a flag (this is what lets `!` work):
      ```
@@ -298,7 +296,7 @@ when it's stale (it reflects the build graph at generation time).
   the user explicitly asks for that). Same rule as install: never point at
   `~/code_projects/...` or any dev checkout.
 
-## Layout
+## Layout (main entries; not exhaustive)
 
 ```
 src/cppgraph/     package (cli, builder, scip parser, store, queries, mcp, export)
@@ -309,6 +307,10 @@ scripts/          setup.sh, index.sh, index-in-container.sh, uninstall.sh
 tests/            pytest
 scratch/          dev-only throwaway: example graphs, ad-hoc outputs (gitignored)
                   (the scip-clang binary lives in ~/.local/share/cppgraph/bin, not here)
+docker/           containers: gen-bindings/ (protoc), build-scip-clang-patched-linux/, index/
+scip-clang-patches/  this repo's scip-clang patch bundle (+ README)
+docs/             working notes / drafts (gitignored working dir)
+demo/             demo materials (gitignored working dir)
 DESIGN.md         architecture + edge model
 CHANGELOG.md      what's been done
 TODO.md           open tasks

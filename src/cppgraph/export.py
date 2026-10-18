@@ -77,13 +77,16 @@ def to_graphify_graph(nodes: list[Node], edges: list[Edge]) -> dict:
 def to_file_usage_graph(symbol: str, label: str, references: list[Reference]) -> dict:
     """A drawable ``symbol -> file`` usage graph from a symbol's references.
 
-    cppgraph records references as exact *locations* (``file:line``) with no
-    enclosing-symbol attribution (the deliberate "C" design), so a type's usage
-    isn't a symbol graph. We can still draw it exactly at *file* granularity:
-    one edge ``symbol -> file`` per distinct file, weighted by how many use
-    sites live there. 100% exact, zero heuristic — every reference carries a
-    real file. (When scip-clang emits ``enclosing_range`` we can upgrade this to
-    ``symbol -> enclosing symbol`` edges; see TODO / DESIGN.md § Graph model.)
+    This is the FILE-granularity fallback of the usage view, used when the
+    graph carries no attributed references (no `enclosing_range` from a #504
+    scip-clang): references are exact *locations* (``file:line``) with no
+    enclosing-symbol attribution, so a type's usage can't be drawn as a symbol
+    graph — but it can still be drawn exactly at *file* granularity: one edge
+    ``symbol -> file`` per distinct file, weighted by how many use sites live
+    there. 100% exact, zero heuristic — every reference carries a real file.
+    On a graph that DOES carry attributed references, `to_symbol_usage_graph`
+    draws the symbol-granularity view instead (``symbol -> enclosing symbol``
+    edges).
     """
     counts = Counter(r.file for r in references if r.file)
     nodes: list[dict] = [{"id": symbol, "label": label or symbol, "_origin": "cppgraph"}]

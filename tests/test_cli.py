@@ -2966,8 +2966,12 @@ def test_strongly_connected_components_prints_cycles(
     # neither the acyclic caller nor the self-loop surfaces as a component
     assert "spur" not in out
     assert "selfrec" not in out
-    # the facts-not-judgments caveat prints with the answer
-    assert "mutual recursion" in out
+    # the facts-not-judgments caveat prints with the answer — the SHARED
+    # `messages.SCC_NOTE` body (identical to the MCP `note`), not a CLI-local
+    # rewording.
+    from cppgraph.messages import SCC_NOTE
+
+    assert SCC_NOTE in out
 
 
 def test_strongly_connected_components_limit_truncates_and_reports_total(
@@ -3682,7 +3686,9 @@ def test_export_cycle_mode_no_cycle_prints_message(
     assert rc == 0
     out_text = capsys.readouterr().out
     assert "no multi-member call cycle contains" in out_text
-    assert "strongly-connected-components" in out_text  # points at the list view
+    from cppgraph.messages import NO_CYCLE_NOTE
+
+    assert NO_CYCLE_NOTE in out_text  # the shared no-cycle note (points at the list view)
     assert json.loads(out.read_text())["nodes"] == []
 
 

@@ -39,6 +39,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from cppgraph import masora
+from cppgraph import messages as _messages
+from cppgraph.builder import is_type_symbol as _is_type_symbol
 from cppgraph.cli import (
     SOURCE_EXTS,
     boundary_violations_graph,
@@ -50,10 +52,12 @@ from cppgraph.filters import ambiguous_candidate_hint as _ambiguous_candidate_hi
 from cppgraph.filters import drop_test_edges as _drop_test_edges
 from cppgraph.filters import filter_by_access as _filter_by_access
 from cppgraph.filters import filter_by_path as _filter_by_path
+from cppgraph.filters import filter_node_pairs as _filter_node_pairs
 from cppgraph.filters import is_trivial_callee as _is_trivial_callee
 from cppgraph.filters import matches_path_prefix as _matches_path_prefix
 from cppgraph.filters import path_prefix_error as _path_prefix_error
 from cppgraph.filters import short_label as _short_label
+from cppgraph.messages import AMBIGUOUS_CANDIDATE_LIMIT, DEFAULT_LIMIT, EXPLAIN_LIMIT
 from cppgraph.queries import capped as _capped
 from cppgraph.queries import extract_signature, find_symbols, read_source_snippet, response_symbols
 from cppgraph.queries import label as _label
@@ -67,12 +71,27 @@ from cppgraph.store import (
     discover_graph,
     is_stale,
     read_dirty_fingerprints,
+    references_capability_gap,
     staleness_verdict,
 )
 from cppgraph.updates import attributed_refs_cost_note, scip_update_advice, update_advice
 
 if TYPE_CHECKING:
     from cppgraph.model import Edge
+
+# The shared wording/cap constants (`cppgraph.messages`), kept under the
+# module's historical private names so the tool bodies below read unchanged —
+# and so a test can assert either name lands on the ONE shared string.
+_NO_CYCLE_NOTE = _messages.NO_CYCLE_NOTE
+_NO_STATIC_CHAIN_HINT = _messages.NO_STATIC_CHAIN_HINT
+_NO_ENCLOSING_RANGES = _messages.NO_ENCLOSING_RANGES
+_STOCK_ATTRIBUTION_UNRELIABLE = _messages.STOCK_ATTRIBUTION_UNRELIABLE
+_ZERO_CALLERS_STOCK_NOTE = _messages.ZERO_CALLERS_STOCK_NOTE
+_NO_ATTRIBUTED_REFS = _messages.NO_ATTRIBUTED_REFS
+_GLOBAL_INIT_NOTE = _messages.GLOBAL_INIT_NOTE
+_BOUNDARY_NOTE = _messages.BOUNDARY_NOTE
+_SCC_NOTE = _messages.SCC_NOTE
+_REACHABLE_NOTE = _messages.REACHABLE_NOTE
 
 # The server's own diagnostics (unexpected, swallowed-recovery paths) go here —
 # stderr only. MCP answers travel on stdout, which must stay protocol-clean, so
@@ -86,16 +105,6 @@ if not _LOGGER.handlers:
     _LOGGER.setLevel(logging.DEBUG)
     _LOGGER.propagate = False
 
-# Default cap on any list a tool returns. Big enough to be useful for reasoning,
-# small enough that a hub symbol's callers don't blow the context budget. The
-# caller can tune it per-query either way — lower to spend fewer tokens, raise to
-# see more — and always learns the true `total`. Set to 40
-# (not 25): a real function with ~30 stage/callee edges had genuine edges pushed
-# past a cap of 25, so the default now clears a typical fan-out.
-DEFAULT_LIMIT = 40
-# `explain` bundles callers + callees in one payload, so it caps each side lower.
-EXPLAIN_LIMIT = 10
-
 _UNKNOWN = "unknown symbol {symbol!r} — use the `find` tool to look up its exact SCIP symbol string"
 
 # The malformed-rules hint shared by `boundary_violations` and
@@ -104,128 +113,6 @@ _RULES_HINT = (
     "each rule is a [from_prefix, forbidden_prefix] pair, e.g. "
     '[["common/", "platform/"]] = "common/ must not call platform/"'
 )
-
-# Shared by `visualize(mode="cycle")` when a valid symbol is in no multi-member
-# cycle: the same shape as the no-static-chain case — a real (good) outcome
-# stated plainly, no HTML written or opened, never an error.
-_NO_CYCLE_NOTE = (
-    "this symbol is not part of any multi-member call cycle (strongly-connected "
-    "component) — a lower bound, as always: runtime dispatch (virtual calls, "
-    "registered factories) can complete a cycle with no static edge. "
-    "`strongly_connected_components` lists every cycle the graph does contain."
-)
-
-# Shared by `path` and `visualize(mode="path")` when the static chain doesn't exist.
-_NO_STATIC_CHAIN_HINT = (
-    "No *static* call chain — this does not prove the two are unrelated. "
-    "The flow may cross a runtime-dispatch boundary the static graph can't "
-    "link: a virtual call, or a registered-factory hop (e.g. a "
-    "DocumentSource built by a pipeline parser and later run via "
-    "doGetNext), where the edge exists only at runtime. Try `path` "
-    "against the concrete override/implementation, or bridge the boundary "
-    "with `find_references` / `subclasses`."
-)
-
-# Degrade-cleanly responses for the enclosing-range-gated (#504) tools, the
-# same `available: false` + `reason` convention `references` uses when the
-# graph was built `--no-references`: say why, point at the upgrade, never a
-# silently empty/wrong list.
-_NO_ENCLOSING_RANGES = (
-    "this graph carries no definition body extents: `enclosing_range` is emitted "
-    "only by a #504-built scip-clang, and a stock-binary graph cannot answer "
-    "this (an empty list would read as 'none', which is wrong). Index with a "
-    "#504-built scip-clang and rebuild the store (`cppgraph build --scip "
-    "<index.scip>`) to enable it"
-)
-_STOCK_ATTRIBUTION_UNRELIABLE = (
-    "not reliable on this graph: it was indexed with a stock scip-clang, whose "
-    "caller attribution (nearest-preceding definition, no enclosing ranges) can "
-    "mis-attribute a bodyless member declaration to the preceding definition — "
-    "a phantom caller that turns a real 0 into a false 1, exactly the answer "
-    "this tool must get right. Index with a #504-built scip-clang and rebuild "
-    "the store to enable it"
-)
-# `explain` reports its caller count (never refuses), but a 0 on a stock-binary
-# graph is not guaranteed — the same asymmetry `_STOCK_ATTRIBUTION_UNRELIABLE`
-# refuses `no_incoming_calls` over, stated as a caveat traveling with the fact.
-_ZERO_CALLERS_STOCK_NOTE = (
-    "0 callers is only trustworthy on a #504-built index: this graph was "
-    "indexed with a stock scip-clang, whose caller attribution "
-    "(nearest-preceding definition, no enclosing ranges) has a separate false-"
-    "positive path that can fabricate a phantom caller from a bodyless "
-    "declaration site, but this reported 0 can hide a real caller when a call "
-    "site with no preceding callable definition in its document is dropped — "
-    "so this 0 is not guaranteed to be a true 0. Index with a "
-    "#504-built scip-clang and rebuild the store for an exact 0"
-)
-# Degrade-cleanly response for the attributed-refs-gated tool: same convention,
-# naming the exact rebuild path (a #504 index AND --attributed-refs/enrich-refs).
-_NO_ATTRIBUTED_REFS = (
-    "this graph carries no attributed references: initializer-region attribution "
-    "needs a #504-built scip-clang AND a store built with `--attributed-refs` "
-    "(or `cppgraph enrich-refs` on an existing one). Without it an initializer's "
-    "reads are plain locations, and an empty list here would read as "
-    "'references nothing', which is wrong"
-)
-# Standing caveat on every global_init_references response, both halves of the
-# facts-not-judgments rule: the reference is a fact (constant-initialized inits
-# are safe), and a read inside a lambda body in the region may run lazily — the
-# measured limitation that scip-clang emits no separate lambda interval there.
-_GLOBAL_INIT_NOTE = (
-    "each entry is a graph fact — this global's initializer region references "
-    "that symbol — not a verdict: a `constexpr`/`constinit` initializer is "
-    "constant-initialized (safe), and a read inside a lambda body in the region "
-    "may run lazily or never rather than at initialization (scip-clang emits no "
-    "separate interval for such a lambda, so it cannot be split out). The tool "
-    "reports the reference; the hazard judgment is yours."
-)
-# Standing caveat on every boundary_violations response, both directions of the
-# facts-not-judgments rule: a listed violation is exact (an edge that exists),
-# while an empty list is a lower bound (the static graph under-reports runtime
-# reachability), never a conformance verdict.
-_BOUNDARY_NOTE = (
-    "each violation is a real compiler-traced edge — zero false positives. The "
-    "converse is a lower bound: 0 violations means no *statically indexed* edge "
-    "crosses these rules — runtime dispatch (virtual calls, function pointers, "
-    "registered factories) can cross a boundary with no static edge, and only "
-    "the given rules and edge kinds were checked. The rules are supplied by "
-    "you (the project's declared layering); the graph stores no intended "
-    "architecture of its own."
-)
-# Standing caveat on every strongly_connected_components response: component
-# membership is a graph fact (these symbols can all reach each other), never a
-# verdict — mutual recursion is often legitimate architecture, and the reader
-# judges which cycles, if any, are a problem.
-_SCC_NOTE = (
-    "each component is a graph fact — these symbols can all reach each other "
-    "via calls edges — not a verdict. Mutual recursion is often completely "
-    "legitimate architecture (a visitor pattern, a recursive-descent parser's "
-    "mutually-recursive rules); which cycles, if any, are actually a problem "
-    "is your judgment. Filters drop a component only when every member is "
-    "filtered out; a reported component always lists all its members (the "
-    "cycle is a fact about the compiled binary)."
-)
-# Standing caveat on every reachable_from response: a static call graph
-# under-reports runtime reachability (virtual dispatch, function pointers,
-# registered factories have no static edge), so per the DESIGN.md corollary
-# the result is a lower bound — "at least these are reachable" — never a set
-# whose absent members are safe to ignore.
-_REACHABLE_NOTE = (
-    "a lower bound on runtime reachability: every symbol listed is reached via "
-    "a compiler-traced static edge, but virtual dispatch, function pointers "
-    "and runtime registration (e.g. factories) have no static edge, so the "
-    "true reachable set may be larger. Read it as 'at least these are "
-    "reachable', never as a set whose absent members are safe to ignore."
-)
-
-
-def _is_type_symbol(symbol: str) -> bool:
-    """True if the SCIP string denotes a *type* (class/struct/enum), not a
-    callable. SCIP suffixes a type descriptor with `#` and a method/function
-    with `().`; a bare type reference therefore ends in `#`. Types have no
-    call-graph callers, so `impact_of(kind="calls")` on one is meaningless —
-    the blast radius lives in `find_references` instead."""
-    return symbol.rstrip().endswith("#")
 
 
 def _edge_dict(
@@ -281,7 +168,7 @@ def _resolve(store: GraphStore, symbol: str) -> tuple[str | None, dict[str, Any]
         return resolved, None
     if not candidates:
         return None, {"error": _UNKNOWN.format(symbol=symbol)}
-    shown = candidates[:DEFAULT_LIMIT]
+    shown = candidates[:AMBIGUOUS_CANDIDATE_LIMIT]
     hint = (
         f"{len(candidates)} symbols match {symbol!r}; re-call with the exact "
         "`symbol` from candidates (or use `find` to narrow a broad name)."
@@ -292,7 +179,7 @@ def _resolve(store: GraphStore, symbol: str) -> tuple[str | None, dict[str, Any]
     return None, {
         "ambiguous": symbol,
         "total": len(candidates),
-        "truncated": len(candidates) > len(shown),
+        "truncated": len(candidates) > AMBIGUOUS_CANDIDATE_LIMIT,
         "candidates": [_node_dict(n, full_symbols=True) for n in shown],
         "hint": hint,
     }
@@ -477,19 +364,12 @@ def references(
     if _alt is not None:
         return _alt
     refs = store.references_of(symbol)
-    if not refs and store.meta().get("has_references") != "true":
+    gap = references_capability_gap(store, len(refs), access=access)
+    if gap is not None:
         return {
             "symbol": symbol,
             "available": False,
-            "reason": "graph built with --no-references (no location index)",
-        }
-    if access is not None and store.meta().get("has_access_roles") != "true":
-        return {
-            "symbol": symbol,
-            "available": False,
-            "reason": f"graph carries no read/write access data — cannot filter by "
-            f"access={access!r}; rebuild with a scip-clang binary carrying the "
-            f"ReadAccess/WriteAccess patch",
+            "reason": gap,
         }
     if exclude_tests:
         refs = [r for r in refs if not is_test_file(r.file)]
@@ -631,17 +511,12 @@ def impact(
         }
 
     affected = sorted(store.impact(symbol, max_depth=depth, kind=kind))
-    nodes = [(sym, store.get_node(sym)) for sym in affected]
-    if exclude_tests:
-        nodes = [(sym, n) for sym, n in nodes if n is None or not is_test_file(n.file)]
-    if include_paths or exclude_paths:
-        nodes = [
-            (sym, n)
-            for sym, n in nodes
-            if _matches_path_prefix(
-                n.file if n is not None else None, include=include_paths, exclude=exclude_paths
-            )
-        ]
+    nodes = _filter_node_pairs(
+        [(sym, store.get_node(sym)) for sym in affected],
+        exclude_tests=exclude_tests,
+        include_paths=include_paths,
+        exclude_paths=exclude_paths,
+    )
     shown, truncated = _capped(nodes, limit)
     out: list[dict[str, Any]] = [
         _node_dict(n, full_symbols)
@@ -719,17 +594,12 @@ def reachable_from_report(
         }
 
     reached = sorted(store.reachable_from(symbol, max_depth=depth, kind=kind))
-    nodes = [(sym, store.get_node(sym)) for sym in reached]
-    if exclude_tests:
-        nodes = [(sym, n) for sym, n in nodes if n is None or not is_test_file(n.file)]
-    if include_paths or exclude_paths:
-        nodes = [
-            (sym, n)
-            for sym, n in nodes
-            if _matches_path_prefix(
-                n.file if n is not None else None, include=include_paths, exclude=exclude_paths
-            )
-        ]
+    nodes = _filter_node_pairs(
+        [(sym, store.get_node(sym)) for sym in reached],
+        exclude_tests=exclude_tests,
+        include_paths=include_paths,
+        exclude_paths=exclude_paths,
+    )
     shown, truncated = _capped(nodes, limit)
     out: list[dict[str, Any]] = [
         _node_dict(n, full_symbols)
@@ -1705,7 +1575,7 @@ def _masora_field(
 class _ReloadingStore:
     """A `GraphStore` handle that reopens when the `.graph.db` changes on disk.
 
-    The MCP server is long-lived, but a the index wizard/`cppgraph init` run overwrites
+    The MCP server is long-lived, but the index wizard/`cppgraph init` run overwrites
     the graph file underneath it. Without reloading, every query (and `status`)
     would keep answering from the stale graph held open at launch until Claude Code
     restarts — the "status says 18k nodes, the rebuild made 15k" confusion. `get()`

@@ -45,7 +45,7 @@ in `CHANGELOG.md`, releases in `versions.json`.
   nothing), then chain into the re-index. Only for an already-patched install, where the
   source choice is unambiguous; stock / build / emulate stay manual.
 - **Contributing notes, CI (lint + pytest).** Repo is already public and past
-  several releases (currently v0.4.0) — the "publish" half is done; what's still
+  several releases — the "publish" half is done; what's still
   missing is a `CONTRIBUTING.md` and a `.github/workflows/` CI job running
   `ruff format --check`/`ruff check`/`pytest` on push/PR.
 - **Make the repo discoverable to LLMs (distribution).** LLMs asked to compare
@@ -56,7 +56,7 @@ in `CHANGELOG.md`, releases in `versions.json`.
   claude code": submit to the MCP registry (best-targeted, most durable), optionally
   a short write-up / Show HN. Refer to it with a descriptor everywhere it's linked
   ("cppgraph — compiler-exact C++ code-intelligence MCP server"), never bare
-  "cppgraph". The repo is already public (releases up to v0.4.0), so this is
+  "cppgraph". The repo is already public (past several releases), so this is
   actionable now, not gated on anything.
 - **Add a Graft contrast to `COMPARISON.md`.** Graft (nanonets/graft) is the tool an
   LLM will most likely bring up unprompted when asked about "code graph for agents" —
@@ -152,8 +152,9 @@ in `CHANGELOG.md`, releases in `versions.json`.
   revisit the "Claude Code-only" premise if adoption data ever shows non-Claude usage
   demand, not a reason to build it speculatively now.
 
-- **Split the three largest modules** (`store.py` ~2830 lines, `mcp_server.py`
-  ~2700 lines, `cli.py` ~2700 lines) — grown mostly through this project's own
+- **Split the three largest modules** (`store.py` ~2920 lines, `mcp_server.py`
+  ~2740 lines, `cli.py` ~2970 lines; measured 2026-10-09 — re-check with
+  `wc -l`, these move) — grown mostly through this project's own
   feature accretion (each new query type adds a store method + a report
   function + a CLI handler + an MCP tool, all landing in the same three files).
   **Measured breakdown, not a guess** (checked before parking this, not after;
@@ -171,13 +172,13 @@ in `CHANGELOG.md`, releases in `versions.json`.
     lowest-risk piece of this: no dependency-direction issue (`mcp_server.py`
     already only imports FROM `cli.py`/`queries.py`, never the reverse), and it
     would finally make `mcp_server.py` match what its docstring already claims.
-  - `cli.py`: `main()` alone is ~2130 of the file's ~2700 lines — pure argparse
+  - `cli.py`: `main()` alone is ~2200 of the file's ~2930 lines — pure argparse
     boilerplate (30 subcommands, now with spelling aliases on the
     hyphen/underscore ones) plus `if args.command in (...)` handler bodies
     (29 commands, ~40 lines average) that could each become their own
     function. Splitting this does NOT shrink the total line count (argparse
     setup doesn't get smaller by moving it) — the only real gain is turning
-    one ~2130-line function into ~30 small ones plus a thin dispatcher, for
+    one ~2200-line function into ~30 small ones plus a thin dispatcher, for
     readability/testability, not for size.
   - `store.py` is the contested one: `GraphStore` is a single class around one
     shared SQLite connection (`self._con`), not a pile of independent

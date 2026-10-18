@@ -26,118 +26,28 @@ all resolved, with no name-collision merges.
 **To install, tell your agent:** *"Follow instructions to install
 https://github.com/rakiz/cppgraph"* — that points it at this section.
 
-If you are that agent, follow these steps exactly. They are deterministic; the
-scripts fail loudly with actionable messages.
+Two phases. **Phase A (machine setup, once):** clone the tool into its
+per-machine data dir and run `scripts/setup.sh`, which creates the venv, obtains
+the `scip-clang` indexer binary from a source menu, and registers the MCP
+server. **Phase B (per project, the heavy step):** run the index wizard with the
+scope the user chose — it locates the project's `compile_commands.json`, filters
+to that scope, indexes, and builds the queryable graph into the project's
+`.cppgraph/`.
 
-Two phases. **Phase A (machine setup):** clone, then run setup with the scip-clang
-source the user chose. **Phase B (index a project):** run the index with the scope
-the user chose. **You gather each choice by asking the user (in your own question
-UI), then run the script non-interactively with those choices as flags.**
+**The agent gathers every choice by asking the user (in its own question UI),
+then runs the scripts non-interactively with those choices as flags** — an
+interactive run inside an agent `!` command gets EOF. The full agent protocol
+(the interview shapes, the exact flags, the guardrails) is in
+[AGENTS.md](AGENTS.md) → "Indexing a project" / "Per-machine tool install".
 
-> **RULE — `!` commands can't be answered, so you ask, then pass flags.** A Claude
-> Code `! …` run has no interactive stdin: a prompt inside it gets EOF. So the
-> interactive menus are for a human in a real terminal, **not** for you. Your loop
-> is: (1) **ask the user** every choice via your question UI — the scip-clang source
-> (Phase A) and the index scope (Phase B) — surfacing the real options; (2) run the
-> script **non-interactively** with those choices as flags. Decide nothing yourself;
-> the answers are the user's. Give a realistic **time estimate** with each heavy
-> step: indexing is the long one (**minutes to hours**, CPU-bound — ~20 min for
-> ~6 000 TUs on a fast 14-core x86, **~4 h for 6 482 TUs on an 8-core Graviton2
-> (m6g), ~1 h 42 for 4 301 TUs on an 8-core Graviton3 (m7g.2xlarge)**);
-> downloading scip-clang is seconds, compiling it (#504) is ~25–60 min (~26 min
-> measured on m7g.2xlarge).
-
-### Phase A — set up the machine (once)
-
-1. **Before cloning anything cppgraph-related — even just to read/explore the
-   source — check for an existing per-machine install first:** if
-   `${XDG_DATA_HOME:-$HOME/.local/share}/cppgraph/repo` exists, use *that*
-   checkout (read it, `git pull` it if stale); never clone a second copy
-   (`~/cppgraph`, a project dir, a dev checkout). Only clone fresh if absent.
-2. **Clone** into the per-machine tool dir (**always this path** — not the user's
-   project, not a dev checkout; even "install from a local copy" means clone that
-   copy *into* this path):
-   ```bash
-   git clone https://github.com/rakiz/cppgraph "${XDG_DATA_HOME:-$HOME/.local/share}/cppgraph/repo"
-   ```
-3. **Get the valid sources from the tool (don't guess the platform):**
-   ```
-   ! ~/.local/share/cppgraph/repo/scripts/setup.sh --list-sources
-   ```
-   It prints this machine's OS/arch and the sources that actually apply (e.g. no
-   `download` on ARM-Linux). **Ask the user to pick from exactly those** — costs:
-   download-patched ~1 min (patched binary, no Docker; macOS arm64 + Linux aarch64 today),
-   download ~1 min (stock, unpatched), build (patched) ~25–60 min Docker, emulate (slower
-   indexing).
-   Windows → WSL2; Intel Mac → only emulate.
-4. **Run it with their choice** (`!` runs it non-interactively; `--scip-source` is
-   what makes that work — without it a piped run stops with `ACTION NEEDED`):
-   ```
-   ! ~/.local/share/cppgraph/repo/scripts/setup.sh --scip-source <download-patched|download|build|emulate>
-   ```
-   `setup.sh` is the **sole** entry point — it creates the venv, obtains scip-clang,
-   registers the MCP server, installs the bundled skill and `/cppgraph` slash
-   command into detected agent tools, and (in a real terminal) offers to index the
-   current project. Never tell the user to run `cppgraph setup` / `.venv/bin/cppgraph …` /
-   anything under a dev checkout: none of that exists on a fresh machine until
-   `setup.sh` has run.
-5. **Never `pip install cppgraph` (or add it as a dependency) into a target
-   project's own venv/virtualenv.** It's a single per-machine tool with one
-   dedicated venv (`~/.local/share/cppgraph/repo/.venv`); invoke its binaries
-   from there directly (optionally alias `cppgraph` to that binary), never
-   re-install it into another project's environment — that creates a second
-   divergent install with its own dependency versions that can conflict with the
-   committed generated bindings (observed: a project venv's pinned `protobuf`
-   vs cppgraph's). Setup also links the binary into `~/.local/bin` automatically
-   (skipped when a `cppgraph` is already on PATH), so a bare `cppgraph` works
-   after setup; the shell alias below remains an alternative (e.g. for older
-   installs predating the link). Convenience alias for the user's shell rc
-   (`~/.bashrc` / `~/.zshrc`):
-   ```bash
-   alias cppgraph="${XDG_DATA_HOME:-$HOME/.local/share}/cppgraph/repo/.venv/bin/cppgraph"
-   ```
-
-### Phase B — index a project (per-project; the heavy step)
-
-**You drive Phase B; the user only picks from choices you offer — never typing a
-scope, path, or flag, and never seeing these commands.** The conversation: (a) a
-yes/no — "Index this project now? (~estimate)"; if yes, (b) a selectable scope
-choice (whole tree / a subtree) + a yes/no on tests; then (c) you run it and report
-progress; (d) when done, they open a new Claude Code session.
-
-1. **Get the scope options:** run `~/.local/share/cppgraph/repo/scripts/index.sh
-   --plan-json` (a bare `cppgraph` works when setup linked it into `~/.local/bin`;
-   otherwise use the full path `~/.local/share/cppgraph/repo/.venv/bin/cppgraph`,
-   the fallback on older installs) from the project dir; it
-   auto-locates the `compile_commands.json` — if it reports none, generate one, see
-   [AGENTS.md](AGENTS.md) → "Fallback", after the user's OK. It returns the compdb
-   breakdown, the questions (subtree / tests / attribution), and `artifacts` (whether
-   a `.scip`/`.graph.db` already exists).
-2. **Offer the choices** — a single-select of whole tree + each subtree (with TU
-   counts) and a yes/no on tests; never ask the user to type a subdirectory or flag.
-   If `artifacts` shows the project is already indexed, ask whether to **keep** it
-   (default) or rebuild.
-3. **Run it with their answers** (non-interactive, so `!` works):
-   ```
-   ! ~/.local/share/cppgraph/repo/scripts/index.sh <compdb> -y --filter <sub> [--no-tests] [--attributed-refs] --run
-   ```
-   **Non-destructive by default:** an existing `.scip`/`.graph.db` is kept, not
-   overwritten — only what's missing is built. Add `--from-scratch` only if the user
-   asked to rebuild. The chosen scope is recorded and reused by later updates. (A human in a
-   real terminal can instead run `scripts/index.sh` with no flags for the interactive
-   wizard.) Then tell the user to **open a new Claude Code session _from their project
-   directory_** (that's how the server finds this project's graph) and ask *"what
-   calls X?"*, *"impact of changing Y?"*, *"show the dependency graph of Z"*.
-
-**Uninstalling:** run `! ~/.local/share/cppgraph/repo/scripts/uninstall.sh` (it asks
-per item). There is no uninstall flag on `setup.sh`, and you must **never** improvise
-`rm -rf` on `~/.local/share/cppgraph` or a project's `.cppgraph/` — the latter holds
-a `.scip` index that can take hours to rebuild; `uninstall.sh` keeps project data by
-default and warns before touching anything precious.
-
-Humans: the same flow, step by step, is in [QUICKSTART.md](QUICKSTART.md).
-Every CLI subcommand, grouped by purpose with one example each, is in
-[CLI_REFERENCE.md](CLI_REFERENCE.md).
+- Human, step by step: [QUICKSTART.md](QUICKSTART.md).
+- Machine-setup mechanics (source menu, platform rules, manual fallbacks):
+  [INSTALL.md](INSTALL.md) — the canonical install reference.
+- Uninstalling: run `! ~/.local/share/cppgraph/repo/scripts/uninstall.sh` (it
+  asks per item; it keeps each project's index data by default). Details:
+  [INSTALL.md](INSTALL.md) → "Uninstalling".
+- Every CLI subcommand, grouped by purpose with one example each:
+  [CLI_REFERENCE.md](CLI_REFERENCE.md).
 
 ## Status
 
@@ -215,17 +125,19 @@ through the model's context).
 grep's *raw* dump is only a floor: it can't tell a call from a decl, a comment,
 or a different same-named symbol, so to answer correctly it must **read around
 every hit** — and that's where the cost explodes. Measured on MongoDB, *"who
-calls the method `makeResumeToken`?"*: grep dumps ~6,600 tokens (98% noise, 4
-symbols merged) and needs **~110,000** to read-and-disambiguate; cppgraph `find`
-+ `who_calls` ingests **~400**, exact — **272× leaner**. On a rare, uniquely
-named symbol (grep's best case) cppgraph still wins ~8× once grep reads to
-verify; on a hot type like `OperationContext` reading every hit would take
-**~1,900× more** than cppgraph — a theoretical number nobody ingests, so in
-practice grep truncates and answers from a partial view, silently missing call
-sites, where cppgraph stays at ~6k tokens, exact and complete.
+calls the method `makeResumeToken`?"*: grep dumps a raw dump that is ~99 % noise
+(4 symbols merged) and needs a full read-and-disambiguate pass to trust the 2
+real call sites; cppgraph ingests a few hundred tokens, exact — orders of
+magnitude leaner. On a rare, uniquely
+named symbol (grep's best case) cppgraph still wins several-fold once grep reads
+to verify; on a hot type like `OperationContext` reading every hit would take
+thousands of times more than cppgraph — a theoretical number nobody ingests, so
+in practice grep truncates and answers from a partial view, silently missing
+call sites, where cppgraph stays exact and complete.
 The trade-off is a one-time index (minutes), amortized over every later query.
-Full spectrum, noise ratios, and the token-lean defaults:
-**[COMPARISON.md](COMPARISON.md)** (reproduce with `scripts/measure_tokens.py --suite`).
+Measured figures (token counts, noise ratios, multipliers), the full spectrum,
+and the token-lean defaults: **[COMPARISON.md](COMPARISON.md)** (reproduce with
+`scripts/measure_tokens.py --suite`).
 
 Same idea versus an LSP-driven agent (e.g. Serena): the questions are the same,
 but cppgraph is a pre-indexed graph the agent queries in one call, not a live
@@ -240,6 +152,9 @@ and complete on large C++. Numbers: [COMPARISON.md](COMPARISON.md).
 | [DESIGN.md](DESIGN.md) | Architecture, edge model, the call-attribution heuristic + its known limitation |
 | [COMPARISON.md](COMPARISON.md) | Measured comparison vs graphify and Serena on a real design question |
 | [INSTALL.md](INSTALL.md) | Setting up a new machine (`scip-clang`, `protoc`, the venv) |
+| [QUICKSTART.md](QUICKSTART.md) | Human, step-by-step: install, index your first project, ask questions |
+| [CLI_REFERENCE.md](CLI_REFERENCE.md) | Every CLI subcommand, grouped by purpose, with an example each |
+| [CREDITS.md](CREDITS.md) | Credits & third-party dependencies |
 | [viz/README.md](viz/README.md) | The bundled graph viewer + `cppgraph export` graph.json format |
 | [CHANGELOG.md](CHANGELOG.md) | What's been built so far |
 | [TODO.md](TODO.md) | Open tasks |

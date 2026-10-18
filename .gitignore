@@ -7,6 +7,7 @@ venv/
 dist/
 build/
 .pytest_cache/
+uv.lock
 
 .DS_Store
 .serena/

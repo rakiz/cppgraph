@@ -10,6 +10,7 @@ from __future__ import annotations
 from cppgraph.filters import (
     ambiguous_candidate_hint,
     filter_by_path,
+    filter_node_pairs,
     matches_path_prefix,
 )
 from cppgraph.model import Graph, Node
@@ -261,3 +262,66 @@ def test_path_prefix_error_messages_name_the_prefix() -> None:
     )
     assert path_prefix_error(files, ["src/foo"], None) is None
     assert path_prefix_error(files, None, None) is None
+
+
+# --- filter_node_pairs: the impact/reachable_from pair filter (both surfaces) ---
+
+
+def _pair_store(tmp_path) -> GraphStore:
+    graph = Graph()
+    for sym, file, line in [
+        ("prod_sym", "src/myproject/prod.cpp", 1),
+        ("test_sym", "tests/test_foo.cpp", 2),
+        ("vendor_sym", "vendor/somelib/bar.cpp", 3),
+    ]:
+        graph.add_node(sym)
+        graph.nodes[sym].file = file
+        graph.nodes[sym].line = line
+    path = tmp_path / "pairs.db"
+    write_sqlite(graph, path)
+    return GraphStore(path)
+
+
+def test_filter_node_pairs_noop_when_no_filters_given(tmp_path) -> None:
+    store = _pair_store(tmp_path)
+    pairs = [(s, store.get_node(s)) for s in ("prod_sym", "test_sym", "vendor_sym", "ghost")]
+    assert (
+        filter_node_pairs(pairs, exclude_tests=False, include_paths=None, exclude_paths=None)
+        == pairs
+    )
+
+
+def test_filter_node_pairs_exclude_tests_drops_test_defined_keeps_unknown(tmp_path) -> None:
+    """A node with no recorded definition site is kept — the same
+    unresolvable-endpoint treatment as `drop_test_edges`."""
+    store = _pair_store(tmp_path)
+    pairs = [(s, store.get_node(s)) for s in ("prod_sym", "test_sym", "ghost")]
+    kept = filter_node_pairs(pairs, exclude_tests=True, include_paths=None, exclude_paths=None)
+    assert [s for s, _ in kept] == ["prod_sym", "ghost"]
+
+
+def test_filter_node_pairs_include_paths(tmp_path) -> None:
+    store = _pair_store(tmp_path)
+    pairs = [(s, store.get_node(s)) for s in ("prod_sym", "vendor_sym")]
+    kept = filter_node_pairs(
+        pairs, exclude_tests=False, include_paths=["src/myproject/"], exclude_paths=None
+    )
+    assert [s for s, _ in kept] == ["prod_sym"]
+
+
+def test_filter_node_pairs_exclude_paths(tmp_path) -> None:
+    store = _pair_store(tmp_path)
+    pairs = [(s, store.get_node(s)) for s in ("prod_sym", "vendor_sym")]
+    kept = filter_node_pairs(
+        pairs, exclude_tests=False, include_paths=None, exclude_paths=["vendor/"]
+    )
+    assert [s for s, _ in kept] == ["prod_sym"]
+
+
+def test_filter_node_pairs_combines_both_filters(tmp_path) -> None:
+    store = _pair_store(tmp_path)
+    pairs = [(s, store.get_node(s)) for s in ("prod_sym", "test_sym", "vendor_sym")]
+    kept = filter_node_pairs(
+        pairs, exclude_tests=True, include_paths=None, exclude_paths=["vendor/"]
+    )
+    assert [s for s, _ in kept] == ["prod_sym"]

@@ -257,6 +257,35 @@ def filter_by_path(
     return kept
 
 
+def filter_node_pairs(
+    pairs: list[tuple[str, Node | None]],
+    *,
+    exclude_tests: bool,
+    include_paths: list[str] | None,
+    exclude_paths: list[str] | None,
+) -> list[tuple[str, Node | None]]:
+    """The `(symbol, node)` pair filter shared by `impact` and `reachable_from`
+    on BOTH surfaces (CLI `impact`/`reachable-from`, MCP `impact_of`/
+    `reachable_from`): drop pairs whose node is defined in a test file (when
+    `exclude_tests` — a node with no recorded definition site is kept, matching
+    `drop_test_edges`' treatment of unresolvable endpoints), then keep only
+    pairs whose definition file passes `matches_path_prefix`. The same
+    predicate order and the same None-node handling as the edge filters above,
+    so the two fan-out tools debounce exactly like `callers`/`callees` do."""
+    kept: list[tuple[str, Node | None]] = []
+    for sym, node in pairs:
+        if exclude_tests and node is not None and is_test_file(node.file):
+            continue
+        if not matches_path_prefix(
+            node.file if node is not None else None,
+            include=include_paths,
+            exclude=exclude_paths,
+        ):
+            continue
+        kept.append((sym, node))
+    return kept
+
+
 # --- read/write access roles (scip-clang read-write-access patch) ------------
 
 

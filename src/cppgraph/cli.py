@@ -10,7 +10,7 @@ from collections.abc import Collection, Sequence
 from pathlib import Path
 
 from cppgraph import masora
-from cppgraph.builder import build_graph
+from cppgraph.builder import build_graph, is_type_symbol
 from cppgraph.export import (
     is_test_file,
     to_file_usage_graph,
@@ -23,10 +23,26 @@ from cppgraph.filters import (
     drop_test_edges,
     filter_by_access,
     filter_by_path,
+    filter_node_pairs,
     is_trivial_callee,
     matches_path_prefix,
     path_prefix_error,
     short_label,
+)
+from cppgraph.messages import (
+    AMBIGUOUS_CANDIDATE_LIMIT,
+    BOUNDARY_NOTE,
+    DEFAULT_LIMIT,
+    EXPLAIN_LIMIT,
+    GLOBAL_INIT_NOTE,
+    NO_ATTRIBUTED_REFS,
+    NO_CYCLE_NOTE,
+    NO_ENCLOSING_RANGES,
+    NO_STATIC_CHAIN_HINT,
+    REACHABLE_NOTE,
+    SCC_NOTE,
+    STOCK_ATTRIBUTION_UNRELIABLE,
+    ZERO_CALLERS_STOCK_NOTE,
 )
 from cppgraph.model import Edge, Node
 from cppgraph.proto import scip_pb2
@@ -43,6 +59,7 @@ from cppgraph.store import (
     is_stale,
     project_root_path,
     read_dirty_fingerprints,
+    references_capability_gap,
     staleness_verdict,
     update_store,
     write_sqlite,
@@ -251,19 +268,10 @@ def _check_path_filters(
             parser.error(err)
 
 
-_NO_STATIC_PATH_HINT = (
-    "  note: this does not prove they're unrelated — the flow may cross a "
-    "runtime-dispatch boundary (a virtual call, or a registered-factory hop) "
-    "that has no static edge. Try the concrete override, or bridge with "
-    "references/subtypes."
-)
-
-_NO_CYCLE_NOTE = (
-    "  note: this is not a verdict — the symbol may still be mutually recursive "
-    "at runtime across a dispatch boundary the static graph can't link (a "
-    "virtual call, a registered factory). `strongly-connected-components` "
-    "lists every cycle the graph does contain."
-)
+# The no-static-path / no-cycle hints are the shared `cppgraph.messages`
+# bodies, rendered with the CLI's `  note: ` prefix at their print sites
+# (`NO_STATIC_CHAIN_HINT` / `NO_CYCLE_NOTE`) — the same wording the MCP
+# `path`/`visualize` tools return, per the surface-parity rule.
 
 
 def _pop_path_metadata(graph_json: dict) -> tuple[bool, int]:
@@ -319,7 +327,7 @@ def _resolve_symbol(
         "pass the exact SCIP symbol:",
         file=sys.stderr,
     )
-    for node in candidates[:10]:
+    for node in candidates[:AMBIGUOUS_CANDIDATE_LIMIT]:
         loc = (
             f"{node.file}:{node.line + 1}"
             if node.file is not None and node.line is not None
@@ -332,8 +340,11 @@ def _resolve_symbol(
             f"    {node.symbol}  ({_node_label(node.symbol, node) or '?'} @ {loc})",
             file=sys.stderr,
         )
-    if len(candidates) > 10:
-        print(f"    ... and {len(candidates) - 10} more", file=sys.stderr)
+    if len(candidates) > AMBIGUOUS_CANDIDATE_LIMIT:
+        print(
+            f"    ... and {len(candidates) - AMBIGUOUS_CANDIDATE_LIMIT} more",
+            file=sys.stderr,
+        )
     extra = ambiguous_candidate_hint(query, candidates)
     if extra:
         print(f"[cppgraph] note: {extra}.", file=sys.stderr)
@@ -437,7 +448,7 @@ def build_export_json(
     exclude_tests: bool = False,
     dst: str | None = None,
     expand_paths: bool = False,
-    limit: int = 40,
+    limit: int = DEFAULT_LIMIT,
 ) -> dict | None:
     """The graph.json for a symbol, or None if the symbol is unknown.
 
@@ -1203,7 +1214,12 @@ def main(argv: list[str] | None = None) -> int:
         default="fan_in",
         help="'fan_in' = most-called (default); 'fan_out' = most-calling; 'edges' = both summed",
     )
-    p_hotspots.add_argument("--limit", type=int, default=20, help="max rows to show (default: 20)")
+    p_hotspots.add_argument(
+        "--limit",
+        type=int,
+        default=DEFAULT_LIMIT,
+        help=f"max rows to show (default: {DEFAULT_LIMIT})",
+    )
     p_hotspots.add_argument(
         "--exclude-tests",
         action=argparse.BooleanOptionalAction,
@@ -1241,8 +1257,8 @@ def main(argv: list[str] | None = None) -> int:
     p_dep_cost.add_argument(
         "--limit",
         type=int,
-        default=20,
-        help="max target symbols to show in the breakdown (default: 20)",
+        default=DEFAULT_LIMIT,
+        help=f"max target symbols to show in the breakdown (default: {DEFAULT_LIMIT})",
     )
     p_dep_cost.add_argument(
         "--exclude-tests",
@@ -2085,8 +2101,9 @@ def main(argv: list[str] | None = None) -> int:
         _check_path_filters(store, args, parser)
         args.symbol = _resolve_symbol(store, args.symbol, parser)
         refs = store.references_of(args.symbol)
-        if not refs and store.meta().get("has_references") != "true":
-            print("[cppgraph] this graph was built with --no-references (no location index)")
+        gap = references_capability_gap(store, len(refs), access=args.access)
+        if gap is not None:
+            print(f"[cppgraph] {gap}")
             return 1
         if args.include_paths or args.exclude_paths:
             refs = [
@@ -2097,13 +2114,6 @@ def main(argv: list[str] | None = None) -> int:
                 )
             ]
         if args.access:
-            if store.meta().get("has_access_roles") != "true":
-                print(
-                    "[cppgraph] this graph carries no read/write access data — rebuild "
-                    "with a scip-clang binary carrying the ReadAccess/WriteAccess patch "
-                    "(--access would otherwise guess)"
-                )
-                return 1
             refs = filter_by_access(refs, args.access)
         print(f"[cppgraph] {len(refs)} use site(s) of {args.symbol}")
         for ref in refs[: args.limit]:
@@ -2133,7 +2143,7 @@ def main(argv: list[str] | None = None) -> int:
         chain = store.shortest_call_path(args.src, args.dst)
         if chain is None:
             print(f"[cppgraph] no static call path from {args.src} to {args.dst}")
-            print(_NO_STATIC_PATH_HINT)
+            print(f"  note: {NO_STATIC_CHAIN_HINT}")
             return 1
         print(f"[cppgraph] {len(chain)} hop(s) from {args.src} to {args.dst}")
         print(f"  {args.src}")
@@ -2146,7 +2156,7 @@ def main(argv: list[str] | None = None) -> int:
         store = _open_store_checked(args, parser)
         _check_path_filters(store, args, parser)
         args.symbol = _resolve_symbol(store, args.symbol, parser)
-        if args.kind == "calls" and args.symbol.rstrip().endswith("#"):
+        if args.kind == "calls" and is_type_symbol(args.symbol):
             n = len(store.references_of(args.symbol))
             print(
                 f"[cppgraph] {args.symbol} is a type — it has no call-graph callers. "
@@ -2155,19 +2165,12 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 0
         affected = sorted(store.impact(args.symbol, max_depth=args.depth, kind=args.kind))
-        nodes = [(sym, store.get_node(sym)) for sym in affected]
-        if args.exclude_tests:
-            nodes = [(sym, n) for sym, n in nodes if n is None or not is_test_file(n.file)]
-        if args.include_paths or args.exclude_paths:
-            nodes = [
-                (sym, n)
-                for sym, n in nodes
-                if matches_path_prefix(
-                    n.file if n is not None else None,
-                    include=args.include_paths,
-                    exclude=args.exclude_paths,
-                )
-            ]
+        nodes = filter_node_pairs(
+            [(sym, store.get_node(sym)) for sym in affected],
+            exclude_tests=args.exclude_tests,
+            include_paths=args.include_paths,
+            exclude_paths=args.exclude_paths,
+        )
         verb = {
             "calls": "transitively call",
             "inherits": "transitively inherit from",
@@ -2187,7 +2190,7 @@ def main(argv: list[str] | None = None) -> int:
         store = _open_store_checked(args, parser)
         _check_path_filters(store, args, parser)
         args.symbol = _resolve_symbol(store, args.symbol, parser)
-        if args.kind == "calls" and args.symbol.rstrip().endswith("#"):
+        if args.kind == "calls" and is_type_symbol(args.symbol):
             print(
                 f"[cppgraph] {args.symbol} is a type — it makes no calls itself. Its "
                 "call-graph reachability lives in its methods: use `cppgraph "
@@ -2196,28 +2199,16 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 0
         reached = sorted(store.reachable_from(args.symbol, max_depth=args.depth, kind=args.kind))
-        nodes = [(sym, store.get_node(sym)) for sym in reached]
-        if args.exclude_tests:
-            nodes = [(sym, n) for sym, n in nodes if n is None or not is_test_file(n.file)]
-        if args.include_paths or args.exclude_paths:
-            nodes = [
-                (sym, n)
-                for sym, n in nodes
-                if matches_path_prefix(
-                    n.file if n is not None else None,
-                    include=args.include_paths,
-                    exclude=args.exclude_paths,
-                )
-            ]
+        nodes = filter_node_pairs(
+            [(sym, store.get_node(sym)) for sym in reached],
+            exclude_tests=args.exclude_tests,
+            include_paths=args.include_paths,
+            exclude_paths=args.exclude_paths,
+        )
         verb = "transitively reached from"
         tests_note = " (excluding tests)" if args.exclude_tests else ""
         print(f"[cppgraph] {len(nodes)} symbol(s) {verb} {args.symbol}{tests_note}")
-        print(
-            "  note: a lower bound — at least these are reachable. Static "
-            "compiler-traced edges only; virtual dispatch, function pointers "
-            "and runtime registration are not captured, so the true reachable "
-            "set may be larger."
-        )
+        print(f"  note: {REACHABLE_NOTE}")
         shown = nodes[: args.limit] if args.limit is not None else nodes
         for _sym, node in shown:
             if node is not None:
@@ -2312,11 +2303,7 @@ def main(argv: list[str] | None = None) -> int:
             exclude_paths=args.exclude_paths,
         )
         if result is None:
-            print(
-                "[cppgraph] line-span unavailable: this graph carries no definition "
-                "body extents (enclosing_range), which only a #504-built scip-clang "
-                "emits — index with one and rebuild the store to enable it"
-            )
+            print(f"[cppgraph] line-span unavailable: {NO_ENCLOSING_RANGES}")
             return 1
         ranked, total = result
         tests_note = " (excluding tests)" if args.exclude_tests else ""
@@ -2343,14 +2330,7 @@ def main(argv: list[str] | None = None) -> int:
             exclude_paths=args.exclude_paths,
         )
         if result is None:
-            print(
-                "[cppgraph] no-incoming-calls is not reliable on this graph: a stock "
-                "scip-clang's caller attribution (nearest-preceding definition, no "
-                "enclosing ranges) can mis-attribute a bodyless member declaration "
-                "to the preceding definition — a phantom caller that turns a real 0 "
-                "into a false 1. Index with a #504-built scip-clang and rebuild the "
-                "store to enable it"
-            )
+            print(f"[cppgraph] no-incoming-calls {STOCK_ATTRIBUTION_UNRELIABLE}")
             return 1
         symbols, total = result
         tests_note = " (excluding tests)" if args.exclude_tests else ""
@@ -2381,23 +2361,14 @@ def main(argv: list[str] | None = None) -> int:
         except ValueError as e:
             parser.error(str(e))
         if result is None:
-            print(
-                "[cppgraph] global-init-references unavailable: this graph carries "
-                "no attributed references — it needs a #504-built scip-clang AND "
-                "a store built with --attributed-refs (or `cppgraph enrich-refs`). "
-                "Rebuild to enable it"
-            )
+            print(f"[cppgraph] global-init-references unavailable: {NO_ATTRIBUTED_REFS}")
             return 1
         refs, total = result
         print(
             f"[cppgraph] {len(refs)} of {total} global(s) referenced by "
             f"{args.symbol}'s initializer region"
         )
-        print(
-            "  note: a reference is a fact, not a verdict — a constexpr/constinit "
-            "initializer is constant-initialized (safe), and a read inside a "
-            "lambda body in the region may run lazily rather than at initialization"
-        )
+        print(f"  note: {GLOBAL_INIT_NOTE}")
         for ref in refs:
             label = ref.symbol if args.full_symbols else short_label(ref.symbol)
             line = ref.line + 1 if ref.line is not None else "?"
@@ -2421,12 +2392,7 @@ def main(argv: list[str] | None = None) -> int:
         except ValueError as e:
             parser.error(str(e))
         print(f"[cppgraph] {len(violations)} of {total} violation(s) across {len(rules)} rule(s)")
-        print(
-            "  note: each violation is a real compiler-traced edge (zero false positives); "
-            "0 violations means no statically indexed edge crosses the rules — "
-            "runtime dispatch (virtual calls, function pointers) can cross a "
-            "boundary with no static edge"
-        )
+        print(f"  note: {BOUNDARY_NOTE}")
         for v in violations:
             src = v["src"] if args.full_symbols else short_label(v["src"])
             dst = v["dst"] if args.full_symbols else short_label(v["dst"])
@@ -2542,11 +2508,7 @@ def main(argv: list[str] | None = None) -> int:
             f"[cppgraph] {len(components)} of {total} cyclic group(s) of 2+ symbols, "
             f"biggest first{tests_note}"
         )
-        print(
-            "  note: a cycle is a graph fact, not a bad-architecture verdict — mutual "
-            "recursion is often legitimate (a visitor, a recursive-descent parser's "
-            "mutually recursive rules)"
-        )
+        print(f"  note: {SCC_NOTE}")
         for comp in components:
             print(f"  component of {len(comp)} symbol(s):")
             for symbol in comp:
@@ -2826,26 +2788,18 @@ def main(argv: list[str] | None = None) -> int:
         if not callers and store.meta().get("has_enclosing_ranges") != "true":
             # The same stock-attribution caveat `no_incoming_calls` refuses on:
             # the count is still reported, so the caveat travels with it.
-            print(
-                "  note: 0 callers is only trustworthy on a #504-built index — "
-                "this stock-binary graph's caller attribution (nearest-preceding "
-                "definition, no enclosing ranges) has a separate false-positive "
-                "path that can fabricate a phantom caller from a bodyless "
-                "declaration site, but this reported 0 can hide a real caller "
-                "when a call site with no preceding callable definition in its "
-                "document is dropped, so this 0 is not guaranteed"
-            )
-        for edge in callers[:10]:
+            print(f"  note: {ZERO_CALLERS_STOCK_NOTE}")
+        for edge in callers[:EXPLAIN_LIMIT]:
             line = edge.line + 1 if edge.line is not None else "?"
             print(f"    {edge.src}  ({edge.file}:{line})")
-        if len(callers) > 10:
-            print(f"    ... and {len(callers) - 10} more")
+        if len(callers) > EXPLAIN_LIMIT:
+            print(f"    ... and {len(callers) - EXPLAIN_LIMIT} more")
         print(f"  {len(callees)} callee(s):")
-        for edge in callees[:10]:
+        for edge in callees[:EXPLAIN_LIMIT]:
             line = edge.line + 1 if edge.line is not None else "?"
             print(f"    {edge.dst}  ({edge.file}:{line})")
-        if len(callees) > 10:
-            print(f"    ... and {len(callees) - 10} more")
+        if len(callees) > EXPLAIN_LIMIT:
+            print(f"    ... and {len(callees) - EXPLAIN_LIMIT} more")
         _print_masora_lines(store, args.symbol)
         return 0
 
@@ -2881,7 +2835,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.mode == "path":
             if n_nodes == 0:
                 print(f"[cppgraph] no static call path from {args.symbol} to {dst}")
-                print(_NO_STATIC_PATH_HINT)
+                print(f"  note: {NO_STATIC_CHAIN_HINT}")
             else:
                 print(
                     f"[cppgraph] exported path graph: {n_nodes} nodes, {n_links} "
@@ -2891,7 +2845,7 @@ def main(argv: list[str] | None = None) -> int:
         elif args.mode == "cycle":
             if n_nodes == 0:
                 print(f"[cppgraph] no multi-member call cycle contains {args.symbol}")
-                print(_NO_CYCLE_NOTE)
+                print(f"  note: {NO_CYCLE_NOTE}")
             else:
                 print(
                     f"[cppgraph] exported cycle graph: {n_nodes} nodes, {n_links} "
@@ -2946,10 +2900,10 @@ def main(argv: list[str] | None = None) -> int:
             # HTML the caller can't tell from success.
             if args.mode == "path":
                 print(f"[cppgraph] no static call path from {args.symbol} to {dst}")
-                print(_NO_STATIC_PATH_HINT)
+                print(f"  note: {NO_STATIC_CHAIN_HINT}")
             else:
                 print(f"[cppgraph] no multi-member call cycle contains {args.symbol}")
-                print(_NO_CYCLE_NOTE)
+                print(f"  note: {NO_CYCLE_NOTE}")
             _print_path_truncation(truncated, total, n_nodes, args.limit)
             return 0
         from cppgraph.viz_html import open_in_browser, write_temp_html

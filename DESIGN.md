@@ -430,20 +430,23 @@ designing the builder so this isn't a later rewrite:
 
 ## Serving
 
-- CLI: `build`, `update` (incremental), `find`, `callers`, `callees`, `path`,
+- CLI (a selection of the query subcommands — the full, canonical list with one
+  example each is [CLI_REFERENCE.md](CLI_REFERENCE.md)): `build`, `update`
+  (incremental), `find`, `callers`, `callees`, `path`,
   `bases` / `subtypes` (direct inheritance neighbours of a type), `impact`
   (reverse blast-radius; `--kind calls` = transitive callers, `--kind inherits`
   = all transitive subclasses), `reachable-from` (forward reachability from an
   entry point — a **lower bound** per the corollary below: "at least these are
   reachable", never a set to act on by exclusion; `--kind inherits` = the
-  transitive base hierarchy above a derived type),   `references` (exact use sites, present unless the
-  graph was built `--no-references`; `--root` for snippets, else coordinates), `explain`
+  transitive base hierarchy above a derived type), `references` (exact use
+  sites, present unless the graph was built `--no-references`; `--root` for
+  snippets, else coordinates), `explain`
   (definition + neighbors + the symbol's doc comment when the index carries
   one — no `--root` needed for that, unlike the source-read signature/snippet;
   pass `--root` to also get a source snippet, omit it
-  for coordinates only), `line_span` (definitions ranked by body extent,
-  #504-gated), `no_incoming_calls` (zero-caller definitions — a fact, never a
-  "dead" verdict; #504-gated), `global_init_references <symbol>` (the globals a
+  for coordinates only), `line-span` (definitions ranked by body extent,
+  #504-gated), `no-incoming-calls` (zero-caller definitions — a fact, never a
+  "dead" verdict; #504-gated), `global-init-references <symbol>` (the globals a
   global's initializer references — the static-init-order fact, never a verdict;
   gated on `has_attributed_refs`), `boundary-violations` (declared-layering
   conformance — rules supplied per query as `--rule FROM:FORBIDDEN`; every

@@ -43,6 +43,7 @@ from cppgraph.builder import (
 )
 from cppgraph.export import is_test_file
 from cppgraph.filters import matches_path_prefix
+from cppgraph.messages import NO_ACCESS_ROLES_REASON, NO_REFERENCES_REASON
 from cppgraph.model import Edge, Graph, Node, Reference
 
 if TYPE_CHECKING:
@@ -181,6 +182,33 @@ SYMBOL_FORMAT = 1
 
 class IncompatibleStoreError(RuntimeError):
     """Raised opening a store written by a newer cppgraph than this one."""
+
+
+def references_capability_gap(
+    store: GraphStore, refs_count: int, access: str | None = None
+) -> str | None:
+    """The capability gate behind "where is this symbol used?", shared by the
+    CLI `references` command and the MCP `references` tool so both refuse the
+    same way with the same wording (`cppgraph.messages`).
+
+    Returns the reason string when the query cannot be answered honestly,
+    None when it can:
+    - the graph was built `--no-references` (checked only when the query has
+      nothing to show — an empty list on a references-bearing graph is a real
+      "no use sites", not a missing capability);
+    - `access` was requested but the graph carries no read/write role data
+      (`has_access_roles` absent), so filtering would guess.
+
+    Justification for living here (not in `messages.py`): it *reads store
+    capability meta*, so it belongs with the store; `messages.py` stays
+    pure strings with no store dependency (it is imported from everywhere).
+    """
+    meta = store.meta()
+    if not refs_count and meta.get("has_references") != "true":
+        return NO_REFERENCES_REASON
+    if access is not None and meta.get("has_access_roles") != "true":
+        return NO_ACCESS_ROLES_REASON.format(access=access)
+    return None
 
 
 def _git(root: Path, *args: str) -> str | None:

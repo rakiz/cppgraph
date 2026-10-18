@@ -261,7 +261,7 @@ vehicle for the installer, never for the durable wiring itself.
   fine. Only worth it if MCP proves insufficient — it isn't today.
 - **Publishing to PyPI / switching to a wheel install.** Hard blocker:
   `setup_cmd._repo_root()` is `Path(__file__).parents[2]` and reads
-  `versions.json`, `skills/`, `docker/build.sh`, `.venv/bin/`;
+  `versions.json`, `skills/`, `docker/build-scip-clang-patched-linux/build.sh`, `.venv/bin/`;
   `updates.current_version()` does a `git describe`. A wheel breaks all of
   this **silently** (the path would resolve inside `site-packages`). The
   checkout isn't legacy, it's the distribution mechanism. Minor improvement

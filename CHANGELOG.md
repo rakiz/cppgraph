@@ -31,6 +31,17 @@ on-disk store also carries its own `schema_version` for forward-compatibility.
   guessed at. The pointer branch validates before the lineage-dedup
   continue, so a malformed pointer is never silently skipped by dedup.
 
+### Changed
+
+- **Ambiguous-name candidate lists are capped at 10 on BOTH surfaces** (shared
+  `messages.AMBIGUOUS_CANDIDATE_LIMIT`): the MCP `_resolve` payload narrows
+  from 40 to 10 candidates to match the CLI's existing 10 — `total` and
+  `truncated` still report the full match count, so nothing is lost, only
+  unpaged by default. Also consolidates the general result cap into the shared
+  `messages.DEFAULT_LIMIT = 40`: the CLI `hotspots` and `dependency-cost`
+  `--limit` defaults rise from 20 to 40, matching the MCP tools' existing
+  default.
+
 ## [0.4.10] - 2026-10-05
 
 ### Added
