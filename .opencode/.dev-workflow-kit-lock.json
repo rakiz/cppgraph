@@ -8,8 +8,8 @@
     },
     "agent/design-review.md": {
       "body_sha256": "73ce4135d3176b3c7e0689d9653fac49f4d2383a0949436da3a92c3b5dce990b",
-      "model": "ai-gateway-misc/fw-deepseek-v4.1-flash",
-      "variant": ""
+      "model": "fireworks-ai/accounts/fireworks/models/minimax-m3p1-flash",
+      "variant": "medium"
     },
     "agent/explore.md": {
       "body_sha256": "14dbffa5ce95198a209a0cac9db71d4b615ceb306bcaf70488c7f950a6906acd",
@@ -17,21 +17,21 @@
       "variant": ""
     },
     "agent/impl.md": {
-      "body_sha256": "623bb195a7482846462d320fd047362df4dc36d752d6d5c7277ddeae278234a7",
+      "body_sha256": "85e828aec3b07ffd59be02bed29075d5b19246b7ec816301d0b1779c9b154103",
       "model": "ai-gateway-misc/fw-glm-5.3-flash",
-      "variant": "none"
+      "variant": "high"
     },
     "agent/review.md": {
-      "body_sha256": "aa5fa6988ca527368c697d803ed38668e94b57c6530c4a179947b859ccafac54",
+      "body_sha256": "578fe320d132b85e997a39dcb491714ee06fa7f7d9107f9f778015e75bea69a8",
       "model": "github-copilot/claude-haiku-5.5",
       "variant": "default"
     },
     "skill/dev-workflow/SKILL.md": {
-      "body_sha256": "08b1e54b950bddb1961388622e1602b007d9df98f0dff65d7ad94242e8019156"
+      "body_sha256": "034430f82105b2ede60a4bde1d39440fa992591b5eb154d5ae6845fab414f5cb"
     },
     "CONVENTIONS.md": {
       "body_sha256": "abd99e267f4fbb1590c20f0341bdf5c881f944ca966a4d96d9d946dc827b47d7"
     }
   },
-  "kit_version": "0.5.0"
+  "kit_version": "0.6.0"
 }
