@@ -18,6 +18,10 @@ base renders masora's own `presence_hint` VERBATIM (masora owns the wording
 — cppgraph never hardcodes it), a filtered no-match against a non-empty
 base renders the cppgraph-derived staleness line from the counters — both
 capability/absence notices, never knowledge or advice.
+This module is the facts-injection reader — cppgraph consumes masora — whereas
+`fingerprints` (`src/cppgraph/fingerprints.py`) is the reverse surface masora
+will consume from cppgraph; the two channels are distinct and must not be
+confused.
 
 Feature flag `CPPGRAPH_MASORA` (checked before any spawn):
 - unset → OFF (the default until the integration is validated);

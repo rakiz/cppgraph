@@ -57,6 +57,7 @@ from cppgraph.filters import is_trivial_callee as _is_trivial_callee
 from cppgraph.filters import matches_path_prefix as _matches_path_prefix
 from cppgraph.filters import path_prefix_error as _path_prefix_error
 from cppgraph.filters import short_label as _short_label
+from cppgraph.fingerprints import FingerprintsError, fingerprints_document
 from cppgraph.messages import AMBIGUOUS_CANDIDATE_LIMIT, DEFAULT_LIMIT, EXPLAIN_LIMIT
 from cppgraph.queries import capped as _capped
 from cppgraph.queries import extract_signature, find_symbols, read_source_snippet, response_symbols
@@ -2537,6 +2538,37 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         on indexing. The update check is cached; `force_update_check=True`
         refetches now."""
         return _call(status_report, root=root, force=force_update_check)
+
+    @mcp.tool()
+    def fingerprints(symbols: list[str] | None = None) -> dict[str, Any]:
+        """The masora fingerprint contract (masora_integration.md §2): the
+        spawned-command surface's data as one document — `contract_version`,
+        `repo_root`, `graph_source_commit`, `repo_head`, `graph_behind_head`
+        (the store's indexed commit is an ancestor-or-equal of the checkout
+        HEAD), `symbol_format`, and one entry per queried identity: `symbol`,
+        `found`, and when found the `definition_fingerprint` (sha256 of the
+        normalized definition-range source) and `edge_snapshot` (own
+        `calls`-edge-set hash plus each 1-hop neighbour's, self excluded).
+        Matching is verbatim on exact SCIP identity strings — no fuzzy
+        resolution; an identity matching nothing is `found: false`, never a
+        guessed fingerprint. Driven by the same pure function as the
+        `cppgraph fingerprints` CLI command (`cppgraph.fingerprints`), which
+        is the fail-closed surface masora spawns (its expected caller budget:
+        2 s wall-clock)."""
+        if graph_path is None:
+            return dict(_NO_GRAPH)
+        incompatible = stores.incompatible()
+        if incompatible is not None:
+            return {"error": incompatible}
+        if root is None:
+            return {
+                "error": "no checkout root known to this server — restart it from "
+                "the project directory (or with --root) so repo_head can be established"
+            }
+        try:
+            return fingerprints_document(Path(graph_path), Path(root), symbols)
+        except FingerprintsError as e:
+            return {"error": str(e)}
 
     @mcp.tool()
     def visualize(

@@ -189,6 +189,23 @@ cppgraph strongly-connected-components --limit 10
 cppgraph boundary-violations --rule src/common/:src/platform/   # common/ must not call platform/
 ```
 
+## Masora integration
+
+The spawned-command surface masora consumes instead of reading the SQLite
+store directly (masora_integration.md §2): one JSON document on stdout,
+fail-closed — any failure exits non-zero with nothing on stdout, and timeouts
+are the caller's budget (masora's expected budget: 2 s wall-clock).
+
+<!-- cppgraph-gen:fingerprints -->
+| Command | Purpose (from `--help`) | Arguments |
+|---|---|---|
+| `fingerprints` | emit the masora fingerprint contract (masora_integration.md §2) for exact SCIP symbols | --repo*, --symbol SCIP |
+<!-- /cppgraph-gen -->
+
+```bash
+cppgraph fingerprints --repo . --symbol 'cxx . . $ pkg/Foo#f().' --symbol 'cxx . . $ pkg/Bar#g().'
+```
+
 ## Reading and viewing
 
 `explain` is the one-shot "tell me about this symbol" summary — definition

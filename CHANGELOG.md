@@ -31,6 +31,40 @@ on-disk store also carries its own `schema_version` for forward-compatibility.
   guessed at. The pointer branch validates before the lineage-dedup
   continue, so a malformed pointer is never silently skipped by dedup.
 
+- **`cppgraph fingerprints` — the masora fingerprint contract**
+  (masora_integration.md §2, `contract_version` 1): a spawned-command surface
+  that replaces masora's direct reads of the SQLite store (a declared-hard
+  coupling). `cppgraph fingerprints --repo <path> [--symbol <scip-string> ...]`
+  (repeatable `--symbol`, batch) emits ONE JSON document on stdout:
+  `contract_version`, `repo_root`, `graph_source_commit`, `repo_head`,
+  `graph_behind_head` (the store's indexed commit is an ancestor-or-equal of
+  the checkout HEAD — masora keeps the refusal policy, cppgraph supplies the
+  fact), `symbol_format` (the store meta row, legacy stores read as 1), and
+  one entry per queried identity: `found`, and when found the
+  `definition_fingerprint` (sha256 of the normalized definition-range source,
+  `line`..`end_line` inclusive 0-indexed; a store without body extents hashes
+  the definition line alone — byte-for-byte masora's
+  `providers.py:definition_fingerprint`) and `edge_snapshot` (own
+  `calls`-edge-set hash plus each 1-hop neighbour's, self excluded — masora's
+  `edge_snapshot_of`). Matching is verbatim on exact SCIP identity strings —
+  no fuzzy resolution in v1; a string matching nothing is `found: false`,
+  never a guessed fingerprint. Fail-closed: no usable graph under
+  `<repo>/.cppgraph/`, a missing/non-git repo, an unparsable meta row or an
+  unresolvable ancestry all exit non-zero with NOTHING on stdout; timeouts
+  are the caller's budget (masora's expected budget: 2 s wall-clock,
+  documented in `--help`). New module `src/cppgraph/fingerprints.py` (pure,
+  read-only: SELECTs + two git spawns, no store writes, no schema change);
+  the CLI and the new MCP `fingerprints` tool are driven by the SAME pure
+  function (no forked logic); the unknown-parameter hygiene gate covers the
+  MCP tool by construction. Parity with masora's algorithm is pinned by
+  tests/test_fingerprints.py (golden-document shape, repeatable batch,
+  found:false, behind-HEAD true/false, fail-closed on missing repo / no
+  graph / non-git repo / unknown source commit, strict-argument rejection,
+  2 s budget in help, and an inline transcription of
+  `providers.py:definition_fingerprint` / `_edge_set_hash` /
+  `normalize_source` compared byte-for-byte on a fixture store).
+  CLI_REFERENCE.md gained a "Masora integration" section (regenerated).
+
 ### Changed
 
 - **Ambiguous-name candidate lists are capped at 10 on BOTH surfaces** (shared

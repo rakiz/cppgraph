@@ -1518,6 +1518,32 @@ def main(argv: list[str] | None = None) -> int:
     )
     _add_path_filters(p_scc)
 
+    p_fingerprints = sub.add_parser(
+        "fingerprints",
+        help="emit the masora fingerprint contract (masora_integration.md §2) "
+        "for exact SCIP symbols",
+        description="One JSON document on stdout: contract_version, repo_root, "
+        "graph_source_commit, repo_head, graph_behind_head, symbol_format, and "
+        "per queried symbol found/definition_fingerprint/edge_snapshot. "
+        "Fail-closed: on no usable graph, a missing/non-git repo, or bad "
+        "arguments it exits non-zero with NOTHING on stdout. Timeouts are the "
+        "caller's budget — the expected caller budget is 2 s wall-clock.",
+    )
+    p_fingerprints.add_argument(
+        "--repo",
+        required=True,
+        help="checkout root the graph belongs to (its .cppgraph/ holds the store; "
+        "must be a git checkout — repo_head/graph_behind_head are pinned fields).",
+    )
+    p_fingerprints.add_argument(
+        "--symbol",
+        action="append",
+        default=None,
+        metavar="SCIP",
+        help="exact SCIP symbol string, matched verbatim — repeat for a batch "
+        "(no fuzzy resolution in v1; a string matching nothing reports found: false).",
+    )
+
     p_status = sub.add_parser(
         "status",
         help="show the graph's source commit and, with --root, whether the checkout has drifted",
@@ -2522,6 +2548,11 @@ def main(argv: list[str] | None = None) -> int:
         if total > len(components):
             print(f"  ... and {total - len(components)} more (raise --limit to see them)")
         return 0
+
+    if args.command == "fingerprints":
+        from cppgraph.fingerprints import run_cli
+
+        return run_cli(args.repo, args.symbol)
 
     if args.command == "status":
         graph_path = _resolve_graph(args, parser)
