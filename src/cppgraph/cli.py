@@ -9,7 +9,7 @@ import textwrap
 from collections.abc import Collection, Sequence
 from pathlib import Path
 
-from cppgraph import masora
+from cppgraph import json_docs, masora
 from cppgraph.builder import build_graph, is_type_symbol
 from cppgraph.export import (
     is_test_file,
@@ -170,6 +170,20 @@ def _add_query_filters(parser: argparse.ArgumentParser, *, hide_trivial: bool = 
             action="store_true",
             help="hide ubiquitous helpers (operators, *assert, makeStatus, …)",
         )
+
+
+def _add_json_flag(parser: argparse.ArgumentParser) -> None:
+    """Attach `--json` to a QUERY command: emit the schema:1 JSON document on
+    stdout instead of the text rendering — a versioned contract (one schema per
+    command, bumped independently), built from the same pure functions the MCP
+    tools use (`cppgraph.json_docs`). Commands that DO something or are
+    interactive get no flag (the workspace convention)."""
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="emit the schema:1 JSON contract on stdout instead of text "
+        "(one versioned schema per command; see CLI_REFERENCE.md)",
+    )
 
 
 def _add_path_filters(parser: argparse.ArgumentParser) -> None:
@@ -1027,6 +1041,7 @@ def main(argv: list[str] | None = None) -> int:
         "overloads still collapse into one entry, without their signatures",
     )
     _add_path_filters(p_find)
+    _add_json_flag(p_find)
 
     p_callers = sub.add_parser("callers", help="list callers of a symbol")
     p_callers.add_argument(
@@ -1041,6 +1056,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     _add_query_filters(p_callers)
 
+    _add_json_flag(p_callers)
+
     p_callees = sub.add_parser("callees", help="list callees of a symbol")
     p_callees.add_argument(
         "--graph",
@@ -1053,6 +1070,8 @@ def main(argv: list[str] | None = None) -> int:
         help="a symbol name (resolved via `find`) or an exact SCIP string",
     )
     _add_query_filters(p_callees, hide_trivial=True)
+
+    _add_json_flag(p_callees)
 
     p_bases = sub.add_parser(
         "bases",
@@ -1070,6 +1089,8 @@ def main(argv: list[str] | None = None) -> int:
         help="a type name (resolved via `find`) or an exact SCIP type string ending in `#`",
     )
 
+    _add_json_flag(p_bases)
+
     p_subtypes = sub.add_parser("subtypes", help="direct subclasses of a type")
     p_subtypes.add_argument(
         "--graph",
@@ -1081,6 +1102,8 @@ def main(argv: list[str] | None = None) -> int:
         "symbol",
         help="a type name (resolved via `find`) or an exact SCIP type string ending in `#`",
     )
+
+    _add_json_flag(p_subtypes)
 
     p_refs = sub.add_parser(
         "references",
@@ -1124,6 +1147,7 @@ def main(argv: list[str] | None = None) -> int:
         "and shows nothing rather than guessing",
     )
     _add_path_filters(p_refs)
+    _add_json_flag(p_refs)
 
     p_path = sub.add_parser(
         "path",
@@ -1145,6 +1169,8 @@ def main(argv: list[str] | None = None) -> int:
         "dst",
         help="a symbol name (resolved via `find`) or an exact SCIP string",
     )
+
+    _add_json_flag(p_path)
 
     p_impact = sub.add_parser(
         "impact", help="reverse blast-radius: everything that transitively calls a symbol"
@@ -1173,6 +1199,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     _add_query_filters(p_impact)
 
+    _add_json_flag(p_impact)
+
     p_reachable = sub.add_parser(
         "reachable-from",
         help="forward reachability: everything a symbol transitively calls (a lower bound)",
@@ -1200,6 +1228,8 @@ def main(argv: list[str] | None = None) -> int:
         "returns its declared type",
     )
     _add_query_filters(p_reachable)
+
+    _add_json_flag(p_reachable)
 
     p_hotspots = sub.add_parser("hotspots", help="global ranking of symbols by call-edge volume")
     p_hotspots.add_argument(
@@ -1233,6 +1263,7 @@ def main(argv: list[str] | None = None) -> int:
         help="print the raw SCIP symbol strings instead of readable labels",
     )
     _add_path_filters(p_hotspots)
+    _add_json_flag(p_hotspots)
 
     p_dep_cost = sub.add_parser(
         "dependency-cost",
@@ -1275,6 +1306,7 @@ def main(argv: list[str] | None = None) -> int:
     # Caller-side only here (--target-path owns the callee side): the
     # asymmetric-filter mode of hotspots.
     _add_path_filters(p_dep_cost)
+    _add_json_flag(p_dep_cost)
 
     p_stats = sub.add_parser(
         "stats", help="aggregate counts (symbols, call edges, refs) per file or directory"
@@ -1293,6 +1325,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     p_stats.add_argument("--limit", type=int, default=20, help="max rows to show (default: 20)")
     _add_path_filters(p_stats)
+    _add_json_flag(p_stats)
 
     p_line_span = sub.add_parser(
         "line-span",
@@ -1318,6 +1351,7 @@ def main(argv: list[str] | None = None) -> int:
         help="print the raw SCIP symbol strings instead of readable labels",
     )
     _add_path_filters(p_line_span)
+    _add_json_flag(p_line_span)
 
     p_no_incoming = sub.add_parser(
         "no-incoming-calls",
@@ -1346,6 +1380,7 @@ def main(argv: list[str] | None = None) -> int:
         help="print the raw SCIP symbol strings instead of readable labels",
     )
     _add_path_filters(p_no_incoming)
+    _add_json_flag(p_no_incoming)
 
     p_gir = sub.add_parser(
         "global-init-references",
@@ -1369,6 +1404,8 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="print the raw SCIP symbol strings instead of readable labels",
     )
+
+    _add_json_flag(p_gir)
 
     p_boundary = sub.add_parser(
         "boundary-violations",
@@ -1417,6 +1454,7 @@ def main(argv: list[str] | None = None) -> int:
         "violating edge, edges the violations themselves; open it in "
         "viz/cppgraph-viz.html",
     )
+    _add_json_flag(p_boundary)
 
     p_api = sub.add_parser(
         "api-surface",
@@ -1449,6 +1487,8 @@ def main(argv: list[str] | None = None) -> int:
         help="print the raw SCIP symbol strings instead of readable labels",
     )
 
+    _add_json_flag(p_api)
+
     p_outline = sub.add_parser(
         "outline",
         help="the outline of one file: every symbol defined in it, sorted by line",
@@ -1470,6 +1510,8 @@ def main(argv: list[str] | None = None) -> int:
         help="print the raw SCIP symbol strings instead of readable labels",
     )
 
+    _add_json_flag(p_outline)
+
     p_members = sub.add_parser(
         "class-members",
         help="members declared on a class/struct (methods, fields, nested types), by line",
@@ -1490,6 +1532,8 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="print the raw SCIP symbol strings instead of readable labels",
     )
+
+    _add_json_flag(p_members)
 
     p_scc = sub.add_parser(
         "strongly-connected-components",
@@ -1517,6 +1561,7 @@ def main(argv: list[str] | None = None) -> int:
         help="print the raw SCIP symbol strings instead of readable labels",
     )
     _add_path_filters(p_scc)
+    _add_json_flag(p_scc)
 
     p_fingerprints = sub.add_parser(
         "fingerprints",
@@ -1562,6 +1607,8 @@ def main(argv: list[str] | None = None) -> int:
         "commit (exit 1 if stale) and lists the changed files.",
     )
 
+    _add_json_flag(p_status)
+
     p_explain = sub.add_parser(
         "explain",
         help="summarize a symbol: definition site, doc comment, source snippet, callers/callees",
@@ -1591,6 +1638,8 @@ def main(argv: list[str] | None = None) -> int:
         metavar="N",
         help="lines of source context to show around the definition (default: 3)",
     )
+
+    _add_json_flag(p_explain)
 
     p_export = sub.add_parser(
         "export",
@@ -2013,6 +2062,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "find":
         store = _open_store_checked(args, parser)
         _check_path_filters(store, args, parser)
+        if args.json:
+            return json_docs.run(args.command, store, args)
         r = find_symbols(
             store,
             args.query,
@@ -2050,6 +2101,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "callers":
         store = _open_store_checked(args, parser)
         _check_path_filters(store, args, parser)
+        if args.json:
+            return json_docs.run(args.command, store, args)
         args.symbol = _resolve_symbol(store, args.symbol, parser)
         edges = store.callers_of(args.symbol)
         if args.exclude_tests:
@@ -2074,6 +2127,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "callees":
         store = _open_store_checked(args, parser)
         _check_path_filters(store, args, parser)
+        if args.json:
+            return json_docs.run(args.command, store, args)
         args.symbol = _resolve_symbol(store, args.symbol, parser)
         edges = store.callees_of(args.symbol)
         if args.exclude_tests:
@@ -2106,6 +2161,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "bases":
         store = _open_store_checked(args, parser)
+        if args.json:
+            return json_docs.run(args.command, store, args)
         args.symbol = _resolve_symbol(store, args.symbol, parser)
         bases = store.bases_of(args.symbol)
         print(f"[cppgraph] {len(bases)} base class(es) of {args.symbol}")
@@ -2115,6 +2172,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "subtypes":
         store = _open_store_checked(args, parser)
+        if args.json:
+            return json_docs.run(args.command, store, args)
         args.symbol = _resolve_symbol(store, args.symbol, parser)
         subs = store.subtypes_of(args.symbol)
         print(f"[cppgraph] {len(subs)} subclass(es) of {args.symbol}")
@@ -2125,6 +2184,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "references":
         store = _open_store_checked(args, parser)
         _check_path_filters(store, args, parser)
+        if args.json:
+            return json_docs.run(args.command, store, args)
         args.symbol = _resolve_symbol(store, args.symbol, parser)
         refs = store.references_of(args.symbol)
         gap = references_capability_gap(store, len(refs), access=args.access)
@@ -2164,6 +2225,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "path":
         store = _open_store_checked(args, parser)
+        if args.json:
+            return json_docs.run(args.command, store, args)
         args.src = _resolve_symbol(store, args.src, parser, what="src symbol")
         args.dst = _resolve_symbol(store, args.dst, parser, what="dst symbol")
         chain = store.shortest_call_path(args.src, args.dst)
@@ -2181,6 +2244,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "impact":
         store = _open_store_checked(args, parser)
         _check_path_filters(store, args, parser)
+        if args.json:
+            return json_docs.run(args.command, store, args)
         args.symbol = _resolve_symbol(store, args.symbol, parser)
         if args.kind == "calls" and is_type_symbol(args.symbol):
             n = len(store.references_of(args.symbol))
@@ -2215,6 +2280,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "reachable-from":
         store = _open_store_checked(args, parser)
         _check_path_filters(store, args, parser)
+        if args.json:
+            return json_docs.run(args.command, store, args)
         args.symbol = _resolve_symbol(store, args.symbol, parser)
         if args.kind == "calls" and is_type_symbol(args.symbol):
             print(
@@ -2246,6 +2313,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "hotspots":
         store = _open_store_checked(args, parser)
         _check_path_filters(store, args, parser)
+        if args.json:
+            return json_docs.run("hotspots", store, args)
         ranked, total = store.hotspots(
             limit=args.limit,
             kind=args.kind,
@@ -2272,6 +2341,8 @@ def main(argv: list[str] | None = None) -> int:
         _check_path_filters(store, args, parser)
         # limit=None: the aggregate must sum over the full ranking, --limit
         # caps only the displayed breakdown (same shape as the MCP report).
+        if args.json:
+            return json_docs.run("dependency-cost", store, args)
         ranked, total = store.hotspots(
             limit=None,
             kind="fan_in",
@@ -2302,6 +2373,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "stats":
         store = _open_store_checked(args, parser)
         _check_path_filters(store, args, parser)
+        if args.json:
+            return json_docs.run("stats", store, args)
         groups, total = store.stats(
             group_by=args.group_by,
             limit=args.limit,
@@ -2322,6 +2395,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "line-span":
         store = _open_store_checked(args, parser)
         _check_path_filters(store, args, parser)
+        if args.json:
+            return json_docs.run("line-span", store, args)
         result = store.line_span(
             limit=args.limit,
             exclude_tests=args.exclude_tests,
@@ -2349,6 +2424,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "no-incoming-calls":
         store = _open_store_checked(args, parser)
         _check_path_filters(store, args, parser)
+        if args.json:
+            return json_docs.run("no-incoming-calls", store, args)
         result = store.no_incoming_calls(
             limit=args.limit,
             exclude_tests=args.exclude_tests,
@@ -2381,6 +2458,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "global-init-references":
         store = _open_store_checked(args, parser)
+        if args.json:
+            return json_docs.run(args.command, store, args)
         args.symbol = _resolve_symbol(store, args.symbol, parser)
         try:
             result = store.global_init_references(args.symbol, limit=args.limit)
@@ -2412,6 +2491,8 @@ def main(argv: list[str] | None = None) -> int:
             if len(parts) != 2 or not parts[0].strip() or not parts[1].strip():
                 parser.error(f"--rule {value!r}: expected FROM:FORBIDDEN (e.g. common/:platform/)")
             rules.append((parts[0], parts[1]))
+        if args.json:
+            return json_docs.run(args.command, store, args, rules=rules)
         kinds = tuple(args.kind) if args.kind else ("calls", "inherits")
         try:
             violations, total = store.boundary_violations(rules, edge_kinds=kinds, limit=args.limit)
@@ -2438,6 +2519,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "api-surface":
         store = _open_store_checked(args, parser)
+        if args.json:
+            return json_docs.run("api-surface", store, args)
         try:
             ranked, total, has_refs = store.api_surface(
                 args.module_prefix, limit=args.limit, exclude_tests=args.exclude_tests
@@ -2475,6 +2558,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "outline":
         store = _open_store_checked(args, parser)
+        if args.json:
+            return json_docs.run("outline", store, args)
         nodes, total = store.outline(args.file, limit=args.limit)
         print(f"[cppgraph] {len(nodes)} of {total} definition(s) in {args.file}, by line")
         for node in nodes:
@@ -2495,6 +2580,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "class-members":
         store = _open_store_checked(args, parser)
+        if args.json:
+            return json_docs.run(args.command, store, args)
         args.symbol = _resolve_symbol(store, args.symbol, parser)
         result = store.class_members(args.symbol, limit=args.limit)
         if result is None:
@@ -2520,6 +2607,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "strongly-connected-components":
         store = _open_store_checked(args, parser)
         _check_path_filters(store, args, parser)
+        if args.json:
+            return json_docs.run("strongly-connected-components", store, args)
         try:
             components, total = store.strongly_connected_components(
                 limit=args.limit,
@@ -2557,6 +2646,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "status":
         graph_path = _resolve_graph(args, parser)
         store = _open_store_at(graph_path, parser)
+        if args.json:
+            return json_docs.run(args.command, store, args, graph_path=str(graph_path))
         m = store.meta()
         commit = m.get("source_commit")
         dirty = m.get("source_dirty") == "true"
@@ -2742,6 +2833,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "explain":
         store = _open_store_checked(args, parser)
+        if args.json:
+            return json_docs.run(args.command, store, args)
         args.symbol = _resolve_symbol(store, args.symbol, parser)
         node = store.get_node(args.symbol)
         if node is None:

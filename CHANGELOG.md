@@ -8,6 +8,36 @@ on-disk store also carries its own `schema_version` for forward-compatibility.
 
 ### Added
 
+- **`--json` on every query command — versioned schema:1 contracts.**
+  Workspace convention (NEXT-SESSION.md): every command that ANSWERS a
+  question gets `--json`; commands that DO something or are interactive get
+  none. `find`, `callers`, `callees`, `bases`, `subtypes`, `references`,
+  `path`, `impact`, `reachable-from`, `hotspots`, `dependency-cost`, `stats`,
+  `line-span`, `no-incoming-calls`, `global-init-references`,
+  `boundary-violations`, `api-surface`, `outline`, `class-members`,
+  `strongly-connected-components`, `status`, `explain` each print ONE JSON
+  document on stdout carrying `"schema": 1` (strict integer, one schema per
+  command, versioned independently) plus `command`. Zero default-behavior
+  change: without the flag the text output is byte-identical (golden tests
+  pin it for `find`/`callers`/`path`). Every document is bounded by the
+  command's `--limit` (defaulting to the shared bound where text is
+  uncapped), with truncation VISIBLE (`truncated: true` + `total`) — never
+  silent — and every result row round-trips the exact SCIP `symbol`, `name`,
+  `file`, `line`. The payloads come from the SAME pure functions as the MCP
+  tools (`cppgraph.json_docs` over `cppgraph.mcp_server` — no forked logic,
+  the CLI/MCP parity rule); masora-serving contracts are first-class:
+  `callers --json` is a bounded per-symbol caller identity list (proof-query
+  replay), and `find --json` reports the unambiguous `match_state`
+  (`"none"`/`"unique"`/`"multiple"`), the exact `unique_symbol` when unique,
+  and a flat exact-SCIP `candidates` list when multiple (anchor resolution).
+  Known divergences, deliberate: `references`/`explain` `--json` keep
+  test-file results (matching those commands' own text behavior, which has
+  no `--exclude-tests` flag), and an ambiguous/unknown symbol is an
+  `{"ambiguous"…}`/`{"error"…}` document with exit 1 (never a stderr-only
+  candidates list an agent can't read). `status --json` reports
+  `"transport": "cli"` and its `graph_path`. Documented in
+  CLI_REFERENCE.md ("The `--json` outputs are versioned contracts").
+
 - **Masora facts contract v4 reader** (contract §3.0,
   `docs/CPPGRAPH_INTEGRATION.md`) — the parser in the shared
   `cppgraph/masora.py` now accepts `contract_version` **3 or 4** (bounds

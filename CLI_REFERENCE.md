@@ -27,6 +27,36 @@ Three facts apply to nearly everything below:
 The query commands have MCP twins (same store, same filters, same answers) —
 see [QUICKSTART.md](QUICKSTART.md).
 
+### The `--json` outputs are versioned contracts
+
+Every command that answers a question (the query commands below) accepts
+`--json`: it prints ONE JSON document on stdout instead of the text rendering
+(stderr stays free for diagnostics). Commands that DO something (`setup`,
+`init`, `build`, `update`, `enrich-refs`, `view`) or are interactive get no
+flag; `export` already writes a JSON *file*; `fingerprints` is always-JSON.
+
+Each document carries `"schema": 1` (strict integer) at the top level — one
+schema per command, versioned independently. Treat them like contracts: an
+agent consuming one pins the schema number, and a document never changes shape
+within a schema version (additive fields aside). The documents are produced by
+the same pure functions as the MCP tools' structured output (`cppgraph.json_docs`
+over `cppgraph.mcp_server`), so the two surfaces cannot drift; every result row
+carries the exact SCIP `symbol` string plus `name`/`file`/`line`, so resolved
+names, counts and positions round-trip. Lists respect the command's `--limit`
+(defaulting to the shared bound where the text output is uncapped), and
+truncation is VISIBLE — `truncated: true` plus a `total` field, never silent.
+`find --json` additionally reports `match_state` (`"none"` / `"unique"` /
+`"multiple"`), the exact `unique_symbol` when unique, and a flat `candidates`
+list of exact SCIP identities when multiple — so "0 / 1 / N matches" is never
+guessed from list lengths.
+
+Infrastructure errors are NOT documents: a missing/unreadable graph, an
+unknown flag, or an unsatisfiable `--include-path`/`--exclude-path` prefix
+prints its message on stderr, exits 2, and puts NOTHING on stdout. A machine
+consumer should read stdout only and treat any non-zero exit as "no document"
+(a query-level miss — unknown symbol, ambiguous name, an `available: false`
+capability gap — is different: it IS a schema:1 document, with exit 1).
+
 ## Getting and keeping a graph
 
 From nothing to a queryable store, then keeping it current. The normal path is
@@ -43,7 +73,7 @@ forms an agent or a script can call directly.
 | `build` | build the graph from a SCIP index | --scip*, --out*, --source-commit, --source-dirty, --scip-variant, --scip-patchset, --index-filter, --index-no-tests, --references/--no-references, --attributed-refs |
 | `update` | refresh a graph for changed source files: with no args, auto-discovers the graph + compdb and re-indexes incrementally; with --scip, applies an already-produced partial re-index instead; with --rescope, widens the recorded index scope (re-indexing only the newly in-scope TUs) | --graph, --scip, --deleted PATH, --source-commit, --source-dirty, --scip-variant, -y/--yes, --rescope, --filter SUBSTRING, --include-tests |
 | `enrich-refs` | add symbol-granularity reference attribution to an existing store from a #504 .scip, without a full rebuild | --graph*, --scip* |
-| `status` | show the graph's source commit and, with --root, whether the checkout has drifted | --graph, --root |
+| `status` | show the graph's source commit and, with --root, whether the checkout has drifted | --graph, --root, --json |
 <!-- /cppgraph-gen -->
 
 ```bash
@@ -80,7 +110,7 @@ and it shows the exact SCIP strings the other `<symbol>` commands accept.
 <!-- cppgraph-gen:find -->
 | Command | Purpose (from `--help`) | Arguments |
 |---|---|---|
-| `find` | find symbols by name (SCIP symbol strings aren't memorable) | --graph, <query>, --limit, --hide-trivial, --root, --include-path PREFIX, --exclude-path PREFIX |
+| `find` | find symbols by name (SCIP symbol strings aren't memorable) | --graph, <query>, --limit, --hide-trivial, --root, --include-path PREFIX, --exclude-path PREFIX, --json |
 <!-- /cppgraph-gen -->
 
 ```bash
@@ -103,13 +133,13 @@ bound.
 <!-- cppgraph-gen:callers callees path impact reachable-from hotspots dependency-cost -->
 | Command | Purpose (from `--help`) | Arguments |
 |---|---|---|
-| `callers` | list callers of a symbol | --graph, <symbol>, --limit, --exclude-tests/--no-exclude-tests, --include-path PREFIX, --exclude-path PREFIX, --full-symbols |
-| `callees` | list callees of a symbol | --graph, <symbol>, --limit, --exclude-tests/--no-exclude-tests, --include-path PREFIX, --exclude-path PREFIX, --full-symbols, --hide-trivial |
-| `path` | shortest call chain from one symbol to another (see it as a graph: `view <src> --dst <dst> --mode path`; `--expand-paths` widens it to the corridor) | --graph, <src>, <dst> |
-| `impact` | reverse blast-radius: everything that transitively calls a symbol | --graph, <symbol>, --depth, --kind, --limit, --exclude-tests/--no-exclude-tests, --include-path PREFIX, --exclude-path PREFIX, --full-symbols |
-| `reachable-from` | forward reachability: everything a symbol transitively calls (a lower bound) | --graph, <symbol>, --depth, --kind, --limit, --exclude-tests/--no-exclude-tests, --include-path PREFIX, --exclude-path PREFIX, --full-symbols |
-| `hotspots` | global ranking of symbols by call-edge volume | --graph, --kind, --limit, --exclude-tests/--no-exclude-tests, --full-symbols, --include-path PREFIX, --exclude-path PREFIX |
-| `dependency-cost` | call-site count against a target library — 'if I replace/remove this library, how many call sites change?' (exact count of calls edges into it); the module-exposure complement: `api-surface` | --graph, --target-path PREFIX*, --limit, --exclude-tests/--no-exclude-tests, --full-symbols, --include-path PREFIX, --exclude-path PREFIX |
+| `callers` | list callers of a symbol | --graph, <symbol>, --limit, --exclude-tests/--no-exclude-tests, --include-path PREFIX, --exclude-path PREFIX, --full-symbols, --json |
+| `callees` | list callees of a symbol | --graph, <symbol>, --limit, --exclude-tests/--no-exclude-tests, --include-path PREFIX, --exclude-path PREFIX, --full-symbols, --hide-trivial, --json |
+| `path` | shortest call chain from one symbol to another (see it as a graph: `view <src> --dst <dst> --mode path`; `--expand-paths` widens it to the corridor) | --graph, <src>, <dst>, --json |
+| `impact` | reverse blast-radius: everything that transitively calls a symbol | --graph, <symbol>, --depth, --kind, --limit, --exclude-tests/--no-exclude-tests, --include-path PREFIX, --exclude-path PREFIX, --full-symbols, --json |
+| `reachable-from` | forward reachability: everything a symbol transitively calls (a lower bound) | --graph, <symbol>, --depth, --kind, --limit, --exclude-tests/--no-exclude-tests, --include-path PREFIX, --exclude-path PREFIX, --full-symbols, --json |
+| `hotspots` | global ranking of symbols by call-edge volume | --graph, --kind, --limit, --exclude-tests/--no-exclude-tests, --full-symbols, --include-path PREFIX, --exclude-path PREFIX, --json |
+| `dependency-cost` | call-site count against a target library — 'if I replace/remove this library, how many call sites change?' (exact count of calls edges into it); the module-exposure complement: `api-surface` | --graph, --target-path PREFIX*, --limit, --exclude-tests/--no-exclude-tests, --full-symbols, --include-path PREFIX, --exclude-path PREFIX, --json |
 <!-- /cppgraph-gen -->
 
 ```bash
@@ -130,10 +160,10 @@ declares (`class-members`), what a file defines (`outline`).
 <!-- cppgraph-gen:bases subtypes class-members outline -->
 | Command | Purpose (from `--help`) | Arguments |
 |---|---|---|
-| `bases` | direct base classes a type inherits from (full transitive hierarchy: `reachable-from --kind inherits`) | --graph, <symbol> |
-| `subtypes` | direct subclasses of a type | --graph, <symbol> |
-| `class-members` | members declared on a class/struct (methods, fields, nested types), by line | --graph, <symbol>, --limit, --full-symbols |
-| `outline` | the outline of one file: every symbol defined in it, sorted by line | --graph, <file>, --limit, --full-symbols |
+| `bases` | direct base classes a type inherits from (full transitive hierarchy: `reachable-from --kind inherits`) | --graph, <symbol>, --json |
+| `subtypes` | direct subclasses of a type | --graph, <symbol>, --json |
+| `class-members` | members declared on a class/struct (methods, fields, nested types), by line | --graph, <symbol>, --limit, --full-symbols, --json |
+| `outline` | the outline of one file: every symbol defined in it, sorted by line | --graph, <file>, --limit, --full-symbols, --json |
 <!-- /cppgraph-gen -->
 
 ```bash
@@ -153,9 +183,9 @@ shows what one global's initializer touches.
 <!-- cppgraph-gen:references api-surface global-init-references -->
 | Command | Purpose (from `--help`) | Arguments |
 |---|---|---|
-| `references` | exact use sites of a symbol (unless the graph was built --no-references); see them as a graph with `view <symbol> --mode usage` | --graph, <symbol>, --root, --context N, --limit, --access, --include-path PREFIX, --exclude-path PREFIX |
-| `api-surface` | the actually-used external surface of a module: definitions inside a prefix called/referenced from outside it (the consumption complement: `dependency-cost`) | --graph, <module_prefix>, --limit, --exclude-tests/--no-exclude-tests, --full-symbols |
-| `global-init-references` | globals referenced by one global's initializer region (the fact behind the static-init-order question, not a verdict); needs a #504-built graph with --attributed-refs | --graph, <symbol>, --limit, --full-symbols |
+| `references` | exact use sites of a symbol (unless the graph was built --no-references); see them as a graph with `view <symbol> --mode usage` | --graph, <symbol>, --root, --context N, --limit, --access, --include-path PREFIX, --exclude-path PREFIX, --json |
+| `api-surface` | the actually-used external surface of a module: definitions inside a prefix called/referenced from outside it (the consumption complement: `dependency-cost`) | --graph, <module_prefix>, --limit, --exclude-tests/--no-exclude-tests, --full-symbols, --json |
+| `global-init-references` | globals referenced by one global's initializer region (the fact behind the static-init-order question, not a verdict); needs a #504-built graph with --attributed-refs | --graph, <symbol>, --limit, --full-symbols, --json |
 <!-- /cppgraph-gen -->
 
 ```bash
@@ -174,11 +204,11 @@ row is not a dead-code order, a cycle is not a bad-architecture finding.
 <!-- cppgraph-gen:stats line-span no-incoming-calls strongly-connected-components boundary-violations -->
 | Command | Purpose (from `--help`) | Arguments |
 |---|---|---|
-| `stats` | aggregate counts (symbols, call edges, refs) per file or directory | --graph, --group-by, --limit, --include-path PREFIX, --exclude-path PREFIX |
-| `line-span` | rank definitions by body extent (end_line - start, largest first); needs a graph indexed with a #504-built scip-clang | --graph, --limit, --exclude-tests/--no-exclude-tests, --full-symbols, --include-path PREFIX, --exclude-path PREFIX |
-| `no-incoming-calls` | defined callables with zero incoming calls edges (a fact, not a dead-code verdict); needs a graph indexed with a #504-built scip-clang | --graph, --limit, --exclude-tests/--no-exclude-tests, --full-symbols, --include-path PREFIX, --exclude-path PREFIX |
-| `strongly-connected-components` | cycles in the calls graph: groups of 2+ symbols that can all reach each other (a fact, not a bad-architecture verdict); to see the shape of one as a graph, export/view a symbol with --mode cycle | --graph, --limit, --exclude-tests/--no-exclude-tests, --full-symbols, --include-path PREFIX, --exclude-path PREFIX |
-| `boundary-violations` | declared-layering conformance: list calls/inherits edges that cross a rule you supply (zero false positives — each hit is a real edge); pass --out PATH to also render this as a graph | --graph, --rule FROM:FORBIDDEN*, --kind, --limit, --full-symbols, --out PATH |
+| `stats` | aggregate counts (symbols, call edges, refs) per file or directory | --graph, --group-by, --limit, --include-path PREFIX, --exclude-path PREFIX, --json |
+| `line-span` | rank definitions by body extent (end_line - start, largest first); needs a graph indexed with a #504-built scip-clang | --graph, --limit, --exclude-tests/--no-exclude-tests, --full-symbols, --include-path PREFIX, --exclude-path PREFIX, --json |
+| `no-incoming-calls` | defined callables with zero incoming calls edges (a fact, not a dead-code verdict); needs a graph indexed with a #504-built scip-clang | --graph, --limit, --exclude-tests/--no-exclude-tests, --full-symbols, --include-path PREFIX, --exclude-path PREFIX, --json |
+| `strongly-connected-components` | cycles in the calls graph: groups of 2+ symbols that can all reach each other (a fact, not a bad-architecture verdict); to see the shape of one as a graph, export/view a symbol with --mode cycle | --graph, --limit, --exclude-tests/--no-exclude-tests, --full-symbols, --include-path PREFIX, --exclude-path PREFIX, --json |
+| `boundary-violations` | declared-layering conformance: list calls/inherits edges that cross a rule you supply (zero false positives — each hit is a real edge); pass --out PATH to also render this as a graph | --graph, --rule FROM:FORBIDDEN*, --kind, --limit, --full-symbols, --out PATH, --json |
 <!-- /cppgraph-gen -->
 
 ```bash
@@ -224,7 +254,7 @@ them; `--dst` is not used for this mode.
 <!-- cppgraph-gen:explain export view -->
 | Command | Purpose (from `--help`) | Arguments |
 |---|---|---|
-| `explain` | summarize a symbol: definition site, doc comment, source snippet, callers/callees | --graph, <symbol>, --root, --context N |
+| `explain` | summarize a symbol: definition site, doc comment, source snippet, callers/callees | --graph, <symbol>, --root, --context N, --json |
 | `export` | export a viewable subgraph around a symbol as graphify-compatible graph.json (open it in viz/ or in graphify) | --graph, <symbol>, --depth N, --direction, --mode, --dst SYMBOL, --expand-paths, --limit N, --no-tests, --out PATH |
 | `view` | one-shot visualize: build the subgraph, write a self-contained HTML to a temp dir, and open it in your browser | --graph, <symbol>, --mode, --dst SYMBOL, --expand-paths, --limit N, --depth N, --direction, --no-tests, --no-open |
 <!-- /cppgraph-gen -->
