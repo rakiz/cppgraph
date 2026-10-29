@@ -2575,9 +2575,9 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
     def log_id_lookup(ids: list[int], revision: str | None = None) -> dict[str, Any]:
         """Resolve redwood LOG ids to their enclosing symbols
         (redwood_integration.md §1, contract v1). One batched call, entirely
-        in code: the id→symbol table was extracted at INDEX time (the 2nd
-        argument of `LOG(...)`/`MONGO_LOGV2(...)` calls whose 2nd argument is
-        a plain integer literal, mapped to the enclosing definition symbol —
+        in code: the id→symbol table was extracted at INDEX time (the id
+        argument of `LOG(...)`/`MONGO_LOGV2(...)`/`LOGV2(...)` calls, a plain
+        integer literal, mapped to the enclosing definition symbol —
         see `cppgraph.redwood` for the narrow pattern and its limits).
 
         The document: `schema`/`command`/`contract_version`,

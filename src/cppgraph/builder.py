@@ -403,8 +403,9 @@ def build_graph(
 
     `extract_log_ids` (default off) additionally runs the redwood log-id
     extraction (`redwood_integration.md` §1): a numeric-literal pass over each
-    indexed document's SOURCE text — every `LOG(...)`/`MONGO_LOGV2(...)` call
-    whose 2nd argument is a plain integer literal (the narrow pattern is pinned
+    indexed document's SOURCE text — every `LOG(...)`/`MONGO_LOGV2(...)`
+    /`LOGV2(...)` call whose id argument is a plain integer literal (the
+    narrow pattern is pinned
     and documented in `cppgraph.redwood`) — recorded on `Graph.log_ids` as
     (log_id -> enclosing definition symbol, file:line). The enclosing symbol
     comes from the SAME attribution machinery as the calls above: containment

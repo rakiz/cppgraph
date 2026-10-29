@@ -1608,7 +1608,7 @@ def main(argv: list[str] | None = None) -> int:
         nargs="+",
         type=int,
         metavar="ID",
-        help="the LOG/MONGO_LOGV2 integer ids to resolve (at most 2 per call; "
+        help="the LOG/MONGO_LOGV2/LOGV2 integer ids to resolve (at most 2 per call; "
         "an id matching nothing reports found: false, never a guessed symbol).",
     )
     p_logid.add_argument(

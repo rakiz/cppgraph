@@ -18,19 +18,27 @@ pinned here and tested):
 - The masked source (comments and string/char literals blanked — a `LOG(`
   inside a comment or string is NOT a call, and false positives are only
   acceptable for real `LOG(`-shaped calls) is scanned for
-  `\\b(?:MONGO_LOGV2|LOG)\\s*\\(` — word-bounded, so `XLOG(`/`myLOG(`/`_LOG(`
-  never match, and the legacy `LOGV2` alias is NOT in the pattern (it is not
-  in the contract; widening it is a contract change, not a fix).
+  `\\b(?:MONGO_LOGV2|LOGV2|LOG)\\s*\\(` — word-bounded, so `XLOG(`/`myLOG(`
+  /`_LOG(`/`LOGV2_OPTIONS(` never match; `LOGV2` is IN the pattern — it is
+  mongo's canonical caller-facing macro (`src/mongo/logv2/log.h` defines it
+  as the form the codebase uses everywhere), so excluding it would make the
+  extractor useless on mongo itself.
 - From the open paren, arguments are split at top-level commas (a paren-depth
-  scan; nested calls survive), and the 2nd argument must be a PLAIN integer
-  literal: `^[0-9]+$` after stripping whitespace. Hex, floats, negatives,
+  scan; nested calls survive), and the id argument must be a PLAIN integer
+  literal: `^[0-9]+$` after stripping whitespace. The id's POSITION follows
+  the macro's canonical form: mongo's `LOGV2`/`MONGO_LOGV2` carry the id
+  FIRST (`LOGV2(23408, "message")`), while the legacy `LOG(...)` contract
+  shape carries it 2nd (`LOG(level, id, ...)`). Hex, floats, negatives,
   macro names, expressions — all excluded. A multi-line call is fine (the
-  scan crosses newlines); the id is attributed to the line of `LOG(` itself.
+  scan crosses newlines); the id is attributed to the line of the macro
+  invocation itself.
 - Known limits, stated: C++ raw strings (`R"(...)`) are not modelled — their
   bodies are masked like ordinary literals here, which masks a `LOG(` inside
   them (the safe direction); macro invocations that expand to `LOG(...)` are
   invisible (the scanner sees the source, not the preprocessor); a `#define
-  LOG` shim is likewise unmodelled. Occurrences whose enclosing symbol cannot
+  LOG` shim is likewise unmodelled — so a `LOGV2` call inside a macro whose
+  2nd argument is not a plain integer literal at the source (e.g. a macro
+  parameter) still doesn't match. Occurrences whose enclosing symbol cannot
   be attributed are SKIPPED, never guessed (see below), so the symbol side of
   the table over-reports nothing.
 
@@ -46,12 +54,22 @@ together with any other skip — withholds the store's `log_ids_extracted`
 completeness marker (see below): extraction is never a build failure, but it
 is never silently best-effort either.
 
-Contract v1 (pinned — redwood codes against THIS, golden-file tested like
-`masora facts`):
+Contract v2 (pinned — redwood codes against THIS, golden-file tested like
+`masora facts`). v2 = v1 plus the extraction widening: `LOGV2` added to the
+macro set and the id argument's position made to follow the macro (1st for
+`LOGV2`/`MONGO_LOGV2`, 2nd for legacy `LOG`). No consumer shipped against
+v1; the lockstep redwood update accepts both 1 and 2 (the redwood-side edit
+is the orchestrator's). v1→v2 delta, exactly: (a) the pattern
+`\\b(?:MONGO_LOGV2|LOG)\\s*\\(` → `\\b(?:MONGO_LOGV2|LOGV2|LOG)\\s*\\(`; (b) the
+id argument for `MONGO_LOGV2` moves 2nd → 1st (mongo canonical
+`MONGO_LOGV2(ID, msg)`), `LOGV2` reads the id 1st, `LOG` keeps it 2nd; the
+plain-integer rule and the document shape are UNCHANGED. Graphs indexed
+BEFORE this change carry no `LOGV2` rows (and no 1st-arg `MONGO_LOGV2`
+rows) — re-index to populate them.
 
     cppgraph log-id-lookup --ids <int> [<int> ...] --repo <checkout> [--revision <githash>]
 
-    → {"schema": 1, "command": "log-id-lookup", "contract_version": 1,
+    → {"schema": 1, "command": "log-id-lookup", "contract_version": 2,
        "resolved_against": {"graph_source_commit": "...", "repo_head": "...",
                              "head_matches_graph": true, "revision": "...|null"},
        "log_id_table": true,
@@ -64,7 +82,7 @@ Contract v1 (pinned — redwood codes against THIS, golden-file tested like
 
 Deviations from the original §1 sketch (superseded by this pinned shape —
 the sketch was removed from redwood_integration.md, its history lives in
-the CHANGELOG), pinned here as v1: `schema`/`command` (the
+the CHANGELOG), pinned as of v1: `schema`/`command` (the
 workspace --json envelope), `contract_version` (the contract governance key),
 per-id `scip` carries the SCIP identity string EXACTLY as the store carries
 it — scheme-prefixed (`cxx …`, `symbols.symbol` verbatim), NOT masora's
@@ -130,7 +148,7 @@ from cppgraph.store import (
     open_log_id_capability,
 )
 
-CONTRACT_VERSION = 1
+CONTRACT_VERSION = 2
 # Redwood's own budget rule (redwood_integration.md §2.5), enforced here:
 # more ids per call is an error, not a truncation.
 MAX_IDS = 2
@@ -138,9 +156,17 @@ MAX_IDS = 2
 # ≤2-id answer inside redwood's ≤~1500-token budget.
 CALLERS_LIMIT = 10
 _GIT_TIMEOUT_S = 5
-# The narrow LOG-call pattern (see module docstring). `MONGO_LOGV2` first so
-# alternation prefers it; word boundaries keep `XLOG`/`myLOG`/`_LOG` out.
-_LOG_CALL_RE = re.compile(r"\b(?:MONGO_LOGV2|LOG)\s*\(")
+# The narrow LOG-call pattern (see module docstring). Longest-first
+# (`MONGO_LOGV2`, `LOGV2`, `LOG`) so the alternation never lets the `LOG`
+# branch truncate a longer name's match; word boundaries keep `XLOG`/
+# `myLOG`/`_LOG`/`LOGV2_OPTIONS` out. The macro name is captured so the id
+# argument's position can follow the macro's canonical form (see below).
+_LOG_CALL_RE = re.compile(r"\b(?P<macro>MONGO_LOGV2|LOGV2|LOG)\s*\(")
+# Which argument carries the id, per macro: mongo's canonical `LOGV2(ID, msg)`
+# puts the id FIRST (log.h defines the caller-facing form; watchdog.cpp:313
+# `LOGV2(23408, ...)`), while the legacy `LOG(...)` contract shape carries it
+# 2nd (`LOG(level, id, ...)` — unchanged, pinned since contract v1).
+_ID_ARG_POSITION = {"MONGO_LOGV2": 1, "LOGV2": 1, "LOG": 2}
 # The 2nd argument must be a plain decimal integer literal, nothing else.
 _PLAIN_INT_RE = re.compile(r"^[0-9]+$")
 
@@ -216,25 +242,27 @@ def mask_comments_and_strings(text: str) -> str:
 
 def extract_log_occurrences(text: str) -> list[tuple[int, int]]:
     """The `(line0, log_id)` pairs in `text`: every `LOG(`/`MONGO_LOGV2(`
-    occurrence whose 2nd argument is a plain integer literal (see the module
+    /`LOGV2(` occurrence whose id argument is a plain integer literal (the
+    id's position follows the macro — see `_ID_ARG_POSITION`; see the module
     docstring for the pattern and its limits). Lines are 0-indexed; the
     result is deduped per (line, id) and sorted by line."""
     masked = mask_comments_and_strings(text)
     results: set[tuple[int, int]] = set()
     for m in _LOG_CALL_RE.finditer(masked):
         line0 = masked.count("\n", 0, m.start())
-        arg2 = _second_argument(masked, m.end() - 1)
-        if arg2 is None or not _PLAIN_INT_RE.match(arg2.strip()):
+        position = _ID_ARG_POSITION[m.group("macro")]
+        arg = _nth_argument(masked, m.end() - 1, position)
+        if arg is None or not _PLAIN_INT_RE.match(arg.strip()):
             continue
-        results.add((line0, int(arg2.strip())))
+        results.add((line0, int(arg.strip())))
     return sorted(results)
 
 
-def _second_argument(masked: str, open_paren: int) -> str | None:
-    """The 2nd top-level argument of the call opening at `open_paren` (the
-    index of `(`), or None when the parens never close or there is no 2nd
-    argument. A paren-depth scan over the MASKED text: nested calls survive,
-    commas inside them don't split arguments."""
+def _nth_argument(masked: str, open_paren: int, n: int) -> str | None:
+    """The `n`-th (1-based) top-level argument of the call opening at
+    `open_paren` (the index of `(`), or None when the parens never close or
+    there is no `n`-th argument. A paren-depth scan over the MASKED text:
+    nested calls survive, commas inside them don't split arguments."""
     depth = 0
     arg_starts: list[int] = []
     for i in range(open_paren, min(len(masked), open_paren + 8192)):
@@ -248,10 +276,13 @@ def _second_argument(masked: str, open_paren: int) -> str | None:
                 break
         elif ch == "," and depth == 1:
             arg_starts.append(i)
-    if len(arg_starts) < 2:
+    # Boundaries: the open paren, then the top-level commas, then the closing
+    # paren — argument n spans between boundary n-1 and boundary n.
+    boundaries = [open_paren, *arg_starts]
+    if len(boundaries) <= n:
         return None
-    start = arg_starts[0] + 1
-    end = arg_starts[1]
+    start = boundaries[n - 1] + 1
+    end = boundaries[n]
     return masked[start:end]
 
 

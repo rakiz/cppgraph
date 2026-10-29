@@ -6,6 +6,34 @@ on-disk store also carries its own `schema_version` for forward-compatibility.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The redwood log-id extractor now matches mongo's canonical `LOGV2` form
+  (contract bumped v1 → v2).**
+  Validating on a mongo checkout showed the extraction pattern deliberately
+  excluded the `LOGV2` alias — the macro mongo's callers actually use
+  everywhere (`src/mongo/logv2/log.h` defines `LOGV2` as the canonical
+  caller-facing form; e.g. watchdog.cpp:313 `LOGV2(23408, ...)`), making the
+  extractor useless on mongo itself. `_LOG_CALL_RE` is now
+  `\b(?:MONGO_LOGV2|LOGV2|LOG)\s*\(` (longest-first, word-bounded, so
+  `XLOG`/`_LOG`/`LOGV2_OPTIONS` still never match). The id argument's
+  position follows each macro's canonical form: mongo's
+  `LOGV2(ID, msg)`/`MONGO_LOGV2(ID, msg)` carry the id FIRST, while legacy
+  `LOG(level, id, ...)` keeps it 2nd (the v1-pinned synthetic shape,
+  unchanged); the plain-integer requirement (`^[0-9]+$`) is unchanged, and
+  the preprocessor limit stands — a `LOGV2` inside a macro whose id argument
+  is not a plain integer literal at the source still doesn't match.
+  Tests: `tests/test_redwood.py` (`test_extract_logv2_mongo_real_line_shape`,
+  `::test_extract_ignores_prefixed_names_and_non_macro_uses`,
+  `::test_extract_logv2_non_integer_id_skipped`, the updated SOURCE fixture).
+  Governance: the widening alters the pinned log-id contract, so
+  `contract_version` bumps 1 → 2 (`redwood.CONTRACT_VERSION`, the emitted
+  document, redwood_integration.md §1 — a v1-vs-v2 delta note states exactly
+  what changed). No consumer shipped against v1; the lockstep redwood update
+  accepts both 1 and 2 — that redwood-side edit is the orchestrator's, not
+  this repo's. Re-index note: graphs built before this change carry no
+  `LOGV2` rows (and no 1st-arg `MONGO_LOGV2` rows) until re-indexed.
+
 ### Removed
 
 - **Final code-cleanup pass — what the shipped three-tool loop no longer

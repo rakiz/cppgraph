@@ -11,17 +11,28 @@ never the reverse.
 
 An MCP tool **`log_id_lookup`** (CLI: `cppgraph log-id-lookup`), backed by
 an id→symbol table extracted at INDEX time (a numeric-literal pass over the
-already-scanned compilation: the 2nd argument of `LOG(...)`/`MONGO_LOGV2`
-occurrences, mapped to the enclosing function's symbol). One batched call,
+already-scanned compilation: the id argument of `LOG(...)`/`MONGO_LOGV2`
+/`LOGV2(...)` occurrences — 1st argument for the mongo-canonical
+`LOGV2(ID, msg)`/`MONGO_LOGV2(ID, msg)` forms, 2nd for legacy
+`LOG(level, id, ...)` — mapped to the enclosing function's symbol). One batched call,
 resolution entirely in code — zero LLM tokens spent on the lookup itself.
 
-**Contract v1, PINNED (the document redwood codes against — golden-file
-tested; changes land as a new contract_version, never in place).** Full
+**Contract v2, PINNED (the document redwood codes against — golden-file
+tested; changes land as a new contract_version, never in place).** v2 = v1
+plus the extraction widening: `LOGV2` added to the macro set and the id
+argument's position made to follow the macro. The v1→v2 delta, exactly:
+(a) pattern `\b(?:MONGO_LOGV2|LOG)\s*\(` → `\b(?:MONGO_LOGV2|LOGV2|LOG)\s*\(`;
+(b) the id argument for `MONGO_LOGV2` moves 2nd → 1st, `LOGV2` reads the id
+1st, `LOG` keeps it 2nd; the plain-integer rule and the document shape are
+unchanged. No consumer shipped against v1; the lockstep redwood update
+accepts both contract_version 1 and 2 (the redwood-side edit is the
+orchestrator's). Graphs indexed BEFORE this change carry no `LOGV2` rows —
+re-index to populate them. Full
 detail in `src/cppgraph/redwood.py`'s docstring; the shape as shipped:
 
 ```
 cppgraph log-id-lookup --ids <int> [<int> …] --repo <checkout> [--revision <githash>]
-→ {"schema": 1, "command": "log-id-lookup", "contract_version": 1,
+→ {"schema": 1, "command": "log-id-lookup", "contract_version": 2,
    "resolved_against": {"graph_source_commit": "<hex>", "repo_head": "<hex>",
                          "head_matches_graph": true, "revision": "<githash>|null"},
    "log_id_table": true,
@@ -35,7 +46,7 @@ cppgraph log-id-lookup --ids <int> [<int> …] --repo <checkout> [--revision <gi
 
 Deviations from the original §1 sketch (superseded by the pinned shape
 above; the sketch itself was removed — its history lives in the
-CHANGELOG), pinned as v1: the envelope keys
+CHANGELOG), pinned as of v1: the envelope keys
 `schema`/`command`/`contract_version`; per-id `scip` is the exact SCIP
 identity string AS THE STORE CARRIES IT — scheme-prefixed (`cxx …`), the
 form `symbols.symbol` stores, NOT masora's `scip-clang cxx . . …` ANCHOR

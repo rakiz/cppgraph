@@ -240,7 +240,7 @@ cppgraph fingerprints --repo . --symbol 'cxx . . $ pkg/Foo#f().' --symbol 'cxx .
 
 The spawned-command surface redwood consumes for the log→code hop
 (redwood_integration.md §1, contract v1): the index-time `LOG`/`MONGO_LOGV2`
-id→symbol table, queried in one batched JSON document — the revision guard
+/`LOGV2` id→symbol table, queried in one batched JSON document — the revision guard
 (`resolved_against`) rides along; at most 2 ids per call; fail-closed like
 `fingerprints`.
 

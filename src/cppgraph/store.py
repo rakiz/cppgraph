@@ -124,8 +124,9 @@ CREATE TABLE meta (
     value TEXT
 );
 -- The redwood log-id table (schema v6): each `LOG(...)`/`MONGO_LOGV2(...)`
--- occurrence in the indexed source whose 2nd argument is a plain integer
--- literal, mapped to the ENCLOSING definition's symbol (the same containment
+-- /`LOGV2(...)` occurrence in the indexed source whose id argument is a
+-- plain integer literal, mapped to the ENCLOSING definition's symbol (the
+-- same containment
 -- attribution the call edges use; see `cppgraph.redwood` for the narrow
 -- extraction pattern and its stated limits). OPTIONAL at read time, gated by
 -- the `log_ids_extracted` meta marker (see below): a store without the table

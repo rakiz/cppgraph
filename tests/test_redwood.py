@@ -4,7 +4,10 @@ surface (CLI `log-id-lookup`, MCP `log_id_lookup`), all in
 `cppgraph.redwood` (the connector-file convention, NEXT-SESSION.md).
 
 The extraction pattern is deliberately narrow (see redwood.py's docstring):
-the 2nd argument of a `LOG(`/`MONGO_LOGV2(`-shaped call, when it is a plain
+the id argument of a `LOG(`/`MONGO_LOGV2(`/`LOGV2(`-shaped call (`LOGV2` is
+mongo's canonical caller-facing macro — log.h defines it as the form the
+codebase uses everywhere; its id is the 1st argument, while legacy `LOG`
+keeps the id 2nd), when it is a plain
 integer literal, mapped to the enclosing definition symbol by the SAME
 containment machinery the builder uses for calls (`builder._attribute_containment`
 over the document's `enclosing_range` intervals).
@@ -38,21 +41,26 @@ H = "cxx . . $ pkg/F#h()."
 SOURCE = (
     "int f(int a) {\n"  # line 0
     '    LOG(2, 12983100, "boom");\n'  # line 1
-    "    MONGO_LOGV2(opts, 12983101);\n"  # line 2
+    '    MONGO_LOGV2(12983101, "boom");\n'  # line 2 (mongo id-first shape)
     "    g();\n"  # line 3
     "}\n"  # line 4
     "\n"  # line 5
-    "int g() { LOGV2(9, 8); h(); }\n"  # line 6 (LOGV2 NOT in the pattern)
+    'int g() { LOGV2(23408, "Starting Watchdog Monitor"); h(); }\n'  # line 6 (mongo shape)
     "\n"  # line 7
     "int h() {\n"  # line 8
     "    // LOG(1, 999, commented out);\n"  # line 9 (commented -> no row)
-    "    LOG(a, b);\n"  # line 10 (non-literal 2nd arg -> no row)
-    "    return 12983199;  // a bare integer, not a LOG call -> no row\n"  # line 11
-    "}\n"  # line 12
+    "    LOG(a, b);\n"  # line 10 (non-literal LOG id (2nd arg) -> no row)
+    "    LOGV2(watchdog, 12983198);\n"  # line 11 (non-literal LOGV2 id (1st arg) -> no row)
+    "    return 12983199;  // a bare integer, not a LOG call -> no row\n"  # line 12
+    "}\n"  # line 13
 )
 
-# Only the two real LOG-shaped calls with a plain-integer 2nd argument.
-EXPECTED_IDS = {12983100: (F, "src.cpp", 1), 12983101: (F, "src.cpp", 2)}
+# Only the real LOG-shaped calls with a plain-integer 2nd argument.
+EXPECTED_IDS = {
+    12983100: (F, "src.cpp", 1),
+    12983101: (F, "src.cpp", 2),
+    23408: (G, "src.cpp", 6),
+}
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -94,7 +102,7 @@ def _index() -> Any:
     index.metadata.project_root = "file:///nope"  # overridden per-test
     doc = index.documents.add()
     doc.relative_path = "src.cpp"
-    for sym, line, end in ((F, 0, 4), (G, 6, 6), (H, 8, 12)):
+    for sym, line, end in ((F, 0, 4), (G, 6, 6), (H, 8, 13)):
         si = doc.symbols.add()
         si.symbol = sym
         si.display_name = sym.split("#")[-1].rstrip(".")
@@ -112,21 +120,41 @@ def _build(repo: Path, **kwargs: Any) -> Graph:
 # --- extraction pattern (pure scanner) ----------------------------------------
 
 
-def test_extract_log_and_mongo_logv2_integer_second_args() -> None:
+def test_extract_log_mongo_logv2_and_logv2_integer_second_args() -> None:
     occs = dict((line, lid) for line, lid in extract_log_occurrences(SOURCE))
-    assert occs == {1: 12983100, 2: 12983101}
+    assert occs == {1: 12983100, 2: 12983101, 6: 23408}
 
 
 def test_extract_skips_non_log_integers_comments_and_non_literals() -> None:
     lines = {line for line, _ in extract_log_occurrences(SOURCE)}
-    # The commented LOG (line 9), the macro-level LOG (line 10) and the bare
-    # return literal (line 11) produce NO row.
-    assert 9 not in lines and 10 not in lines and 11 not in lines
+    # The commented LOG (line 9), the macro-level LOG (line 10), the
+    # non-literal LOGV2 id (line 11) and the bare return literal (line 12)
+    # produce NO row.
+    assert 9 not in lines and 10 not in lines and 11 not in lines and 12 not in lines
 
 
-def test_extract_ignores_prefixed_and_legacy_names() -> None:
-    text = "XLOG(1, 7); LOGV2(2, 8); myLOG(3, 9); _LOG(4, 10);\n"
+def test_extract_ignores_prefixed_names_and_non_macro_uses() -> None:
+    text = "XLOG(1, 7); myLOG(3, 9); _LOG(4, 10); LOGV2_OPTIONS(5, 11);\n"
     assert extract_log_occurrences(text) == []
+
+
+def test_extract_logv2_mongo_real_line_shape() -> None:
+    """The real mongo caller-facing shape (watchdog.cpp:313): `LOGV2(ID, msg)`
+    with a plain-integer id and a string-literal message round-trips."""
+    text = (
+        "int f() {\n"
+        '    LOGV2(23408, "Starting Watchdog Monitor");\n'
+        '    MONGO_LOGV2(23409, "Other");\n'
+        "}\n"
+    )
+    assert extract_log_occurrences(text) == [(1, 23408), (2, 23409)]
+
+
+def test_extract_logv2_non_integer_id_skipped() -> None:
+    """The id is the 1st argument for LOGV2-family macros (mongo canonical):
+    a non-integer id is skipped even when a later argument is a plain int."""
+    text = "LOGV2(watchdog, 1); LOGV2(opts, foo); LOGV2(7, 2);\n"
+    assert extract_log_occurrences(text) == [(0, 7)]
 
 
 def test_extract_handles_nested_parens_and_multiline_args() -> None:
@@ -182,7 +210,7 @@ def test_store_writes_log_ids_table(repo: Path) -> None:
     write_sqlite(graph, db, meta={"source_commit": commit})
     con = sqlite3.connect(db)
     rows = con.execute("SELECT log_id, line FROM log_ids ORDER BY log_id").fetchall()
-    assert [lid for lid, _ in rows] == [12983100, 12983101]
+    assert [lid for lid, _ in rows] == [23408, 12983100, 12983101]
     assert con.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "6"
     con.close()
 
@@ -301,7 +329,7 @@ def test_full_build_marker_preserved_through_update(repo) -> None:
     )
     rows = {row[0] for row in con.execute("SELECT log_id FROM log_ids")}
     con.close()
-    assert rows == {4242, 12983101}  # refreshed + intact
+    assert rows == {4242, 12983101, 23408}  # refreshed + intact
     doc = log_id_lookup_document(db, r, [4242], None)
     assert doc["log_id_table"] is True
     assert doc["ids"][0]["found"] is True
@@ -381,7 +409,7 @@ def test_document_shape_and_revision_guard(repo: Path) -> None:
     r, commit, head = repo
     doc = log_id_lookup_document(_store_with(repo), r, [12983100, 9999999], "9b8165b1")
     assert doc["schema"] == 1 and doc["command"] == "log-id-lookup"
-    assert doc["contract_version"] == 1
+    assert doc["contract_version"] == 2
     ra = doc["resolved_against"]
     assert ra["graph_source_commit"] == commit
     assert ra["repo_head"] == head

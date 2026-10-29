@@ -94,7 +94,9 @@ class Reference:
 @dataclass(slots=True)
 class LogIdEntry:
     """One row of the redwood log-id table (`redwood_integration.md` §1): a
-    `LOG(...)`/`MONGO_LOGV2(...)` call's integer id (its 2nd argument, a plain
+    `LOG(...)`/`MONGO_LOGV2(...)`/`LOGV2(...)` call's integer id (its id
+    argument — 1st for mongo's `LOGV2(ID, msg)` forms, 2nd for legacy
+    `LOG(level, id, ...)` — a plain
     integer literal — see `cppgraph.redwood.extract_log_occurrences`) mapped to
     the ENCLOSING definition's symbol at `file:line` (0-indexed, like every
     other recorded line). Extracted at index time by `build_graph` when
