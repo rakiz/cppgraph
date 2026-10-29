@@ -18,7 +18,7 @@ Read cppgraph's SQLite store (`<repo>/.cppgraph/*.graph.db`) directly.
 Today `masora/providers.py` re-implements queries over the internal schema
 (`files`/`symbols`/`edges`/`meta`, gated on `schema_version` +
 `symbol_format`). That schema is NOT a public contract: it changes with any
-store migration (it is at v5, it will move), and every bump silently
+store migration (it is at v6, it will move), and every bump silently
 degrades masora's code anchors to `unknown` until masora re-reads our
 internals and re-gates. The gates make the coupling fail-safe, not clean.
 

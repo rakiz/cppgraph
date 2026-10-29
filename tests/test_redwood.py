@@ -419,6 +419,53 @@ def test_callers_bounded_and_visible(repo: Path) -> None:
     assert entry["callers"]["truncated"] is True
 
 
+# --- the `scip` field's exact form (the masora-anchor seam, pinned) -----------
+
+
+def test_scip_field_is_the_scheme_prefixed_scip_identity(repo: Path) -> None:
+    """redwood_integration.md §1, pinned: `scip` is the SCIP identity string
+    EXACTLY as the store carries it — scheme-prefixed (`cxx …`) — NOT
+    masora's `scip-clang …` ANCHOR form. The store carries no such prefix
+    (verified against real stores), and a fabricated one would be a guess
+    AND would fail `cppgraph fingerprints`' verbatim matching."""
+    r, _c, _h = repo
+    doc = log_id_lookup_document(_store_with(repo), r, [12983100], None)
+    hit = doc["ids"][0]
+    assert hit["scip"] == F
+    assert hit["scip"].startswith("cxx ")  # SCIP's scheme prefix — the store's form
+    assert not hit["scip"].startswith("scip-clang")
+
+
+def test_masora_anchor_is_a_prefix_derivation_of_the_scip_field(repo: Path) -> None:
+    """redwood_integration.md §1's anchor round-trip, pinned to the shipped
+    truth: masora's anchor identity is `"scip-clang " + <scip>` — a
+    documented, deterministic serialization (space-separated tokens starting
+    `scip-clang cxx …`) — while the store string itself is what
+    `cppgraph fingerprints` matches VERBATIM (the anchor-prefixed form
+    answers `found: false`; the store never carries the prefix)."""
+    from cppgraph.fingerprints import fingerprints_document
+
+    r, _c, _h = repo
+    db = _store_with(repo)
+    hit = log_id_lookup_document(db, r, [12983100], None)["ids"][0]
+    anchor = f"scip-clang {hit['scip']}"
+    tokens = anchor.split(" ")
+    assert tokens[0] == "scip-clang" and tokens[1] == "cxx" and len(tokens) >= 5
+    (store_form, anchor_form) = fingerprints_document(db, r, [hit["scip"], anchor])["symbols"]
+    assert store_form["found"] is True
+    assert anchor_form["found"] is False  # the anchor prefix is never store data
+
+
+def test_symbol_field_stays_the_display_name(repo: Path) -> None:
+    """`symbol` is the human display name from the .scip — unchanged by the
+    scip-form pinning; the two fields never swap roles."""
+    r, _c, _h = repo
+    doc = log_id_lookup_document(_store_with(repo), r, [12983100], None)
+    hit = doc["ids"][0]
+    assert hit["symbol"] == "f()"
+    assert hit["symbol"] != hit["scip"]
+
+
 def test_head_mismatch_reported_not_resolved(repo: Path) -> None:
     """The guard is a reported fact: a HEAD ahead of the graph still answers,
     visibly mismatched — cppgraph never silently re-resolves."""

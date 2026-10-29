@@ -62,7 +62,9 @@ Contract v1 (pinned — redwood codes against THIS, golden-file tested like
                 "callers": {"items": [{"symbol", "name", "file", "line"}, ...],
                              "truncated": false, "total": 0}}]}
 
-Deviations from the §1 sketch, pinned here as v1: `schema`/`command` (the
+Deviations from the original §1 sketch (superseded by this pinned shape —
+the sketch was removed from redwood_integration.md, its history lives in
+the CHANGELOG), pinned here as v1: `schema`/`command` (the
 workspace --json envelope), `contract_version` (the contract governance key),
 per-id `scip` carries the SCIP identity string EXACTLY as the store carries
 it — scheme-prefixed (`cxx …`, `symbols.symbol` verbatim), NOT masora's
@@ -76,8 +78,8 @@ deterministically: `"scip-clang " + <scip>` — see the handoff note in
 bare `cxx …` form.
 
 `callers` is a bounded OBJECT (items/truncated/total) rather than a flat
-list — bounding must be visible (the §1 sketch's "…bounded list…" leaves
-the shape to this document) — and `location` is 1-indexed (editor
+list — bounding must be visible (redwood_integration.md §1 pins the same
+shape) — and `location` is 1-indexed (editor
 convention, same as `resolve`).
 
 - Revision guard first-class: `head_matches_graph` is the SAME merge-base

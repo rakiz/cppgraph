@@ -28,7 +28,8 @@ budget is 2 s wall-clock (documented in the CLI help).
 
 Algorithm parity: `definition_fingerprint` and `edge_snapshot` are
 byte-for-byte what masora's `masora/providers.py` computes today over the
-same store schema v5 (`definition_fingerprint` / `edge_snapshot_of` /
+same store schema (v5 at parity time; now v6 — the `log_ids` table does not
+touch `symbols`) (`definition_fingerprint` / `edge_snapshot_of` /
 `_edge_set_hash`, and `masora/index.py:normalize_source`); the parity is
 pinned test-side (tests/test_fingerprints.py transcribes those functions).
 Read-only throughout: this module only ever SELECTs and spawns

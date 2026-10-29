@@ -6,6 +6,41 @@ on-disk store also carries its own `schema_version` for forward-compatibility.
 
 ## [Unreleased]
 
+### Removed
+
+- **Final code-cleanup pass — what the shipped three-tool loop no longer
+  exercises.** A use-based sweep (zero-caller scan over every module-level
+  function/class/flag across `src/` + `tests/`, CLI-dest cross-check,
+  wiring grep) found NO dead Python symbols and NO unconsumed CLI/MCP
+  flags — the code surface is already tight. Removed: the historical
+  "sketch of the query surface" block in redwood_integration.md §1 (the
+  pre-pinned proposed shape, superseded by the pinned v1 contract — kept
+  there only "for the history of the shape"; history belongs in this
+  CHANGELOG, the pinned contract is the single owner). The docstrings'
+  cross-references to the sketch reworded; masora_integration.md's store
+  schema age corrected v5 → v6; fingerprints.py's docstring parity note
+  now states the schema moved (v6) since parity was pinned.
+
+### Fixed
+
+- **`log-id-lookup` `scip` field's form pinned at the masora seam.** The
+  redwood E2E of the three-tool loop surfaced that masora's exact-identity
+  predicate (`scip-clang cxx …` anchor form) does not accept the identity
+  cppgraph's store carries (plain scheme-prefixed SCIP strings, `cxx …`) —
+  the seam worked only via find-fragment coincidence. Facts checked against
+  real stores: `symbols.symbol` never carries a `scip-clang ` prefix, and
+  `cppgraph fingerprints` matches verbatim (an anchor-prefixed query answers
+  `found: false`), so emitting the anchor form would fabricate identity data
+  AND break the round-trip. Shipped truth kept and now pinned: `scip` is
+  `symbols.symbol` verbatim (`cxx …`); a masora anchor derives
+  deterministically as `"scip-clang " + <scip>` — redwood_integration.md §1's
+  sketch corrected to that form, redwood.py's docstring and §1's pinned
+  block updated, and masora's predicate fix recorded as a handoff note
+  (masora_integration.md §6 — its repo, not ours). Pinned tests:
+  `tests/test_redwood.py::test_scip_field_is_the_scheme_prefixed_scip_identity`,
+  `::test_masora_anchor_is_a_prefix_derivation_of_the_scip_field`,
+  `::test_symbol_field_stays_the_display_name`.
+
 ### Added
 
 - **Redwood `log_id_lookup` — the log-id → symbol surface (contract v1).**

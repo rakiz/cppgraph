@@ -15,25 +15,6 @@ already-scanned compilation: the 2nd argument of `LOG(...)`/`MONGO_LOGV2`
 occurrences, mapped to the enclosing function's symbol). One batched call,
 resolution entirely in code — zero LLM tokens spent on the lookup itself.
 
-Sketch of the query surface (SHIPPED — the v1 contract is pinned below; the
-sketch is kept for the history of the shape):
-
-```
-log_id_lookup(ids: [12983100, 12983101], repo: <checkout path>)
-→ {
-  "resolved_against": {"graph_source_commit": "...", "repo_head": "...",
-                        "head_matches_graph": true},
-  "ids": [
-    {"id": 12983100,
-     "found": true,
-     "symbol": "mongo::secondary_lag_watchdog::check(...)",
-     "scip": "cxx . . $ mongo/…#check(…).",
-     "location": "src/mongo/db/repl/secondary_lag_watchdog.cpp:140",
-     "callers": ["…bounded list…"]}
-  ]
-}
-```
-
 **Contract v1, PINNED (the document redwood codes against — golden-file
 tested; changes land as a new contract_version, never in place).** Full
 detail in `src/cppgraph/redwood.py`'s docstring; the shape as shipped:
@@ -52,7 +33,9 @@ cppgraph log-id-lookup --ids <int> [<int> …] --repo <checkout> [--revision <gi
          | {"id": N, "found": false, "reason": "<why>"}]}
 ```
 
-Deviations from the sketch above, pinned as v1: the envelope keys
+Deviations from the original §1 sketch (superseded by the pinned shape
+above; the sketch itself was removed — its history lives in the
+CHANGELOG), pinned as v1: the envelope keys
 `schema`/`command`/`contract_version`; per-id `scip` is the exact SCIP
 identity string AS THE STORE CARRIES IT — scheme-prefixed (`cxx …`), the
 form `symbols.symbol` stores, NOT masora's `scip-clang cxx . . …` ANCHOR
