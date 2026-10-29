@@ -7,6 +7,11 @@ side; nobody edits the neighbor's tree; surface changes land as versioned
 contracts, never in place. Masora is the consumer here and adapts to
 cppgraph's query contract — never the reverse.
 
+> Note: the `scip-clang cxx …` symbol examples in this document and in
+> Masora's `docs/CPPGRAPH_INTEGRATION.md` are masora's ANCHOR format —
+> not the form cppgraph's `scip`-bearing surfaces emit (the plain,
+> scheme-prefixed `cxx …` identity the store carries; see §6).
+
 ## 1. What masora must STOP doing
 
 Read cppgraph's SQLite store (`<repo>/.cppgraph/*.graph.db`) directly.
@@ -107,3 +112,26 @@ cppgraph commits on its side) — they are not needs.
 
 Timeline is masora's to pick; until the flip, cppgraph changes nothing on
 its side and the current gates keep the direct reads fail-safe.
+
+## 6. Handoff — masora's exact-identity predicate vs the store's SCIP form
+
+Found during the redwood E2E of the three-tool loop (2026-10): masora's
+`_is_exact_identity` (`masora/cppgraph.py`) treats a ref as an exact identity
+only when it starts with `scip` — i.e. the `scip-clang cxx …` ANCHOR form.
+The identity cppgraph's store (and therefore every cppgraph surface —
+`find`'s `unique_symbol`, `log-id-lookup`'s `scip`) carries is the plain,
+scheme-prefixed SCIP string (`cxx …`): the `scip-clang ` prefix names the
+INDEXER, is never store data, and `cppgraph fingerprints` matches verbatim —
+a `scip-clang`-prefixed query answers `found: false` (pinned test:
+`tests/test_redwood.py::test_masora_anchor_is_a_prefix_derivation_of_the_scip_field`).
+
+So masora-side anchor resolution from a cppgraph-supplied identity only works
+today by coincidence (the bare `cxx …` form falls through to find-fragment
+resolution). **Masora's owner should change `_is_exact_identity` to accept
+the bare scheme-prefixed SCIP form** (e.g. also `ref.startswith("cxx ")` —
+or, cleaner, match on "contains a space and a known SCIP scheme token"),
+so `cxx …` identities resolve exactly without the fragment hop. cppgraph
+does NOT emit the `scip-clang`-prefixed form (that would fabricate a prefix
+the store does not carry and would break fingerprints' verbatim round-trip);
+the masora ANCHOR form remains derivable as `"scip-clang " + <scip>` —
+redwood_integration.md §1 pins this derivation for redwood.

@@ -27,7 +27,7 @@ log_id_lookup(ids: [12983100, 12983101], repo: <checkout path>)
     {"id": 12983100,
      "found": true,
      "symbol": "mongo::secondary_lag_watchdog::check(...)",
-     "scip": "scip-clang cxx . . mongo/…#check(…).",
+     "scip": "cxx . . $ mongo/…#check(…).",
      "location": "src/mongo/db/repl/secondary_lag_watchdog.cpp:140",
      "callers": ["…bounded list…"]}
   ]
@@ -45,7 +45,7 @@ cppgraph log-id-lookup --ids <int> [<int> …] --repo <checkout> [--revision <gi
                          "head_matches_graph": true, "revision": "<githash>|null"},
    "log_id_table": true,
    "ids": [{"id": 12983100, "found": true, "symbol": "<display name>",
-            "scip": "<exact SCIP identity string>",
+            "scip": "<exact SCIP identity string, as the store carries it — e.g. \"cxx . . $ pkg/F#f().\">",
             "location": "<relative path>:<1-indexed line>",
             "callers": {"items": [{"symbol", "name", "file", "line"}, …],
                          "truncated": false, "total": 0}}
@@ -54,10 +54,20 @@ cppgraph log-id-lookup --ids <int> [<int> …] --repo <checkout> [--revision <gi
 
 Deviations from the sketch above, pinned as v1: the envelope keys
 `schema`/`command`/`contract_version`; per-id `scip` is the exact SCIP
-identity string (the sketch's decorated `"scip-clang cxx . . …"` string is
-masora's ANCHOR format, not SCIP's — cppgraph does not fabricate masora
-anchors); `callers` is a bounded OBJECT (`items`/`truncated`/`total`), not a
-flat list — bounding must be visible; `location` is 1-indexed; a found entry
+identity string AS THE STORE CARRIES IT — scheme-prefixed (`cxx …`), the
+form `symbols.symbol` stores, NOT masora's `scip-clang cxx . . …` ANCHOR
+format (the store carries no such prefix — `scip-clang` names the indexer,
+SCIP's own scheme prefix is `cxx` — and cppgraph does not fabricate identity
+data it does not store; a `scip-clang`-prefixed string fed back to
+`cppgraph fingerprints` answers `found: false`, its matching is verbatim).
+A consumer needing a masora anchor derives it deterministically:
+`"scip-clang " + <scip>` (this is a serialization rule, not a lookup — the
+identity itself is exactly the `scip` field's value); masora's
+exact-identity predicate accepting the bare `cxx …` form directly is the
+subject of a handoff note in `masora_integration.md` (§ Handoff).
+
+`callers` is a bounded OBJECT (`items`/`truncated`/`total`), not a flat
+list — bounding must be visible. `location` is 1-indexed; a found entry
 carrying more than one table row for the id also carries `matches: N` (the
 first row in (file, line) order answers; the duplicate id is shown, never
 silently hidden). `resolved_against.revision` is the caller's `--revision`

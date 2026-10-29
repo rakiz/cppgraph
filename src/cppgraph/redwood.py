@@ -56,19 +56,29 @@ Contract v1 (pinned — redwood codes against THIS, golden-file tested like
                              "head_matches_graph": true, "revision": "...|null"},
        "log_id_table": true,
        "ids": [{"id": 12983100, "found": true, "symbol": "<display name>",
-                "scip": "<exact SCIP string>", "location": "src/foo.cpp:140",
+                "scip": "<exact SCIP identity string, as the store carries it>",
+                "location": "src/foo.cpp:140",
                 "matches": 1,               # present only when > 1 row
                 "callers": {"items": [{"symbol", "name", "file", "line"}, ...],
                              "truncated": false, "total": 0}}]}
 
 Deviations from the §1 sketch, pinned here as v1: `schema`/`command` (the
 workspace --json envelope), `contract_version` (the contract governance key),
-per-id `scip` carries the exact SCIP identity string (the sketch's decorated
-`"scip-clang cxx . . …"` string is masora's ANCHOR format, not SCIP's —
-fabricating it here would be a guess), `callers` is a bounded OBJECT
-(items/truncated/total) rather than a flat list — bounding must be visible
-(the §1 sketch's "…bounded list…" leaves the shape to this document) —
-and `location` is 1-indexed (editor convention, same as `resolve`).
+per-id `scip` carries the SCIP identity string EXACTLY as the store carries
+it — scheme-prefixed (`cxx …`, `symbols.symbol` verbatim), NOT masora's
+`"scip-clang cxx . . …"` ANCHOR format: the store carries no such prefix
+(the anchor prefix names the indexer, not SCIP's scheme), cppgraph does not
+fabricate identity data it does not store, and a `scip-clang`-prefixed
+string fed back to `cppgraph fingerprints` would answer `found: false`
+(verbatim matching). A consumer needing a masora anchor derives it
+deterministically: `"scip-clang " + <scip>` — see the handoff note in
+`masora_integration.md` on masora's exact-identity predicate accepting the
+bare `cxx …` form.
+
+`callers` is a bounded OBJECT (items/truncated/total) rather than a flat
+list — bounding must be visible (the §1 sketch's "…bounded list…" leaves
+the shape to this document) — and `location` is 1-indexed (editor
+convention, same as `resolve`).
 
 - Revision guard first-class: `head_matches_graph` is the SAME merge-base
   computation `fingerprints` uses (`git merge-base --is-ancestor
