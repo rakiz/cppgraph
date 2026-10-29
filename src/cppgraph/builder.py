@@ -45,7 +45,7 @@ import functools
 import gc
 from collections.abc import Callable, Iterable
 
-from cppgraph.model import Graph, Node
+from cppgraph.model import Graph, LogIdEntry, Node
 from cppgraph.proto import scip_pb2
 
 
@@ -376,6 +376,7 @@ def build_graph(
     *,
     include_references: bool = True,
     attribute_references: bool = False,
+    extract_log_ids: bool = False,
 ) -> Graph:
     """Build the graph from a SCIP index.
 
@@ -400,6 +401,26 @@ def build_graph(
     Opt-in because it is exact but larger. No effect unless `include_references`
     is also on.
 
+    `extract_log_ids` (default off) additionally runs the redwood log-id
+    extraction (`redwood_integration.md` §1): a numeric-literal pass over each
+    indexed document's SOURCE text — every `LOG(...)`/`MONGO_LOGV2(...)` call
+    whose 2nd argument is a plain integer literal (the narrow pattern is pinned
+    and documented in `cppgraph.redwood`) — recorded on `Graph.log_ids` as
+    (log_id -> enclosing definition symbol, file:line). The enclosing symbol
+    comes from the SAME attribution machinery as the calls above: containment
+    in the document's `enclosing_range` intervals. Degradations, stated: an
+    occurrence contained by no interval is SKIPPED (never attributed to a
+    guessed file-level or nearest-preceding symbol), and a document whose
+    source cannot be read contributes no rows — extraction is never a build
+    failure, but it is NOT silently best-effort: `graph.log_ids_extracted`
+    (stamped by `write_sqlite` into the `meta.log_ids_extracted` marker, the
+    read-time gate for the table) is withheld when ANY scanned document's
+    source was unreadable, or when no usable `project_root` exists at all —
+    the marker means "extraction ran to completion over all scanned
+    sources", i.e. "every row is complete", and a store without it degrades
+    at read time to a reasoned `found: false` instead of confident false
+    negatives. Written to the store's `log_ids` table by `write_sqlite`.
+
     Always-on (no parameter): `Index.external_symbols` — symbols referenced
     from this index but defined in an un-indexed external package — is
     classified into `Node.is_out_of_project` (True; the same metadata merge as
@@ -411,6 +432,25 @@ def build_graph(
     """
     graph = Graph()
     graph.has_external_symbols = True
+
+    # Redwood log-id extraction needs the SOURCE tree: derive it from the
+    # index's recorded project_root (a file:// URI). Lazy import — `store`
+    # imports this module at load time, so the dependency points one way
+    # only at import; at call time both are loaded.
+    log_source_root = None
+    if extract_log_ids:
+        from cppgraph.store import project_root_path
+
+        log_source_root = project_root_path(index.metadata.project_root)
+        # Provisionally claim extraction ran; finalized after the document
+        # loop below — the marker is withheld when ANY scanned document's
+        # source was unreadable (see log_id_skips), because it means "every
+        # row is complete", not "best-effort rows".
+        if log_source_root is not None:
+            graph.log_ids_extracted = True
+            log_id_skips = 0
+        else:
+            log_id_skips = None
 
     # `Index.external_symbols` first: symbols referenced from this index but
     # defined in an un-indexed external package (boost/absl/stdlib/… — a
@@ -542,6 +582,37 @@ def build_graph(
                     continue  # #504 doc: uncontained site, not a sound fallback target
             graph.add_edge("calls", caller_symbol, callee, doc.relative_path, line)
 
+        if log_source_root is not None:
+            # Redwood log-id extraction (see the docstring): the same
+            # containment attribution as the calls above, over the LOG-call
+            # lines found in this document's source. Uncontained occurrences
+            # are SKIPPED — never a nearest-preceding or file-level guess
+            # (the nearest-preceding fallback below calls is sound ONLY for
+            # interval-less call sites, and even there only as a documented
+            # approximation; a wrong symbol on an id→symbol row would be a
+            # confidently-wrong answer, which cppgraph never ships).
+            from cppgraph.redwood import extract_log_occurrences, read_source
+
+            source = read_source(log_source_root, doc.relative_path)
+            if source is None:
+                log_id_skips += 1  # completeness marker withheld (finalized below)
+            else:
+                occurrences = extract_log_occurrences(source)
+                attributed = _attribute_containment(
+                    callable_intervals, [line for line, _ in occurrences]
+                )
+                for (line, log_id), enclosing_symbol in zip(occurrences, attributed):
+                    if enclosing_symbol is None:
+                        continue
+                    graph.log_ids.append(
+                        LogIdEntry(
+                            log_id=log_id,
+                            symbol=enclosing_symbol,
+                            file=doc.relative_path,
+                            line=line,
+                        )
+                    )
+
         if include_references:
             # Exact location index: every non-local use of a symbol. With
             # `attribute_references`, each also gets its enclosing definition — the
@@ -573,5 +644,12 @@ def build_graph(
                 enclosing = [None] * len(ref_sites)
             for (sym, line, roles), enclosing_symbol in zip(ref_sites, enclosing):
                 graph.add_reference(sym, doc.relative_path, line, enclosing_symbol, roles=roles)
+
+    if log_source_root is not None:
+        # Finalize the completeness marker (see the provisional claim above):
+        # it stands only when EVERY scanned document's source was readable —
+        # a single skip means rows are missing for that document, and the
+        # claim "extraction ran to completion" would be false.
+        graph.log_ids_extracted = log_id_skips == 0
 
     return graph

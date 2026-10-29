@@ -15,8 +15,8 @@ already-scanned compilation: the 2nd argument of `LOG(...)`/`MONGO_LOGV2`
 occurrences, mapped to the enclosing function's symbol). One batched call,
 resolution entirely in code — zero LLM tokens spent on the lookup itself.
 
-Sketch of the query surface (final shape pinned in the tool's contract when
-it ships):
+Sketch of the query surface (SHIPPED — the v1 contract is pinned below; the
+sketch is kept for the history of the shape):
 
 ```
 log_id_lookup(ids: [12983100, 12983101], repo: <checkout path>)
@@ -33,6 +33,36 @@ log_id_lookup(ids: [12983100, 12983101], repo: <checkout path>)
   ]
 }
 ```
+
+**Contract v1, PINNED (the document redwood codes against — golden-file
+tested; changes land as a new contract_version, never in place).** Full
+detail in `src/cppgraph/redwood.py`'s docstring; the shape as shipped:
+
+```
+cppgraph log-id-lookup --ids <int> [<int> …] --repo <checkout> [--revision <githash>]
+→ {"schema": 1, "command": "log-id-lookup", "contract_version": 1,
+   "resolved_against": {"graph_source_commit": "<hex>", "repo_head": "<hex>",
+                         "head_matches_graph": true, "revision": "<githash>|null"},
+   "log_id_table": true,
+   "ids": [{"id": 12983100, "found": true, "symbol": "<display name>",
+            "scip": "<exact SCIP identity string>",
+            "location": "<relative path>:<1-indexed line>",
+            "callers": {"items": [{"symbol", "name", "file", "line"}, …],
+                         "truncated": false, "total": 0}}
+         | {"id": N, "found": false, "reason": "<why>"}]}
+```
+
+Deviations from the sketch above, pinned as v1: the envelope keys
+`schema`/`command`/`contract_version`; per-id `scip` is the exact SCIP
+identity string (the sketch's decorated `"scip-clang cxx . . …"` string is
+masora's ANCHOR format, not SCIP's — cppgraph does not fabricate masora
+anchors); `callers` is a bounded OBJECT (`items`/`truncated`/`total`), not a
+flat list — bounding must be visible; `location` is 1-indexed; a found entry
+carrying more than one table row for the id also carries `matches: N` (the
+first row in (file, line) order answers; the duplicate id is shown, never
+silently hidden). `resolved_against.revision` is the caller's `--revision`
+ECHOED back — cppgraph never resolves it against anything it doesn't have
+(no network, no fetch).
 
 - **Revision guard is first-class, as redwood's doc demands**: the answer
   names the revision it was resolved against (`graph_source_commit` +

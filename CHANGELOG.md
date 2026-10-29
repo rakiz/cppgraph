@@ -8,6 +8,60 @@ on-disk store also carries its own `schema_version` for forward-compatibility.
 
 ### Added
 
+- **Redwood `log_id_lookup` — the log-id → symbol surface (contract v1).**
+  New connector module `src/cppgraph/redwood.py` (the NEXT-SESSION.md
+  connector-file convention: one file per neighbor) holding the extraction
+  scanner, the ONE pure query function both surfaces share, and the CLI
+  entry. Index time: a numeric-literal pass over the already-scanned
+  compilation (`build_graph` with `extract_log_ids=True`, wired through
+  `pipeline.build_store` / `cli build` / the incremental `update`) records
+  every `LOG(...)`/`MONGO_LOGV2(...)` occurrence whose 2nd argument is a
+  plain integer literal into a new store table `log_ids`
+  (log_id → enclosing definition symbol, file:line) — the enclosing symbol
+  attributed by the SAME containment machinery the call edges use
+  (`_attribute_containment` over `enclosing_range` intervals). The pattern is
+  deliberately narrow and documented in the module: comments and
+  string/char literals are masked first (a `LOG(` in a comment is not a
+  call), word-bounded (`XLOG`/`myLOG`/`_LOG` never match), the legacy
+  `LOGV2` alias is not in the pattern, and the 2nd argument must be
+  `^[0-9]+$` (hex/float/negative/macro names excluded). Stated degradations:
+  an occurrence contained by no interval is SKIPPED (never attributed to a
+  guessed file-level or nearest-preceding symbol), an unreadable source file
+  contributes nothing, and extraction is best-effort — never a build
+  failure. Query time: `cppgraph log-id-lookup --ids <int>… --repo <path>
+  [--revision <githash>]` (CLI) and the MCP tool `log_id_lookup` print one
+  schema:1 document — `contract_version: 1`, `resolved_against`
+  (graph_source_commit, repo_head, head_matches_graph — the SAME merge-base
+  computation `fingerprints` uses — and `revision`, ECHOED back, never
+  resolved against anything cppgraph doesn't have), `log_id_table`, and per
+  id: found/symbol/scip/location/bounded `callers` (items/truncated/total).
+  HARD CAP 2 ids per call — more is an error, not a truncation.
+  Fail-closed: no graph / non-git repo / no recorded source_commit → exit 1
+  with nothing on stdout; an unknown id → per-id `found: false`, never a
+  guessed symbol; a pre-v6 store (no table) → `found: false` with a stated
+  reason (`log_id_table: false`), never a crash. Incremental updates
+  re-extract changed TUs' rows and drop deleted ones'. Store schema bumped
+  v5 → v6 (new table + index; the shape is optional at read time — every
+  reader gates on table presence AND the `log_ids_extracted` meta marker,
+  which means "extraction ran to completion over all scanned sources" —
+  every row complete: ONLY a full extraction build over fully readable
+  sources sets it (an unreadable source document withholds it), an
+  `apply_update` whose partial could not re-extract (e.g. the index's
+  project_root missing on disk) CLEARS it, and `enrich_references` never
+  sets it — in every such case lookups degrade to a reasoned
+  `found: false`, never a confident false negative). Declared rebuild level
+  for the release that ships this: **store**
+  (a `versions.json` release entry — rebuild "store" — is added by the
+  release commit; noted here so it isn't lost). Document shape pinned in
+  redwood_integration.md §1 with the
+  deviations from the sketch listed there; CLI_REFERENCE.md regenerated.
+  24 new tests (`tests/test_redwood.py`): extraction pattern (incl.
+  comment/string masking, non-literal 2nd args, prefixed names), attributed
+  build, unattributed-skip degradation, byte-stable rebuilds, pre-v6
+  degradation, document golden + revision guard, caller truncation, the 2-id
+  cap, CLI fail-closed paths, MCP parity, incremental-update row
+  replacement.
+
 - **`--json` on every query command — versioned schema:1 contracts.**
   Workspace convention (NEXT-SESSION.md): every command that ANSWERS a
   question gets `--json`; commands that DO something or are interactive get

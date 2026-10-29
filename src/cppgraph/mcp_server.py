@@ -64,6 +64,7 @@ from cppgraph.queries import extract_signature, find_symbols, read_source_snippe
 from cppgraph.queries import label as _label
 from cppgraph.queries import line1 as _line1
 from cppgraph.queries import node_dict as _node_dict
+from cppgraph.redwood import LogIdLookupError, log_id_lookup_document
 from cppgraph.store import (
     GraphStore,
     IncompatibleStoreError,
@@ -2568,6 +2569,43 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         try:
             return fingerprints_document(Path(graph_path), Path(root), symbols)
         except FingerprintsError as e:
+            return {"error": str(e)}
+
+    @mcp.tool()
+    def log_id_lookup(ids: list[int], revision: str | None = None) -> dict[str, Any]:
+        """Resolve redwood LOG ids to their enclosing symbols
+        (redwood_integration.md §1, contract v1). One batched call, entirely
+        in code: the id→symbol table was extracted at INDEX time (the 2nd
+        argument of `LOG(...)`/`MONGO_LOGV2(...)` calls whose 2nd argument is
+        a plain integer literal, mapped to the enclosing definition symbol —
+        see `cppgraph.redwood` for the narrow pattern and its limits).
+
+        The document: `schema`/`command`/`contract_version`,
+        `resolved_against` (graph_source_commit, repo_head, head_matches_graph
+        — the revision guard, the SAME merge-base computation `fingerprints`
+        uses — and `revision`, ECHOED back, never resolved against anything
+        cppgraph doesn't have), `log_id_table` (a pre-v6 store has none), and
+        one entry per id: found/symbol/scip/location/bounded callers (visible
+        truncated/total).
+
+        At most 2 ids per call — MORE is an error dict, not a truncation.
+        Fail-closed: an unknown id is `found: false`, never a guessed symbol;
+        no usable graph is an explicit error. Driven by the same pure
+        function as the `cppgraph log-id-lookup` CLI command
+        (`cppgraph.redwood.log_id_lookup_document`)."""
+        if graph_path is None:
+            return dict(_NO_GRAPH)
+        incompatible = stores.incompatible()
+        if incompatible is not None:
+            return {"error": incompatible}
+        if root is None:
+            return {
+                "error": "no checkout root known to this server — restart it from "
+                "the project directory (or with --root) so repo_head can be established"
+            }
+        try:
+            return log_id_lookup_document(Path(graph_path), Path(root), ids, revision)
+        except LogIdLookupError as e:
             return {"error": str(e)}
 
     @mcp.tool()

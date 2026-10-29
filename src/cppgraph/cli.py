@@ -1589,6 +1589,42 @@ def main(argv: list[str] | None = None) -> int:
         "(no fuzzy resolution in v1; a string matching nothing reports found: false).",
     )
 
+    p_logid = sub.add_parser(
+        "log-id-lookup",
+        help="resolve redwood LOG ids to their enclosing symbols "
+        "(redwood_integration.md §1, contract v1)",
+        description="One JSON document on stdout: schema, command, "
+        "contract_version, resolved_against (graph_source_commit, repo_head, "
+        "head_matches_graph — the revision guard — and the echoed revision), "
+        "log_id_table, and one entry per queried id (found / symbol / scip / "
+        "location / bounded callers). At most 2 ids per call — more is an "
+        "error, not a truncation. Fail-closed: on no usable graph, a "
+        "missing/non-git repo, or bad arguments it exits non-zero with "
+        "NOTHING on stdout.",
+    )
+    p_logid.add_argument(
+        "--ids",
+        required=True,
+        nargs="+",
+        type=int,
+        metavar="ID",
+        help="the LOG/MONGO_LOGV2 integer ids to resolve (at most 2 per call; "
+        "an id matching nothing reports found: false, never a guessed symbol).",
+    )
+    p_logid.add_argument(
+        "--repo",
+        required=True,
+        help="checkout root the graph belongs to (its .cppgraph/ holds the "
+        "store; must be a git checkout — repo_head is a pinned field).",
+    )
+    p_logid.add_argument(
+        "--revision",
+        default=None,
+        help="the caller's failing-revision githash, ECHOED back in "
+        "resolved_against for provenance bookkeeping — cppgraph never resolves "
+        "it against anything it doesn't have (no network, no fetch).",
+    )
+
     p_status = sub.add_parser(
         "status",
         help="show the graph's source commit and, with --root, whether the checkout has drifted",
@@ -1810,6 +1846,7 @@ def main(argv: list[str] | None = None) -> int:
             index,
             include_references=args.references,
             attribute_references=args.attributed_refs,
+            extract_log_ids=True,
         )
         # Record the tests state definitely whenever a scope is being recorded (a
         # scope-aware caller like the index wizard always passes --index-filter), so
@@ -2642,6 +2679,11 @@ def main(argv: list[str] | None = None) -> int:
         from cppgraph.fingerprints import run_cli
 
         return run_cli(args.repo, args.symbol)
+
+    if args.command == "log-id-lookup":
+        from cppgraph.redwood import run_cli as log_id_run_cli
+
+        return log_id_run_cli(args.repo, args.ids, args.revision)
 
     if args.command == "status":
         graph_path = _resolve_graph(args, parser)

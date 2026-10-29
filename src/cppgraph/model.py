@@ -91,11 +91,28 @@ class Reference:
     roles: int = 0
 
 
+@dataclass(slots=True)
+class LogIdEntry:
+    """One row of the redwood log-id table (`redwood_integration.md` §1): a
+    `LOG(...)`/`MONGO_LOGV2(...)` call's integer id (its 2nd argument, a plain
+    integer literal — see `cppgraph.redwood.extract_log_occurrences`) mapped to
+    the ENCLOSING definition's symbol at `file:line` (0-indexed, like every
+    other recorded line). Extracted at index time by `build_graph` when
+    `extract_log_ids` is on; written to the store's `log_ids` table.
+    """
+
+    log_id: int
+    symbol: str
+    file: str
+    line: int
+
+
 @dataclass
 class Graph:
     nodes: dict[str, Node] = field(default_factory=dict)
     edges: list[Edge] = field(default_factory=list)
     references: list[Reference] = field(default_factory=list)
+    log_ids: list[LogIdEntry] = field(default_factory=list)
     _edge_keys: set[tuple] = field(default_factory=set, repr=False)
     _ref_keys: set[tuple] = field(default_factory=set, repr=False)
     # Set by `build_graph` (always — the builder classifies
@@ -109,6 +126,14 @@ class Graph:
     # classify the whole pre-existing store, so it must never claim
     # capability-completeness.
     has_external_symbols: bool = False
+    # Set by `build_graph` ONLY when the redwood log-id extraction actually
+    # ran over the source tree (extract_log_ids=True AND a usable
+    # project_root): "every LOG-id row this graph could see was extracted".
+    # `write_sqlite` turns it into the `log_ids_extracted` meta marker, the
+    # read-time gate for the log-id table — without it an upgraded store
+    # (table created empty by `apply_update`/`enrich_references`, never
+    # backfilled) would answer every LOG id a confident false `found: false`.
+    log_ids_extracted: bool = False
 
     def add_node(self, symbol: str, *, display_name: str = "") -> Node:
         node = self.nodes.get(symbol)

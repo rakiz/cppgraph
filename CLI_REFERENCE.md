@@ -236,6 +236,24 @@ are the caller's budget (masora's expected budget: 2 s wall-clock).
 cppgraph fingerprints --repo . --symbol 'cxx . . $ pkg/Foo#f().' --symbol 'cxx . . $ pkg/Bar#g().'
 ```
 
+## Redwood integration
+
+The spawned-command surface redwood consumes for the log→code hop
+(redwood_integration.md §1, contract v1): the index-time `LOG`/`MONGO_LOGV2`
+id→symbol table, queried in one batched JSON document — the revision guard
+(`resolved_against`) rides along; at most 2 ids per call; fail-closed like
+`fingerprints`.
+
+<!-- cppgraph-gen:log-id-lookup -->
+| Command | Purpose (from `--help`) | Arguments |
+|---|---|---|
+| `log-id-lookup` | resolve redwood LOG ids to their enclosing symbols (redwood_integration.md §1, contract v1) | --ids ID*, --repo*, --revision |
+<!-- /cppgraph-gen -->
+
+```bash
+cppgraph log-id-lookup --ids 12983100 12983101 --repo . --revision 9b8165b1
+```
+
 ## Reading and viewing
 
 `explain` is the one-shot "tell me about this symbol" summary — definition

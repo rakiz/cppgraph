@@ -31,6 +31,7 @@ from datetime import UTC, datetime
 from importlib import metadata as importlib_metadata
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from urllib.parse import quote
 
 import cppgraph
 from cppgraph.builder import (
@@ -122,6 +123,21 @@ CREATE TABLE meta (
     key   TEXT PRIMARY KEY,
     value TEXT
 );
+-- The redwood log-id table (schema v6): each `LOG(...)`/`MONGO_LOGV2(...)`
+-- occurrence in the indexed source whose 2nd argument is a plain integer
+-- literal, mapped to the ENCLOSING definition's symbol (the same containment
+-- attribution the call edges use; see `cppgraph.redwood` for the narrow
+-- extraction pattern and its stated limits). OPTIONAL at read time, gated by
+-- the `log_ids_extracted` meta marker (see below): a store without the table
+-- — or with the table but no marker, i.e. an upgraded store whose rows were
+-- never backfilled — makes lookups answer `found: false` with a reason,
+-- never a confident false negative.
+CREATE TABLE log_ids (
+    log_id    INTEGER NOT NULL,
+    symbol_id INTEGER NOT NULL,
+    file_id   INTEGER,
+    line      INTEGER
+);
 """
 
 # Built after bulk insert (faster than maintaining them per-row).
@@ -130,6 +146,7 @@ CREATE INDEX ix_sym ON symbols(symbol);   -- exact symbol -> id resolution
 CREATE INDEX ix_src ON edges(src_id);     -- callees_of / forward traversal
 CREATE INDEX ix_dst ON edges(dst_id);     -- callers_of / reverse traversal
 CREATE INDEX ix_refs ON refs(symbol_id);  -- references_of a symbol
+CREATE INDEX ix_log_ids ON log_ids(log_id);  -- the id -> symbol lookups
 """
 
 # SQLite caps host-variable count per statement (default 999 historically).
@@ -164,7 +181,15 @@ _FILE_LINE_RE = re.compile(r"^(.+):([1-9][0-9]*)$")
 # `symbols.is_out_of_project` (the `Index.external_symbols` classification —
 # external vs project-native vs phantom, gated by the `has_external_symbols`
 # meta flag). Released in v0.3.0.
-SCHEMA_VERSION = 5
+# v6: `log_ids` (the redwood log-id table — `LOG(...)`/`MONGO_LOGV2(...)`
+# integer id -> enclosing definition symbol, extracted at index time from the
+# source text; see `cppgraph.redwood` / redwood_integration.md §1). OPTIONAL
+# at read time like every post-v1 addition: a pre-v6 store simply has no
+# table, and lookups answer `found: false` with a stated reason (the read
+# gates on table presence, never crashes). Created empty by `apply_update` /
+# `enrich_references` so every store they touch is v6-shaped; populated by
+# full builds and re-extracted for changed files on incremental updates.
+SCHEMA_VERSION = 6
 
 # The symbol identity format is versioned like the store schema (masora
 # contract §9.12 — docs/CPPGRAPH_INTEGRATION.md): the decorated
@@ -182,6 +207,56 @@ SYMBOL_FORMAT = 1
 
 class IncompatibleStoreError(RuntimeError):
     """Raised opening a store written by a newer cppgraph than this one."""
+
+
+# Type/error aliases for the connector modules that read the store read-only
+# (`redwood.py`) without importing sqlite3 directly — the store owns SQL.
+SqliteError = sqlite3.Error
+SQLiteConnection = sqlite3.Connection
+
+
+def open_log_id_capability(
+    db_path: str | Path,
+) -> tuple[sqlite3.Connection, dict[str, str], bool, bool]:
+    """The read-only opener + capability probe for the redwood log-id table —
+    the store-side half of `cppgraph.redwood`'s lookup (encapsulation: the
+    raw `sqlite3` usage and the PRAGMA/meta reads live HERE, never in a
+    connector module).
+
+    Returns `(conn, meta, table_present, extracted)`: a read-only connection
+    (caller closes), the store's meta, whether the `log_ids` table exists,
+    and whether the `log_ids_extracted` marker — the "every row is complete"
+    claim only a full extraction build can set (see `Graph.log_ids_extracted`)
+    — is present and true.
+
+    Raises `IncompatibleStoreError` on every failure mode: a store newer than
+    this binary understands, an unparsable/malformed store, an unopenable
+    file (the connection is closed before raising — nothing leaks)."""
+    try:
+        conn = sqlite3.connect(f"file:{quote(str(db_path))}?mode=ro", uri=True)
+    except sqlite3.Error as e:
+        raise IncompatibleStoreError(f"{db_path} cannot be opened read-only: {e}") from e
+    try:
+        meta = dict(conn.execute("SELECT key, value FROM meta").fetchall())
+        raw = meta.get("schema_version")
+        if raw is not None:
+            version = int(raw)
+            if version > SCHEMA_VERSION:
+                raise IncompatibleStoreError(
+                    f"{db_path} store schema v{version} is newer than this cppgraph "
+                    f"(supports v{SCHEMA_VERSION}); upgrade cppgraph or rebuild the graph"
+                )
+        table_present = bool(
+            frozenset(row[1] for row in conn.execute("PRAGMA table_info(log_ids)"))
+        )
+        extracted = meta.get("log_ids_extracted") == "true"
+    except IncompatibleStoreError:
+        conn.close()
+        raise
+    except (sqlite3.Error, ValueError) as e:
+        conn.close()
+        raise IncompatibleStoreError(f"{db_path} is not a usable cppgraph store: {e}") from e
+    return conn, meta, table_present, extracted
 
 
 def references_capability_gap(
@@ -593,6 +668,17 @@ def write_sqlite(graph: Graph, path: str | Path, *, meta: dict[str, str] | None 
         # `scip_kind` field, mirroring `has_access_roles` (absent on stock).
         if any(n.scip_kind for n in graph.nodes.values()):
             all_meta.setdefault("has_symbol_kind", "true")
+        # The redwood log-id extraction ran to completion over every scanned
+        # source (FULL build; `build_graph` withholds the claim when any
+        # document's source was unreadable or the project_root was unusable)
+        # => the table's contents are complete for this index. The read-time
+        # gate for the log-id table — `apply_update` preserves the marker
+        # only when its partial re-extracted completely (else clears it),
+        # and `enrich_references` never sets it (it never backfills), so an
+        # uncertified store degrades to a reasoned `found: false`, never a
+        # confident false negative.
+        if graph.log_ids_extracted:
+            all_meta.setdefault("log_ids_extracted", "true")
         # External-package symbol metadata (`Index.external_symbols`
         # classification): set by the BUILDER (`graph.has_external_symbols`) on
         # any graph it produces, so a FULL build claims the capability
@@ -621,6 +707,17 @@ def write_sqlite(graph: Graph, path: str | Path, *, meta: dict[str, str] | None 
         con.executemany("INSERT INTO symbols VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", sym_rows)
         con.executemany("INSERT INTO edges VALUES (?, ?, ?, ?, ?)", edge_rows)
         con.executemany("INSERT INTO refs VALUES (?, ?, ?, ?, ?)", ref_rows)
+        # The redwood log-id table (schema v6): sorted for byte-stability —
+        # rebuilding the same commit must produce the same table, verbatim.
+        # A guard with .get: the enclosing symbol is always a definition
+        # (interned), but an entry naming a symbol outside the indexed set
+        # is skipped, never fabricated.
+        log_rows = sorted(
+            (e.log_id, sym_ids[e.symbol], file_id(e.file), e.line)
+            for e in graph.log_ids
+            if e.symbol in sym_ids
+        )
+        con.executemany("INSERT INTO log_ids VALUES (?, ?, ?, ?)", log_rows)
         con.executemany("INSERT INTO meta VALUES (?, ?)", all_meta.items())
         con.executescript(_INDEXES)
         con.commit()
@@ -676,6 +773,9 @@ def update_store(
             partial_index,
             include_references=include_references,
             attribute_references=attribute_references,
+            # Re-extract the changed TUs' log-id rows so the redwood table
+            # tracks the incremental update like the edges do.
+            extract_log_ids=True,
         )
         return store.apply_update(partial_graph, changed_files, meta=meta)
     finally:
@@ -748,6 +848,20 @@ def enrich_references(path: str | Path, index: scip_pb2.Index) -> tuple[int, int
         # either way.
         if "is_out_of_project" not in sym_cols:
             con.execute("ALTER TABLE symbols ADD COLUMN is_out_of_project INTEGER")
+            # Schema v6: the redwood log-id table. Enrichment never backfills
+            # it (that's a build-time extraction over the source text — see
+            # `cppgraph.redwood`) but the store it stamps v6 must be v6-SHAPED,
+            # so create the (empty) table when a pre-v6 store passes through.
+            # The `log_ids_extracted` marker is deliberately NOT set here:
+            # without it the read gate degrades lookups to a reasoned
+            # `found: false` instead of trusting an empty table.
+        tables = {row[0] for row in con.execute("SELECT name FROM sqlite_master")}
+        if "log_ids" not in tables:
+            con.execute(
+                "CREATE TABLE log_ids ("
+                "log_id INTEGER NOT NULL, symbol_id INTEGER NOT NULL, "
+                "file_id INTEGER, line INTEGER)"
+            )
 
         sym_ids = dict(con.execute("SELECT symbol, id FROM symbols"))
         file_ids = dict(con.execute("SELECT path, id FROM files"))
@@ -2697,8 +2811,9 @@ class GraphStore:
             # `enrich_references` uses for `refs.enclosing_id` — so the
             # re-insert below can write body extents, doc text, access roles,
             # fine-grained kinds, recorded signatures and the external-symbol
-            # classification.
-            # The store is now v5-shaped, so stamp it.
+            # classification. Schema v6 adds the `log_ids` table (created
+            # empty; enrichment of its DATA is the re-extraction below).
+            # The store is now current-shaped, so stamp it.
             cols = {row[1] for row in con.execute("PRAGMA table_info(symbols)")}
             stale_shape = False
             if "end_line" not in cols:
@@ -2720,6 +2835,47 @@ class GraphStore:
             if "roles" not in ref_cols:
                 con.execute("ALTER TABLE refs ADD COLUMN roles INTEGER NOT NULL DEFAULT 0")
                 stale_shape = True
+            tables = {row[0] for row in con.execute("SELECT name FROM sqlite_master")}
+            if "log_ids" not in tables:
+                con.execute(
+                    "CREATE TABLE log_ids ("
+                    "log_id INTEGER NOT NULL, symbol_id INTEGER NOT NULL, "
+                    "file_id INTEGER, line INTEGER)"
+                )
+                stale_shape = True
+            # The `log_ids_extracted` meta marker is the read-time claim
+            # "every row is complete". After an update it is true iff the
+            # store's PRIOR marker was true AND the partial's own claim is
+            # true (`partial.log_ids_extracted` — set by `build_graph` only
+            # when the re-extraction ran to completion over every changed
+            # document's source). Neither half can be skipped: prior true +
+            # partial false means the changed files' rows were lost (e.g.
+            # the index's project_root missing on disk) — clear; prior
+            # false + partial true means the UNCHANGED files' rows were
+            # never extracted at all (a v5-upgraded store) — a valid-root
+            # partial must not certify the whole table, it stays unset.
+            # Either way the store degrades at read time to a reasoned
+            # `found: false`, never a confident false negative.
+            # Snapshot atomicity: the prior read and the marker/row DML below
+            # must be one transaction. The `with con:` block only COMMITS at
+            # exit — sqlite3's legacy isolation defers the actual BEGIN to
+            # the first DML, so the SELECT above would otherwise run outside
+            # any transaction. An explicit BEGIN IMMEDIATE takes the write
+            # lock NOW (single-writer SQLite: no other writer can slip
+            # between the read and the writes) and composes cleanly — the
+            # `with con:` commit at scope exit commits this same transaction.
+            con.execute("BEGIN IMMEDIATE")
+            prior_row = con.execute(
+                "SELECT value FROM meta WHERE key = 'log_ids_extracted'"
+            ).fetchone()
+            prior_extracted = prior_row is not None and prior_row[0] == "true"
+            if prior_extracted and partial.log_ids_extracted:
+                con.execute(
+                    "INSERT INTO meta(key, value) VALUES ('log_ids_extracted', 'true') "
+                    "ON CONFLICT(key) DO UPDATE SET value = 'true'"
+                )
+            else:
+                con.execute("DELETE FROM meta WHERE key = 'log_ids_extracted'")
             if stale_shape:
                 con.execute(
                     "INSERT INTO meta(key, value) VALUES ('schema_version', ?) "
@@ -2758,6 +2914,12 @@ class GraphStore:
                 cur = con.execute(f"DELETE FROM edges WHERE file_id IN ({ph})", chunk)
                 edges_removed += cur.rowcount
                 con.execute(f"DELETE FROM refs WHERE file_id IN ({ph})", chunk)
+                # The log-id rows of a changed file are replaced too (the
+                # partial re-extraction below re-inserts them); a file that
+                # lost its rows entirely (source no longer contains the LOG
+                # call, or the file was deleted) simply ends with none —
+                # the table never keeps stale entries.
+                con.execute(f"DELETE FROM log_ids WHERE file_id IN ({ph})", chunk)
                 con.execute(
                     f"UPDATE symbols SET file_id = NULL, line = NULL, end_line = NULL, "
                     f"documentation = NULL, scip_kind = NULL, signature_documentation = NULL, "
@@ -2868,6 +3030,23 @@ class GraphStore:
                         r.roles,
                     )
                     for r in partial.references
+                ],
+            )
+            # Re-insert the changed files' log-id rows (schema v6; the delete
+            # in step (2) cleared exactly those files'). The enclosing symbol
+            # is always a definition in the partial (guarded with .get, same
+            # as the enclosing reference above).
+            con.executemany(
+                "INSERT INTO log_ids(log_id, symbol_id, file_id, line) VALUES (?, ?, ?, ?)",
+                [
+                    (
+                        e.log_id,
+                        sym_id[e.symbol],
+                        file_id.get(e.file) if e.file else None,
+                        e.line,
+                    )
+                    for e in partial.log_ids
+                    if e.symbol in sym_id
                 ],
             )
 

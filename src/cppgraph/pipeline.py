@@ -330,7 +330,7 @@ def build_store(
     index = scip_pb2.Index()
     with open(scip_path, "rb") as f:
         index.ParseFromString(f.read())
-    graph = build_graph(index, attribute_references=attributed_refs)
+    graph = build_graph(index, attribute_references=attributed_refs, extract_log_ids=True)
     meta = build_provenance(
         index,
         source_commit=source_commit,
