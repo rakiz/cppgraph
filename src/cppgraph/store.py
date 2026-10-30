@@ -43,7 +43,12 @@ from cppgraph.builder import (
     is_type_symbol,
 )
 from cppgraph.export import is_test_file
-from cppgraph.filters import matches_path_prefix
+from cppgraph.filters import (
+    matches_module_scope,
+    matches_path_prefix,
+    module_scope_error,
+    sentence_period_candidates,
+)
 from cppgraph.messages import NO_ACCESS_ROLES_REASON, NO_REFERENCES_REASON
 from cppgraph.model import Edge, Graph, Node, Reference
 
@@ -161,6 +166,19 @@ _ID_CHUNK = 900
 # recognizing it first is unambiguous. Line 0 or a leading zero is not the
 # form (1-indexed lines start at 1) and falls through to name matching.
 _FILE_LINE_RE = re.compile(r"^(.+):([1-9][0-9]*)$")
+
+
+def _distinct_nodes(matches: list[Node]) -> list[Node]:
+    """Order-preserving dedup of match nodes by symbol — the same node can
+    surface twice when several ladder steps match it."""
+    distinct: list[Node] = []
+    seen: set[str] = set()
+    for n in matches:
+        if n.symbol not in seen:
+            seen.add(n.symbol)
+            distinct.append(n)
+    return distinct
+
 
 # On-disk store format version, stamped into `meta.schema_version` at build.
 # Bump when the schema changes incompatibly (new/renamed tables or columns);
@@ -1338,8 +1356,20 @@ class GraphStore:
         case/separator-insensitive fuzzy match. A query that already ends in
         SCIP's type descriptor (`Class#`) prefers the exact match — the class
         whose symbol ends with the query — over the substring members, when the
-        substring sweep matches both. The three outcomes are encoded
-        in the return:
+        substring sweep matches both. As a last resort — only when every step
+        above matched nothing — the trailing sentence period is stripped
+        (`filters.sentence_period_candidates`) and the ladder is rerun on the
+        repaired spelling; a repair that matches exactly one symbol resolves,
+        one that matches several is discarded (the not-found outcome stands).
+        ONLY the period is repaired here: it cannot occur inside a SCIP
+        identifier, so stripping it can never reach a different symbol. A
+        line-wrap hyphen is deliberately NOT — removing it can join two words
+        into a different identifier whose unique match would be a
+        confidently-wrong answer; `find_symbols`' flagged artifact tier is the
+        only place that repair is allowed (a visible hint, never a guess).
+        The exact name can never be shadowed: `has_symbol` runs first, and
+        the repaired spelling is `has_symbol`-checked too. The
+        three outcomes are encoded in the return:
 
         - `(symbol, [])`     — exact hit, or a name/location matching exactly
                                  one symbol;
@@ -1356,6 +1386,35 @@ class GraphStore:
             return self._resolve_location(loc.group(1), int(loc.group(2)))
         if self.has_symbol(query):
             return query, []
+        matches = self._name_matches(query)
+        distinct = _distinct_nodes(matches)
+        if len(distinct) == 1:
+            return distinct[0].symbol, []
+        if distinct:
+            return None, distinct
+        # Total miss: a name quoted from prose may carry the sentence period
+        # it was quoted with — a character no SCIP identifier can contain, so
+        # stripping it repairs the copy without ever reaching a different
+        # symbol. (A line-wrap hyphen is NOT repaired here: joining two words
+        # can produce a different identifier whose unique match would be a
+        # confidently-wrong answer — `find_symbols`' flagged artifact tier is
+        # the only consumer of that riskier repair.) Retry the repaired
+        # spelling — exact hit first, then the ladder — but only a repair
+        # that lands on exactly one symbol resolves; an ambiguous repair is
+        # discarded, never guessed among. Invisible when it fires (the caller
+        # just gets the symbol).
+        for stripped in sentence_period_candidates(query):
+            if self.has_symbol(stripped):
+                return stripped, []
+            stripped_distinct = _distinct_nodes(self._name_matches(stripped))
+            if len(stripped_distinct) == 1:
+                return stripped_distinct[0].symbol, []
+        return None, []
+
+    def _name_matches(self, query: str) -> list[Node]:
+        """The name ladder of `resolve` (plain substring, `::`->`#`, fuzzy,
+        exact-type narrowing) — one implementation so the main path and the
+        prose-artifact fallback run identical steps."""
         matches = self.find(query)
         if not matches and "::" in query:
             matches = self.find(query.replace("::", "#"))
@@ -1374,15 +1433,7 @@ class GraphStore:
             exact = [n for n in matches if n.symbol.endswith(query)]
             if exact:
                 matches = exact
-        distinct: list[Node] = []
-        seen: set[str] = set()
-        for n in matches:
-            if n.symbol not in seen:
-                seen.add(n.symbol)
-                distinct.append(n)
-        if len(distinct) == 1:
-            return distinct[0].symbol, []
-        return None, distinct
+        return matches
 
     def _resolve_location(self, file: str, line1: int) -> tuple[str | None, list[Node]]:
         """The `file:line` arm of `resolve`. `line1` is the 1-indexed line the
@@ -1852,7 +1903,14 @@ class GraphStore:
         inside the prefix too, i.e. library-internal fan-in — a different
         question). E.g. `target_paths=["spirv_cross/"],
         exclude_paths=["vendor/"]` = "call sites into `spirv_cross/` from my
-        code, not from other vendored users of it". `kind` must be `"fan_in"`
+        code, not from other vendored users of it". Each `target_paths` entry
+        is a module scope (like `api_surface`'s `module_prefix`): a directory
+        prefix, an exact file path, or a shell-style glob
+        (`filters.matches_module_scope`) — and a target matching zero indexed
+        definition files raises `ValueError` naming it
+        (`filters.module_scope_error`; `dependency_cost`'s headline "0 call
+        sites" would otherwise be indistinguishable from a typo'd target).
+        `kind` must be `"fan_in"`
         there — the mode *is* an incoming-call-site count, so `"fan_out"`/
         `"edges"` are a nonsensical combination and raise `ValueError` (same
         defensive-validation style as the unknown-kind one). An empty list is
@@ -1889,9 +1947,12 @@ class GraphStore:
         )
         path_clause = ""
         if target_paths:
+            scope_error = module_scope_error(self.definition_files(), target_paths)
+            if scope_error:
+                raise ValueError(scope_error)
 
             def _target_ok(path: str | None) -> bool:
-                return matches_path_prefix(path, include=target_paths, exclude=None)
+                return matches_module_scope(path, target_paths)
 
             self._con.create_function("cpg_target_ok", 1, _target_ok, deterministic=True)
             # Asymmetric mode: the callee side is pinned by cpg_target_ok, and
@@ -2384,11 +2445,18 @@ class GraphStore:
         `exclude_tests` drops a use when *either* side of the boundary is a
         test file — the use site, or the used symbol's own definition file
         (a test-defined helper inside the module is not production surface;
-        `hotspots`' either-endpoint shape). Prefix membership is
-        `matches_path_prefix` registered as `cpg_under_prefix` (the
-        `boundary_violations` pattern), i.e. a path-segment boundary: `"mod"`
-        matches `mod/util.cpp`, never `mods/util.cpp`. A symbol with no
-        recorded definition file belongs to no module and can never be listed.
+        `hotspots`' either-endpoint shape). Scope membership is
+        `matches_module_scope` registered as `cpg_in_scope` (the
+        `boundary_violations` pattern): `module_prefix` is a directory prefix
+        (`"mod"` matches `mod/util.cpp`, never `mods/util.cpp` — a
+        path-segment boundary), an exact definition-file path, or a
+        shell-style glob on definition-file paths (`filters.
+        matches_module_scope`), so a module spread across directories can be
+        scoped in one entry. A symbol with no recorded definition file
+        belongs to no module and can never be listed. A scope matching zero
+        indexed definition files is a caller error (`filters.
+        module_scope_error` — the include-side policy of the path-prefix
+        hygiene check), never a silent "empty surface".
 
         Aggregated entirely in SQL (`GROUP BY` + `ORDER BY` + slice) over the
         `edges`/`refs` indexes — the `hotspots` discipline: id-space until the
@@ -2399,7 +2467,9 @@ class GraphStore:
         `has_refs_data` whether reference uses were counted at all.
 
         Raises ValueError on an empty `module_prefix` (which would match
-        nothing, reading as "empty surface") or a negative `limit`.
+        nothing, reading as "empty surface"), a `module_prefix` matching zero
+        indexed definition files (named, per the shared zero-match policy), or
+        a negative `limit`.
         """
         prefix = module_prefix.replace("\\", "/").rstrip("/")
         if not prefix:
@@ -2408,13 +2478,16 @@ class GraphStore:
             )
         if limit < 0:
             raise ValueError(f"limit must be >= 0, got {limit}")
+        scope_error = module_scope_error(self.definition_files(), [module_prefix])
+        if scope_error:
+            raise ValueError(scope_error)
 
         has_refs = self.meta().get("has_references") == "true"
 
         def _under_prefix(path: str | None, prefix: str) -> bool:
-            return matches_path_prefix(path, include=[prefix], exclude=None)
+            return matches_module_scope(path, [prefix])
 
-        self._con.create_function("cpg_under_prefix", 2, _under_prefix, deterministic=True)
+        self._con.create_function("cpg_in_scope", 2, _under_prefix, deterministic=True)
         test_clause = ""
         if exclude_tests:
             self._con.create_function("cpg_is_test_file", 1, is_test_file, deterministic=True)
@@ -2440,8 +2513,8 @@ class GraphStore:
             JOIN symbols s ON s.id = uses.sym_id
             JOIN files f_own ON f_own.id = s.file_id
             LEFT JOIN files f_use ON f_use.id = uses.use_file_id
-            WHERE cpg_under_prefix(f_own.path, ?)
-              AND NOT cpg_under_prefix(f_use.path, ?)
+            WHERE cpg_in_scope(f_own.path, ?)
+              AND NOT cpg_in_scope(f_use.path, ?)
               {test_clause}
             GROUP BY uses.sym_id
             ORDER BY (external_calls + external_refs) DESC, s.symbol ASC

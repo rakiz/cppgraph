@@ -268,10 +268,12 @@ def _check_path_filters(
     store: GraphStore, args: argparse.Namespace, parser: argparse.ArgumentParser
 ) -> None:
     """The input-hygiene gate every path-filtered command runs right after the
-    store opens: an `--include-path`/`--exclude-path` prefix that matches zero
-    indexed definition files (or an include ∧ exclude composition that cannot
-    be satisfied) is an explicit error naming the prefix — never a silent
-    narrowing that reads as "no matches". The same shared helper
+    store opens: an `--include-path` prefix that matches zero indexed
+    definition files (or an include ∧ exclude composition that cannot be
+    satisfied) is an explicit error naming the prefix — never a silent
+    narrowing that reads as "no matches". An `--exclude-path` prefix matching
+    zero files is never an error: it excludes nothing, so the result set is
+    simply unfiltered by it. The same shared helper
     (`cppgraph.filters.path_prefix_error`) and the same message the MCP tools'
     `include_paths`/`exclude_paths` report, per the surface-parity rule."""
     include = getattr(args, "include_paths", None)
@@ -326,7 +328,9 @@ def _resolve_symbol(
     what: str = "symbol",
 ) -> str:
     """Accept a plain name, not just the exact SCIP symbol string, via the shared
-    `GraphStore.resolve` (same behaviour as the MCP tools). One match is used
+    `GraphStore.resolve` (same behaviour as the MCP tools — prose copy artifacts
+    like a trailing sentence period are repaired as a last-resort fallback). One
+    match is used
     directly (noted on a TTY), several are listed so the caller can pick the exact
     one, none is an error. Lets `callers foo` work like `find` + `callers`."""
     resolved, candidates = store.resolve(query)
@@ -1283,7 +1287,8 @@ def main(argv: list[str] | None = None) -> int:
         dest="target_paths",
         metavar="PREFIX",
         required=True,
-        help="count call sites whose callee is defined under PREFIX (repeatable)",
+        help="count call sites whose callee is defined under PREFIX (repeatable; "
+        "PREFIX is a directory prefix, an exact file path, or a shell-style glob)",
     )
     p_dep_cost.add_argument(
         "--limit",
@@ -1470,8 +1475,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     p_api.add_argument(
         "module_prefix",
-        help="directory prefix of the module (segment-boundary match, e.g. "
-        "src/pipeline covers src/pipeline/util.cpp, never src/pipeline_extra/)",
+        help="module scope: a directory prefix (segment-boundary match, e.g. "
+        "src/pipeline covers src/pipeline/util.cpp, never src/pipeline_extra/), "
+        "an exact file path, or a shell-style glob (e.g. 'src/**/change_*.cpp')",
     )
     p_api.add_argument("--limit", type=int, default=40, help="max rows to show (default: 40)")
     p_api.add_argument(
@@ -2380,14 +2386,20 @@ def main(argv: list[str] | None = None) -> int:
         # caps only the displayed breakdown (same shape as the MCP report).
         if args.json:
             return json_docs.run("dependency-cost", store, args)
-        ranked, total = store.hotspots(
-            limit=None,
-            kind="fan_in",
-            exclude_tests=args.exclude_tests,
-            include_paths=args.include_paths,
-            exclude_paths=args.exclude_paths,
-            target_paths=args.target_paths,
-        )
+        try:
+            ranked, total = store.hotspots(
+                limit=None,
+                kind="fan_in",
+                exclude_tests=args.exclude_tests,
+                include_paths=args.include_paths,
+                exclude_paths=args.exclude_paths,
+                target_paths=args.target_paths,
+            )
+        except ValueError as e:
+            # A --target-path scope matching zero indexed files (or the
+            # kind/target combination guard): the same explicit error the MCP
+            # report returns, naming the offending entry.
+            parser.error(str(e))
         shown = ranked[: args.limit]
         total_call_sites = sum(n for _, n in ranked)
         tests_note = " (excluding tests)" if args.exclude_tests else ""
@@ -2585,9 +2597,9 @@ def main(argv: list[str] | None = None) -> int:
             )
         if total == 0 and has_refs:
             print(
-                "  note: no external uses found — either the module is genuinely "
-                "self-contained or the prefix matches no indexed path; `cppgraph "
-                "stats` lists the indexed paths (the match is on a path-segment boundary)"
+                "  note: no external uses found — the module is genuinely "
+                "self-contained; `cppgraph stats` lists the indexed paths "
+                "(the match is on a path-segment boundary for a directory-prefix scope)"
             )
         if total > len(ranked):
             print(f"  ... and {total - len(ranked)} more (raise --limit to see them)")

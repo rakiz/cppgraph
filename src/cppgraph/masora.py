@@ -174,9 +174,9 @@ Rendering decisions (§6 latitude, pinned here):
   renders VERBATIM — the exact string masora shipped, cppgraph never
   hardcodes the wording (a tool rename is a masora-side change, never a
   cppgraph literal drift); `lineages_examined > 0` (a filtered no-match
-  against a non-empty base) → the cppgraph-derived staleness line
-  `<n> lineage(s) examined, none matched — the base may predate this
-  rebuild.`, derived from the counters, naming NO tools. Either line
+  against a non-empty base) → the cppgraph-derived zero-match line
+  `<n> lineage(s) examined, none matched — no claims are recorded on these
+  symbols.`, derived from the counters, naming NO tools. Either line
   renders at most once per response, whatever the number of batched
   symbols, and both are capability/absence notices, NEVER knowledge and
   NEVER code advice — no claim, no status, no context. The counters are
@@ -250,7 +250,7 @@ STALE_WARNING_LINE = "masora: [stale index — facts may be outdated]"
 # unlike masora's `presence_hint`, which renders verbatim and is never
 # hardcoded here. Names no tools: it is an absence notice, not a capability.
 _ZERO_MATCH_LINE = (
-    "masora: {n} lineage(s) examined, none matched — the base may predate this rebuild."
+    "masora: {n} lineage(s) examined, none matched — no claims are recorded on these symbols."
 )
 _TRUNCATION_LINE = "… +{n} more — masora search"
 

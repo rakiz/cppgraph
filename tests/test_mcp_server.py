@@ -420,6 +420,35 @@ def test_dependency_cost_report_requires_target_paths(tmp_path: Path) -> None:
         mcp_server.dependency_cost_report(st, target_paths=[])
 
 
+def test_dependency_cost_report_file_and_glob_targets(tmp_path: Path) -> None:
+    """Each `target_paths` entry is a module scope, not only a directory
+    prefix: an exact file counts that one file's callees, a glob spans
+    directories — the module scoping a target library spread across
+    directories needs."""
+    st = _dependency_cost_store(tmp_path, _dependency_cost_graph())
+    by_file = mcp_server.dependency_cost_report(st, target_paths=["spirv_cross/hot.cpp"])
+    assert by_file["total_call_sites"] == 2  # both lib_hot edges
+    assert by_file["distinct_target_symbols"] == 1
+    by_glob = mcp_server.dependency_cost_report(st, target_paths=["spirv_cross/*.cpp"])
+    assert by_glob["total_call_sites"] == 3  # hot + warm: `*` crosses nothing extra here
+    assert by_glob["distinct_target_symbols"] == 2
+
+
+def test_dependency_cost_report_never_matching_target_is_an_error_dict(tmp_path: Path) -> None:
+    """A target scope matching zero indexed files would headline "0 call
+    sites" — indistinguishable from a real zero-cost dependency. It is a
+    caller error instead: an error dict naming the offending entry (the
+    shared zero-match policy of the path-prefix filters)."""
+    st = _dependency_cost_store(tmp_path, _dependency_cost_graph())
+    result = mcp_server.dependency_cost_report(st, target_paths=["no_such_lib/"])
+    assert "error" in result
+    assert "'no_such_lib/'" in result["error"]
+    # A glob typo is named the same way.
+    result = mcp_server.dependency_cost_report(st, target_paths=["no_such_lib/**/*.cpp"])
+    assert "error" in result
+    assert "'no_such_lib/**/*.cpp'" in result["error"]
+
+
 def test_stats_summary_groups_per_file(store: GraphStore) -> None:
     # fixture: every definition and call site lives in foo.cpp — 3 symbols,
     # 2 call edges, no refs. Parity with the CLI via the same GraphStore.stats.
@@ -1037,6 +1066,39 @@ def test_api_surface_tool_registered_and_routes_through_call(tmp_path: Path) -> 
     result = tool(module_prefix="mod/")
     assert result["total"] == 1
     assert result["surface"][0]["name"] == "called_fn"
+
+
+def test_api_surface_report_file_scope(module_store: GraphStore) -> None:
+    """`module_prefix` as an exact file path: only that file's definitions are
+    the module — `mod/api.cpp` keeps `both_fn`, drops `called_fn` (defined in
+    `mod/util.cpp`)."""
+    result = mcp_server.api_surface_report(module_store, "mod/api.cpp")
+    assert result["total"] == 1
+    assert [item["name"] for item in result["surface"]] == ["both_fn"]
+
+
+def test_api_surface_report_glob_scope(module_store: GraphStore) -> None:
+    """`module_prefix` as a shell-style glob: one entry spanning the files a
+    directory prefix would list — `*` crossing `/` includes subdirectory
+    files, so a module spread across directories scopes in one entry."""
+    result = mcp_server.api_surface_report(module_store, "mod/*.cpp")
+    assert result["total"] == 2
+    assert [item["name"] for item in result["surface"]] == ["both_fn", "called_fn"]
+
+
+def test_api_surface_report_never_matching_scope_names_the_entry(
+    module_store: GraphStore,
+) -> None:
+    """A scope matching zero indexed files is a caller error — an error dict
+    NAMING the offending entry (the shared zero-match policy), never a silent
+    `total: 0` that a typo'd scope would read as 'self-contained module'."""
+    result = mcp_server.api_surface_report(module_store, "mod/typo")
+    assert "error" in result
+    assert "'mod/typo'" in result["error"]
+    # A glob typo is named the same way, through the same path.
+    result = mcp_server.api_surface_report(module_store, "no_such_mod/**/*.cpp")
+    assert "error" in result
+    assert "'no_such_mod/**/*.cpp'" in result["error"]
 
 
 # --- outline / class_members -------------------------------------------------
@@ -2682,6 +2744,32 @@ def test_find_hide_trivial_drops_generated(tmp_path: Path) -> None:
     assert filtered["results"][0]["symbol"] == real
 
 
+def test_find_ranks_project_native_before_out_of_project(tmp_path: Path) -> None:
+    """On a large index a broad query matches hundreds of external-package
+    symbols (generated IDL code), burying the project-native class they share
+    a name with. Within `find`'s single relevance tier, `is_out_of_project`
+    False sorts before True (stable — each tier keeps its store order), and
+    the limit/relaxation behavior is untouched."""
+    native = "cxx . . $ mongo/DocumentSourceChangeStream#buildPipeline(a1)."
+    external = "cxx . . $ mongo/idl/DocumentSourceChangeStream#buildPipeline(a2)."
+    graph = Graph()
+    # The external hit is indexed first, so only the ranking — not store
+    # order — can put the native one above it.
+    graph.nodes[external] = Node(
+        symbol=external, file="idl_gen.cpp", line=2, is_out_of_project=True
+    )
+    graph.nodes[native] = Node(symbol=native, file="cs.cpp", line=1, is_out_of_project=False)
+    path = tmp_path / "rank.db"
+    write_sqlite(graph, path, meta={"has_external_symbols": "true"})
+    st = GraphStore(path)
+
+    r = mcp_server.find_symbols(st, "buildPipeline")
+    assert r["total"] == 2
+    assert [e["symbol"] for e in r["results"]] == [native, external]
+    assert r["results"][0]["is_out_of_project"] is False
+    assert r["results"][1]["is_out_of_project"] is True
+
+
 def test_find_relaxes_qualified_zero_hit(tmp_path: Path) -> None:
     # A free function; a guess qualifying it under a class finds nothing exactly,
     # so find retries on the leaf name and flags the result relaxed.
@@ -2734,6 +2822,48 @@ def test_find_colon_relaxation_falls_through_when_qualified_misses(tmp_path: Pat
     assert r["relaxed"] is True
     assert r["relaxed_query"] == "buildPipeline"  # the leaf kind, not the colon kind
     assert "loosened" in r["note"]
+
+
+def test_find_relaxes_trailing_sentence_period(tmp_path: Path) -> None:
+    # A name quoted in prose carries the sentence period; no exact, colon or
+    # fuzzy match can contain it, so find repairs the name (strips the
+    # trailing `.`) and retries — flagged relaxed like the other tiers.
+    sym = "cxx . . $ mongo/DocumentSourceChangeStream#_determineChangeStreamReaderVersion(a1)."
+    graph = Graph()
+    graph.nodes[sym] = Node(symbol=sym, file="cs.cpp", line=1)
+    path = tmp_path / "artifact.db"
+    write_sqlite(graph, path)
+
+    r = mcp_server.find_symbols(
+        GraphStore(path),
+        "DocumentSourceChangeStream#_determineChangeStreamReaderVersion.",
+    )
+    assert r["total"] == 1
+    assert r["results"][0]["symbol"] == sym
+    assert r["relaxed"] is True
+    assert r["relaxed_query"] == ("DocumentSourceChangeStream#_determineChangeStreamReaderVersion")
+    assert "period" in r["note"] or "artifact" in r["note"]
+
+
+def test_find_relaxes_wrapped_hyphenation_as_a_visible_hint(tmp_path: Path) -> None:
+    # find's artifact tier is the ONLY consumer of the hyphen-join repair: its
+    # result is a flagged list the caller can reject (a hint), never a
+    # silently returned resolution — `GraphStore.resolve` must stay not-found
+    # for the same query (`test_store.py::test_resolve_never_joins_a_wrapped_hyphen`).
+    sym = "cxx . . $ mongo/DocumentSourceChangeStream#_determineChangeStreamReaderVersion(a1)."
+    graph = Graph()
+    graph.nodes[sym] = Node(symbol=sym, file="cs.cpp", line=1)
+    path = tmp_path / "artifact-hyphen.db"
+    write_sqlite(graph, path)
+
+    r = mcp_server.find_symbols(
+        GraphStore(path),
+        "DocumentSourceChangeStream#_determine-ChangeStreamReaderVersion",
+    )
+    assert r["total"] == 1
+    assert r["results"][0]["symbol"] == sym
+    assert r["relaxed"] is True
+    assert r["relaxed_query"] == ("DocumentSourceChangeStream#_determineChangeStreamReaderVersion")
 
 
 def test_find_no_relax_when_exact_hits(store: GraphStore) -> None:
@@ -3057,27 +3187,35 @@ def test_unknown_parameter_wins_over_missing_required_argument(
         asyncio.run(strict_server.call_tool("find", {"_typo_param_": 1}))
 
 
-# --- input hygiene: a path/filter prefix matching nothing is an explicit error ---
+# --- input hygiene: an unmatched INCLUDE path prefix is an explicit error ---
 #
-# A typo'd include_paths/exclude_paths prefix used to look identical to "no
-# matches" — a silent narrowing. It must name the unmatched prefix instead.
+# A typo'd include_paths prefix used to look identical to "no matches" — a
+# silent narrowing. It must name the unmatched prefix instead. An
+# exclude_paths prefix matching zero files is inert (it excludes nothing), so
+# it is never an error.
 
 
 @pytest.mark.parametrize(
     ("tool_args", "kwarg", "prefix"),
-    [
-        ({"symbol": CALLER}, "include_paths", "no/such/prefix"),
-        ({"symbol": CALLER}, "exclude_paths", "no/such/prefix"),
-    ],
+    [({"symbol": CALLER}, "include_paths", "no/such/prefix")],
 )
 def test_mcp_path_prefix_typo_is_an_explicit_error(
     strict_server: Any, tool_args: dict, kwarg: str, prefix: str
 ) -> None:
-    """An include OR exclude prefix matching zero indexed files is an explicit
-    error naming the prefix — on the MCP dict, not a silently narrowed result."""
+    """An include prefix matching zero indexed files is an explicit error
+    naming the prefix — on the MCP dict, not a silently narrowed result."""
     result = _tool(strict_server, "who_calls")(**tool_args, **{kwarg: [prefix]})
     assert "error" in result
     assert "no/such/prefix" in result["error"]
+
+
+def test_mcp_exclude_prefix_typo_is_inert(strict_server: Any) -> None:
+    """An exclude prefix matching zero indexed files excludes nothing — a
+    normal (unfiltered) result, never an error: the result set is simply
+    unfiltered by it."""
+    result = _tool(strict_server, "who_calls")(symbol=CALLER, exclude_paths=["no/such/prefix"])
+    assert "error" not in result
+    assert result["total"] == 1
 
 
 def test_mcp_typo_surfaces_through_the_real_dispatch(strict_server: Any) -> None:

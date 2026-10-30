@@ -2258,6 +2258,61 @@ def test_dependency_cost_requires_target_path(
     assert "usage:" in capsys.readouterr().err
 
 
+def test_dependency_cost_file_and_glob_targets(
+    dependency_cost_graph: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`--target-path` entries are module scopes, not only directory prefixes:
+    an exact file counts that one file's callees; a glob spans files (and, `*`
+    crossing `/`, directories) — the scoping a feature/library spread across
+    directories needs."""
+    exit_code = main(
+        [
+            "dependency-cost",
+            "--graph",
+            str(dependency_cost_graph),
+            "--target-path",
+            "spirv_cross/hot.cpp",
+        ]
+    )
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "2 call site(s) into spirv_cross/hot.cpp from 1 target symbol(s)" in out
+
+    exit_code = main(
+        [
+            "dependency-cost",
+            "--graph",
+            str(dependency_cost_graph),
+            "--target-path",
+            "spirv_cross/*.cpp",
+        ]
+    )
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "3 call site(s) into spirv_cross/*.cpp from 2 target symbol(s)" in out
+
+
+def test_dependency_cost_never_matching_target_is_an_error(
+    dependency_cost_graph: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A target scope matching zero indexed files is a caller error (exit 2)
+    naming the offending entry — never a headline "0 call site(s)" that a
+    typo'd target would read as (the shared zero-match policy)."""
+    with pytest.raises(SystemExit) as excinfo:
+        main(
+            [
+                "dependency-cost",
+                "--graph",
+                str(dependency_cost_graph),
+                "--target-path",
+                "no_such_lib/",
+            ]
+        )
+    assert excinfo.value.code == 2
+    err = capsys.readouterr().err
+    assert "no file matches module scope entry 'no_such_lib/'" in err
+
+
 @pytest.fixture
 def stats_graph(tmp_path: Path) -> Path:
     graph = Graph()
@@ -2746,6 +2801,38 @@ def test_api_surface_empty_prefix_is_rejected(module_graph_path: Path) -> None:
 def test_api_surface_requires_a_prefix(module_graph_path: Path) -> None:
     with pytest.raises(SystemExit):
         main(["api-surface", "--graph", str(module_graph_path)])
+
+
+def test_api_surface_file_and_glob_scope(
+    module_graph_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`module_prefix` accepts an exact file path and a shell-style glob, not
+    only a directory prefix — the module scoping a feature spread across
+    directories needs (one glob entry, no grep fallback)."""
+    exit_code = main(["api-surface", "--graph", str(module_graph_path), "mod/api.cpp"])
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "top 1 of 1 externally-used symbol(s) under mod/api.cpp" in out
+    assert "both_fn" in out
+    assert "called_fn" not in out  # defined in mod/util.cpp, out of this scope
+
+    exit_code = main(["api-surface", "--graph", str(module_graph_path), "mod/*.cpp"])
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "top 2 of 2 externally-used symbol(s) under mod/*.cpp" in out
+    assert "both_fn" in out and "called_fn" in out
+
+
+def test_api_surface_never_matching_scope_is_an_error(
+    module_graph_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A scope matching zero indexed files is a caller error (exit 2) naming
+    the offending entry — never a silent `total: 0` that a typo'd scope would
+    read as 'self-contained module' (the shared zero-match policy)."""
+    with pytest.raises(SystemExit) as excinfo:
+        main(["api-surface", "--graph", str(module_graph_path), "mod/typo"])
+    assert excinfo.value.code == 2
+    assert "no file matches module scope entry 'mod/typo'" in capsys.readouterr().err
 
 
 # --- outline / class-members -------------------------------------------------
@@ -4037,9 +4124,12 @@ def test_unknown_command_is_rejected_not_aliased() -> None:
     [
         ("line-span", "line_span", []),
         ("no-incoming-calls", "no_incoming_calls", []),
-        ("api-surface", "api_surface", ["mongo"]),
+        # api-surface/dependency-cost scope indexed DEFINITION files: the
+        # two-dir graph (real definition files), not graph_path (whose symbols
+        # carry no definition file, so any scope matches nothing there).
+        ("api-surface", "api_surface", ["src/mongo/foo.cpp"]),
         ("reachable-from", "reachable_from", ["makeResumeToken"]),
-        ("dependency-cost", "dependency_cost", ["--target-path", "mongo"]),
+        ("dependency-cost", "dependency_cost", ["--target-path", "src/mongo/"]),
         ("boundary-violations", "boundary_violations", ["--rule", "common/:platform/"]),
         ("strongly-connected-components", "strongly_connected_components", []),
     ],
@@ -4049,13 +4139,17 @@ def test_legacy_spelling_dispatches_like_the_canonical_command(
     legacy: str,
     extra_args: list[str],
     graph_path: Path,
+    two_dir_graph: Path,
 ) -> None:
     """A legacy spelling is rewritten to the canonical name BEFORE parsing, so
     the dispatcher only ever sees canonical names: invoking via the legacy form
     returns the same exit code as the canonical name (and neither is an
     argparse rejection, which would raise SystemExit)."""
-    legacy_code = main([legacy, "--graph", str(graph_path), *extra_args])
-    canonical_code = main([canonical, "--graph", str(graph_path), *extra_args])
+    # api-surface/dependency-cost scope indexed definition files: use the
+    # two-dir graph (see the param comment); everything else uses graph_path.
+    path = two_dir_graph if canonical in ("api-surface", "dependency-cost") else graph_path
+    legacy_code = main([legacy, "--graph", str(path), *extra_args])
+    canonical_code = main([canonical, "--graph", str(path), *extra_args])
     assert legacy_code == canonical_code
 
 
@@ -4116,12 +4210,14 @@ def test_ambiguous_candidates_show_derived_names_when_display_name_empty(
     assert "(?" not in err  # ...never the bare '?' placeholder
 
 
-# --- input hygiene: a path/filter prefix matching nothing is an explicit error ---
+# --- input hygiene: an unmatched INCLUDE path prefix is an explicit error ---
 #
 # Mirrors the MCP tests in test_mcp_server.py (same shared helper
-# `cppgraph.filters.path_prefix_error`, same message): a --include-path/
-# --exclude-path prefix that matches zero indexed files must error naming the
-# prefix, never silently narrow to "no matches".
+# `cppgraph.filters.path_prefix_error`, same message): a --include-path prefix
+# that matches zero indexed files must error naming the prefix, never silently
+# narrow to "no matches". An --exclude-path prefix matching zero files is
+# inert by the same token — it excludes nothing, so the result is simply
+# unfiltered by it, never an error.
 
 _CLI_FOO = "cxx . . $ mongo/Foo#makeResumeToken(a1)."
 _CLI_CALLER = "cxx . . $ mongo/Foo#caller(a2)."
@@ -4184,18 +4280,14 @@ def test_cli_include_path_typo_is_an_explicit_error(
 
 
 @pytest.mark.parametrize("argv", _CLI_FILTER_COMMANDS[:3])
-def test_cli_exclude_path_typo_is_an_explicit_error(
+def test_cli_exclude_path_typo_is_inert(
     two_dir_graph: Path, capsys: pytest.CaptureFixture[str], argv: list[str]
 ) -> None:
-    """An --exclude-path typo alone (it matches no indexed file, so it can only
-    be a mistake) errors the same way — representative commands; the MCP side
-    pins the full list."""
-    with pytest.raises(SystemExit) as excinfo:
-        main(
-            [argv[0], "--graph", str(two_dir_graph), *argv[1:], "--exclude-path", "no/such/prefix"]
-        )
-    assert excinfo.value.code == 2
-    assert "no file matches path prefix 'no/such/prefix'" in capsys.readouterr().err
+    """An --exclude-path typo alone matches no indexed file, so it excludes
+    nothing — the command runs normally on the unfiltered result (exit 0, no
+    error). Representative commands; the MCP side pins the same behavior."""
+    main([argv[0], "--graph", str(two_dir_graph), *argv[1:], "--exclude-path", "no/such/prefix"])
+    assert capsys.readouterr().err == ""
 
 
 def test_cli_include_exclude_composition_matching_nothing_is_an_error(

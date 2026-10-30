@@ -371,7 +371,7 @@ def test_zero_facts_with_examined_lineages_render_the_derived_staleness_line(
         json.dumps(doc_with(lineages_examined=3, lineages_matched=0)),
     )
     assert masora.query_lines({}, FOO, env=dict(os.environ)) == [
-        "masora: 3 lineage(s) examined, none matched — the base may predate this rebuild."
+        "masora: 3 lineage(s) examined, none matched — no claims are recorded on these symbols."
     ]
 
 
@@ -397,7 +397,7 @@ def test_derived_line_wins_when_the_hint_drifts_non_null(
         json.dumps(doc_with(presence_hint=HINT, lineages_examined=2, lineages_matched=0)),
     )
     assert masora.query_lines({}, FOO, env=dict(os.environ)) == [
-        "masora: 2 lineage(s) examined, none matched — the base may predate this rebuild."
+        "masora: 2 lineage(s) examined, none matched — no claims are recorded on these symbols."
     ]
 
 

@@ -928,6 +928,36 @@ def test_api_surface_rejects_bad_input(tmp_path: Path) -> None:
         store.api_surface("mod/", limit=-1)
 
 
+def test_api_surface_file_and_glob_scope(tmp_path: Path) -> None:
+    """`module_prefix` is a module scope, not only a directory prefix: an
+    exact file path scopes to that one file's definitions; a glob entry spans
+    files (and, `*` crossing `/`, directories) — a module spread across
+    directories scopes in one entry."""
+    store = _store(tmp_path, _module_graph())
+    ranked, total, _ = store.api_surface("mod/api.cpp")
+    assert [r["symbol"] for r in ranked] == ["both_fn"]
+    assert total == 1
+    ranked, total, _ = store.api_surface("mod/*.cpp")
+    # `refd_type` lives in mod/types.h — outside a *.cpp scope.
+    assert [r["symbol"] for r in ranked] == ["both_fn", "called_fn"]
+    assert total == 2
+
+
+def test_api_surface_never_matching_scope_raises_naming_it(tmp_path: Path) -> None:
+    """A scope matching zero indexed definition files is a caller error —
+    raised, naming the offending entry (`filters.module_scope_error`, the
+    include-side policy of the path-prefix hygiene check) — never a silent
+    `([], 0)` that a typo'd scope would read as 'empty surface'."""
+    store = _store(tmp_path, _module_graph())
+    with pytest.raises(ValueError) as excinfo:
+        store.api_surface("mod/typo")
+    assert "'mod/typo'" in str(excinfo.value)
+    # A glob typo is named the same way.
+    with pytest.raises(ValueError) as excinfo:
+        store.api_surface("no_such_mod/**/*.cpp")
+    assert "'no_such_mod/**/*.cpp'" in str(excinfo.value)
+
+
 # --- outline / class_members -------------------------------------------------
 
 FOO = "cxx . . $ mongo/Foo#"
@@ -3174,6 +3204,99 @@ def test_resolve_falls_back_to_fuzzy(tmp_path: Path) -> None:
     resolved, candidates = _multi(tmp_path).resolve("makeresumetoken")
     assert resolved == METHOD
     assert candidates == []
+
+
+# --- resolve: prose/copy artifacts (trailing period ONLY — see the hyphen
+# --- negative control below) --------------------------------------------------
+
+_CS_SYM = "cxx . . $ mongo/DocumentSourceChangeStream#_determineChangeStreamReaderVersion(a1)."
+
+
+def test_resolve_strips_trailing_sentence_period(tmp_path: Path) -> None:
+    """A name copied from prose — `class_members` output quoted in a sentence —
+    carries the sentence period. The exact name fails (a SCIP method symbol is
+    `...Version(a1).`, which does not contain `...Version.`), plain and fuzzy
+    `find` fail with it, so the artifact-stripped form is retried last — and
+    resolves because it matches exactly one symbol. Only the period is
+    repaired: a `.` cannot occur inside a SCIP identifier, so stripping it can
+    never reach a different symbol."""
+    graph = Graph()
+    graph.add_node(_CS_SYM)
+    store = _store(tmp_path, graph)
+    resolved, candidates = store.resolve(
+        "DocumentSourceChangeStream#_determineChangeStreamReaderVersion."
+    )
+    assert resolved == _CS_SYM
+    assert candidates == []
+
+
+def test_resolve_never_joins_a_wrapped_hyphen(tmp_path: Path) -> None:
+    """Negative control: a hyphen-join is NOT a copy repair — removing the `-`
+    joins two words into a different identifier, and with only `foobar` in the
+    graph the joined query `Widget#foo-bar` would uniquely substring-match it,
+    so "exactly one candidate" protects nothing. `resolve` returns one symbol
+    silently, so it stays not-found; the hyphen repair is allowed only in
+    `find`'s artifact tier, where the result is a flagged list (a visible
+    hint), never a silently returned resolution."""
+    graph = Graph()
+    graph.add_node("cxx . . $ app/Widget#foobar(f1).")
+    store = _store(tmp_path, graph)
+    assert store.resolve("Widget#foo-bar") == (None, [])
+
+
+def test_resolve_repaired_spelling_prefers_the_exact_hit(tmp_path: Path) -> None:
+    """Exact precedence for repaired spellings too: when the stripped form is
+    itself a stored SCIP string, `has_symbol` returns it directly instead of
+    running the substring ladder — which would match both the exact symbol and
+    the `(...)`-descriptor method sharing the prefix, and wrongly report
+    ambiguity."""
+    exact = "cxx . . $ mongo/pkg#member"  # synthetic: equals the stripped form
+    method = "cxx . . $ mongo/pkg#member(x1)."
+    graph = Graph()
+    graph.add_node(exact)
+    graph.add_node(method)
+    store = _store(tmp_path, graph)
+    assert store.resolve("cxx . . $ mongo/pkg#member.") == (exact, [])
+
+
+def test_resolve_artifact_strip_stays_not_found_when_stripped_is_ambiguous(
+    tmp_path: Path,
+) -> None:
+    """Fail-closed: `Foo.` strips to `Foo`, which matches METHOD and CALLER —
+    several candidates, so none is guessed and the normal not-found outcome
+    stands (no candidate list, exactly as if the artifact didn't exist)."""
+    resolved, candidates = _multi(tmp_path).resolve("Foo.")
+    assert resolved is None
+    assert candidates == []
+
+
+def test_resolve_artifact_strip_works_on_a_bare_name_too(tmp_path: Path) -> None:
+    """The artifact fallback is not qualified-name-specific: a bare name quoted
+    with its sentence period resolves the same way."""
+    resolved, candidates = _multi(tmp_path).resolve("makeResumeToken.")
+    assert resolved == METHOD
+    assert candidates == []
+
+
+def test_resolve_exact_symbol_ending_in_dot_is_never_stripped(tmp_path: Path) -> None:
+    """Exact-name precedence: `has_symbol` runs before any artifact stripping,
+    so a genuine symbol whose SCIP string ends in `.` (every method/module
+    descriptor does) is returned as-is even though its stripped form is itself
+    ambiguous. Shadowing is structurally impossible: `.` is SCIP's descriptor
+    terminator and separator, so it cannot occur inside an identifier — an
+    exact string ending in `.` is always a real symbol, checked first."""
+    module = "cxx . . $ mongo/pkg."
+    member = "cxx . . $ mongo/pkg#member(m1)."
+    graph = Graph()
+    graph.add_node(module)
+    graph.add_node(member)
+    store = _store(tmp_path, graph)
+    assert store.resolve(module) == (module, [])
+    # The dot-stripped form alone would be ambiguous (both symbols contain it) —
+    # the exact hit above took precedence over any stripping.
+    resolved, candidates = store.resolve("cxx . . $ mongo/pkg")
+    assert resolved is None
+    assert {n.symbol for n in candidates} == {module, member}
 
 
 # --- resolve: `file:line` input form (definition-site resolution) ------------

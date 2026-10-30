@@ -12,6 +12,8 @@ from cppgraph.filters import (
     filter_by_path,
     filter_node_pairs,
     matches_path_prefix,
+    prose_artifact_candidates,
+    sentence_period_candidates,
 )
 from cppgraph.model import Graph, Node
 from cppgraph.store import GraphStore, write_sqlite
@@ -201,34 +203,59 @@ def test_unmatched_path_prefixes_empty_lists_are_no_constraint() -> None:
         assert unmatched_path_prefixes(files, include, exclude) == ([], False)
 
 
-def test_unmatched_path_prefixes_exclude_typo_reported() -> None:
+def test_unmatched_path_prefixes_exclude_typo_is_inert() -> None:
+    """An exclude prefix matching zero files excludes nothing — the result set
+    is simply unfiltered by it, never an error (unlike an include typo, which
+    silently empties the result and must be named)."""
     from cppgraph.filters import unmatched_path_prefixes
 
     files = {"src/foo/bar.cpp"}
-    assert unmatched_path_prefixes(files, None, ["no/such"]) == (["no/such"], False)
+    assert unmatched_path_prefixes(files, None, ["no/such"]) == ([], False)
+    assert unmatched_path_prefixes(files, ["src/foo"], ["no/such"]) == ([], False)
 
 
 def test_unmatched_path_prefixes_eligible_empty_composition() -> None:
-    """Every prefix individually matches something, yet the combined filter
-    (include ∧ ¬exclude) selects zero files: eligible_empty=True — the message
-    must blame the composition, not a single typo."""
+    """Every include prefix individually matches something, yet the combined
+    filter (include ∧ ¬exclude) selects zero files: eligible_empty=True — the
+    message must blame the composition, not a single typo. Only computed when
+    an include filter is given: excludes alone never flag it (see the
+    exclude-only pins below)."""
     from cppgraph.filters import unmatched_path_prefixes
 
     files = {"src/foo/bar.cpp"}
     assert unmatched_path_prefixes(files, ["src/foo"], ["src/foo"]) == ([], True)
-    # The mirror: exclude-only that removes every file.
-    assert unmatched_path_prefixes(files, None, ["src/foo"]) == ([], True)
     # A composition that IS satisfiable stays False.
     both = {"src/a/a.cpp", "src/b/b.cpp"}
     assert unmatched_path_prefixes(both, ["src/a"], ["src/b"]) == ([], False)
 
 
-def test_unmatched_path_prefixes_reports_both_sides_in_given_order() -> None:
+def test_path_prefix_error_exclude_only_never_errors() -> None:
+    """An EXCLUDE-only filter is never an error, whatever it does to the
+    result: matching zero files it filters nothing (inert), and removing every
+    file it legitimately narrows — silence in both cases, never a message
+    blaming a filter the user's includes didn't break."""
+    from cppgraph.filters import path_prefix_error, unmatched_path_prefixes
+
+    # An inert exclude on a graph with no indexed definition files at all.
+    assert unmatched_path_prefixes(set(), None, ["no/such"]) == ([], False)
+    assert path_prefix_error(set(), None, ["no/such"]) is None
+    # An exclude that removes every indexed file: a normal empty result.
+    files = {"src/foo/a.cpp"}
+    assert unmatched_path_prefixes(files, None, ["src"]) == ([], False)
+    assert path_prefix_error(files, None, ["src"]) is None
+
+
+def test_unmatched_path_prefixes_reports_unmatched_includes_in_given_order() -> None:
+    """Only INCLUDE prefixes are ever reported unmatched: an exclude prefix
+    that matches nothing is inert, so it must not join the error list (and an
+    include typo must be named even when an exclude typo sits alongside it —
+    never blame the includes' side for the excludes' non-match, nor vice
+    versa)."""
     from cppgraph.filters import unmatched_path_prefixes
 
     files = {"src/a/a.cpp"}
     unmatched, eligible_empty = unmatched_path_prefixes(files, ["src/a", "src/x"], ["src/y"])
-    assert unmatched == ["src/x", "src/y"]
+    assert unmatched == ["src/x"]
     assert eligible_empty is False
 
 
@@ -243,9 +270,11 @@ def test_unmatched_path_prefixes_empty_file_set_matches_nothing() -> None:
 
 
 def test_path_prefix_error_messages_name_the_prefix() -> None:
-    """The shared message both surfaces report: names the offending prefix
-    (mirroring the init wizard's 'matches nothing — try another' wording) or
-    the unsatisfiable composition; satisfiable filters give None."""
+    """The shared message both surfaces report: names the offending INCLUDE
+    prefix (mirroring the init wizard's 'matches nothing — try another'
+    wording) or the unsatisfiable composition; satisfiable filters give None.
+    An EXCLUDE prefix matching nothing is never an error — it filters
+    nothing, so the result set is simply unfiltered by it."""
     from cppgraph.filters import path_prefix_error
 
     files = {"src/foo/bar.cpp"}
@@ -254,14 +283,148 @@ def test_path_prefix_error_messages_name_the_prefix() -> None:
         "(segment-boundary match on definition-file paths; `stats` lists the "
         "indexed files)"
     )
+    # The exclude typo sits alongside, but the error names only the include —
+    # the excludes were not the problem here.
     msg = path_prefix_error(files, ["src/x"], ["src/y"])
     assert "no file matches path prefix" in msg
-    assert "'src/x'" in msg and "'src/y'" in msg
+    assert "'src/x'" in msg
+    assert "'src/y'" not in msg
     assert path_prefix_error(files, ["src/foo"], ["src/foo"]) == (
         "path filters match no file: include 'src/foo' minus exclude 'src/foo'"
     )
     assert path_prefix_error(files, ["src/foo"], None) is None
+    # Exclude-side non-matches: inert on their own and next to a valid include.
+    assert path_prefix_error(files, None, ["no/such"]) is None
+    assert path_prefix_error(files, ["src/foo"], ["no/such"]) is None
     assert path_prefix_error(files, None, None) is None
+
+
+# --- module scoping: dir prefix / exact file / glob (api_surface, dependency_cost) ---
+
+
+def test_module_scope_directory_prefix_unchanged() -> None:
+    """A directory-prefix entry keeps the segment-boundary rule byte-for-byte:
+    matches the directory's files (at any depth) and itself, never a sibling
+    that merely shares characters — the existing `matches_path_prefix`
+    behavior, now via `matches_module_scope`."""
+    from cppgraph.filters import matches_module_scope
+
+    entries = ["src/pipeline"]
+    assert matches_module_scope("src/pipeline/util.cpp", entries)
+    assert matches_module_scope("src/pipeline/deep/x.cpp", entries)
+    assert matches_module_scope("src/pipeline", entries)
+    assert not matches_module_scope("src/pipeline_extra/x.cpp", entries)
+    assert not matches_module_scope("src/other/x.cpp", entries)
+    # Backslash and trailing-slash spellings normalize into the same rule.
+    assert matches_module_scope("src/pipeline/util.cpp", ["src\\pipeline/"])
+
+
+def test_module_scope_file_entry_matches_that_exact_file() -> None:
+    """An exact file path scopes to that one file: it matches itself and
+    nothing else — no directory-prefix widening, no sibling."""
+    from cppgraph.filters import matches_module_scope
+
+    assert matches_module_scope("mod/api.cpp", ["mod/api.cpp"])
+    assert not matches_module_scope("mod/api2.cpp", ["mod/api.cpp"])
+    assert not matches_module_scope("mod/api.cpp.bak", ["mod/api.cpp"])
+    # No recorded definition site is in no module, whatever the scope.
+    assert not matches_module_scope(None, ["mod/api.cpp", "mod/"])
+
+
+def test_module_scope_glob_entry_is_deterministic_fnmatch() -> None:
+    """A glob entry matches fnmatch-style on the whole relative path,
+    case-sensitively (`fnmatchcase`, never the platform-cased `fnmatch`):
+    the same pattern gives the same answer on every machine. `*` crosses `/`
+    (fnmatch has no gitignore semantics), so one pattern spans directories —
+    the point of the feature."""
+    from cppgraph.filters import matches_module_scope
+
+    assert matches_module_scope("mod/util.cpp", ["mod/*.cpp"])
+    # `*` crossing `/`: a feature spread across subdirectories scopes in one entry.
+    assert matches_module_scope("mod/deep/nested/x.cpp", ["mod/*.cpp"])
+    assert matches_module_scope("src/a/change_stream.cpp", ["src/**/change_*.cpp"])
+    assert matches_module_scope("src/b/pipeline/change_stream.cpp", ["src/**/change_*.cpp"])
+    assert not matches_module_scope("src/a/unrelated.cpp", ["src/**/change_*.cpp"])
+    # Case-sensitive on every platform.
+    assert not matches_module_scope("MOD/util.cpp", ["mod/*.cpp"])
+
+
+def test_module_scope_literal_path_with_glob_chars_matches_itself() -> None:
+    """A real file whose NAME contains a glob metacharacter must match its own
+    exact-path entry: `fnmatchcase("foo[1].cpp", "foo[1].cpp")` is False (the
+    entry's `[1]` reads as a character class matching `foo1.cpp`), so literal
+    equality is checked first — fail-closed would otherwise make such a path
+    unreachable by the very entry that names it. The glob reading still works
+    alongside (it cannot over-match: equality is one exact path)."""
+    from cppgraph.filters import matches_module_scope, unmatched_module_scope
+
+    entry = "src/gen/foo[1].cpp"
+    assert matches_module_scope("src/gen/foo[1].cpp", [entry])  # literal self-match
+    assert matches_module_scope("src/gen/foo1.cpp", [entry])  # the char-class reading
+    assert not matches_module_scope("src/gen/foo2.cpp", [entry])
+    assert not matches_module_scope("src/gen/fooA.cpp", [entry])  # [1] is not [A-Za-z]
+    # The zero-match check agrees: the entry matched, so it is not reported.
+    assert unmatched_module_scope({"src/gen/foo[1].cpp"}, [entry]) == []
+
+
+def test_module_scope_mixed_dir_file_glob_entries() -> None:
+    """ANY-of semantics across entry kinds: a scope mixing a directory
+    prefix, an exact file, and a glob matches the union — the shape a feature
+    spanning directories needs."""
+    from cppgraph.filters import matches_module_scope
+
+    entries = ["mod/", "src/single.cpp", "lib/**/change_*.cpp"]
+    assert matches_module_scope("mod/util.cpp", entries)  # the dir prefix
+    assert matches_module_scope("src/single.cpp", entries)  # the exact file
+    assert matches_module_scope("lib/a/change_stream.cpp", entries)  # the glob
+    assert matches_module_scope("lib/a/b/change_stream.cpp", entries)  # glob crosses /
+    assert not matches_module_scope("lib/a/other.cpp", entries)
+    assert not matches_module_scope("app/main.cpp", entries)
+
+
+def test_unmatched_module_scope_names_the_entry() -> None:
+    """The zero-match policy of the path-prefix hygiene check, applied to
+    module scopes: an entry matching zero indexed files is reported — named,
+    deduplicated, in given order — never a silent 'no matches'. Every entry
+    kind participates: a typo'd glob is exactly as dead as a typo'd prefix."""
+    from cppgraph.filters import unmatched_module_scope
+
+    files = {"mod/util.cpp", "app/main.cpp"}
+    # A never-matching glob and a never-matching file path, named in order.
+    assert unmatched_module_scope(files, ["no/such/*.cpp", "app/main.cpp", "no/such.cpp"]) == [
+        "no/such/*.cpp",
+        "no/such.cpp",
+    ]
+    # Deduplication.
+    assert unmatched_module_scope(files, ["no/such/", "no/such/"]) == ["no/such/"]
+    # Every entry matches something: no error.
+    assert unmatched_module_scope(files, ["mod/", "app/main.cpp", "mod/*.cpp"]) == []
+    # Empty/None scope: no constraint, never an error.
+    assert unmatched_module_scope(files, []) == []
+    assert unmatched_module_scope(files, None) == []
+    # A graph with no definitions makes every given entry unmatched.
+    assert unmatched_module_scope(set(), ["mod/"]) == ["mod/"]
+    assert unmatched_module_scope(None, ["mod/"]) == ["mod/"]
+
+
+def test_module_scope_error_message_names_the_entry() -> None:
+    """The single wording both surfaces report: names the offending entry and
+    states what an entry can be; a satisfiable scope gives None (the
+    `path_prefix_error` convention)."""
+    from cppgraph.filters import module_scope_error
+
+    files = {"src/foo/bar.cpp"}
+    assert module_scope_error(files, ["src/typo"]) == (
+        "no file matches module scope entry 'src/typo' — each entry is a "
+        "directory prefix (segment-boundary match), an exact file path, or a "
+        "shell-style glob on definition-file paths (`*` crosses `/`); "
+        "`stats` lists the indexed files"
+    )
+    msg = module_scope_error(files, ["no/*.cpp", "also/missing.cpp"])
+    assert "no file matches module scope entries" in msg
+    assert "'no/*.cpp'" in msg and "'also/missing.cpp'" in msg
+    assert module_scope_error(files, ["src/foo", "src/foo/bar.cpp", "src/*.cpp"]) is None
+    assert module_scope_error(files, None) is None
 
 
 # --- filter_node_pairs: the impact/reachable_from pair filter (both surfaces) ---
@@ -325,3 +488,52 @@ def test_filter_node_pairs_combines_both_filters(tmp_path) -> None:
         pairs, exclude_tests=True, include_paths=None, exclude_paths=["vendor/"]
     )
     assert [s for s, _ in kept] == ["prod_sym"]
+
+
+def test_sentence_period_candidates_strips_the_period() -> None:
+    assert sentence_period_candidates("Foo#makeResumeToken.") == ["Foo#makeResumeToken"]
+
+
+def test_sentence_period_candidates_clean_name_is_empty() -> None:
+    assert sentence_period_candidates("Foo#makeResumeToken") == []
+    assert sentence_period_candidates("") == []
+
+
+def test_sentence_period_candidates_never_touches_a_hyphen() -> None:
+    # `GraphStore.resolve` consumes ONLY this function, and a hyphen-join can
+    # produce a different identifier — so the dot-only helper must not
+    # silently include the hyphen repair.
+    assert sentence_period_candidates("Widget#foo-bar") == []
+
+
+def test_prose_artifact_candidates_trailing_period() -> None:
+    assert prose_artifact_candidates("Foo#makeResumeToken.") == ["Foo#makeResumeToken"]
+
+
+def test_prose_artifact_candidates_wrapped_hyphen() -> None:
+    assert prose_artifact_candidates("_determine-ChangeStreamReaderVersion") == [
+        "_determineChangeStreamReaderVersion"
+    ]
+
+
+def test_prose_artifact_candidates_combines_both_artifacts() -> None:
+    # Fixed order, least-stripped first: the dot-only and hyphen-only repairs
+    # come before the fully stripped one.
+    assert prose_artifact_candidates("Determine-Change.") == [
+        "Determine-Change",
+        "DetermineChange.",
+        "DetermineChange",
+    ]
+
+
+def test_prose_artifact_candidates_clean_name_is_empty() -> None:
+    assert prose_artifact_candidates("Foo#makeResumeToken") == []
+    assert prose_artifact_candidates("") == []
+
+
+def test_prose_artifact_candidates_leaves_operator_hyphen_alone() -> None:
+    # A `-` flanked by identifier characters is a markdown wrap artifact; a
+    # trailing one (operator-, operator-=) is part of a genuine C++ spelling
+    # and is never stripped.
+    assert prose_artifact_candidates("operator-") == []
+    assert prose_artifact_candidates("operator->") == []

@@ -6,7 +6,156 @@ on-disk store also carries its own `schema_version` for forward-compatibility.
 
 ## [Unreleased]
 
+### Added
+
+- **Module scoping by files and globs, not only by directory.** `api-surface`'s
+  `module_prefix` and `dependency-cost`'s `--target-path` (MCP `api_surface` /
+  `dependency_cost`) scope a module by a scope ENTRY that may be a directory
+  prefix (unchanged segment-boundary rule), an exact definition-file path, or
+  a shell-style glob on definition-file paths — deterministic fnmatch on the
+  relative path (`fnmatchcase`, so the same pattern answers identically on
+  every platform; `*` crosses `/`, fnmatch has no gitignore semantics). A
+  feature spread across directories (e.g. mongo's changestream code shared
+  between `db/` and `db/pipeline/`) now scopes in one entry
+  (`src/**/change_*.cpp`) instead of falling back to grep. Same parameters,
+  no new flag: an entry containing a glob metacharacter (`*`, `?`, `[`)
+  matches as a glob, everything else stays on the segment-boundary rule —
+  under which an exact file path already matches only itself, so no extension
+  sniffing and no second notion of "source file". Literal equality is checked
+  before the glob reading, so a real file whose name contains a metacharacter
+  (`foo[1].cpp`) still matches its own exact-path entry (fnmatch would read
+  the `[1]` as a character class and the path could never match itself);
+  equality cannot over-match. `find`'s
+  `--include-path`/`--exclude-path` deliberately stay pure prefixes. A scope
+  matching zero indexed definition files is now an explicit error naming the
+  offending entry (`cppgraph.filters.module_scope_error`, the include-side
+  policy of the path-prefix hygiene check, sharing its factored unmatched
+  loop) — never a silent "empty surface"/"0 call sites" that a typo'd scope
+  would read as; a scope merely selecting zero external uses stays a normal
+  (empty) result. The store owns that validation and words it once
+  (`GraphStore.api_surface` / `hotspots`' target mode); the surfaces convert
+  the refusal verbatim (CLI `parser.error`, MCP error dict) so both report
+  the same text. Matching lives in `cppgraph.filters`
+  (`matches_module_scope`), applied by `GraphStore.api_surface` (scope
+  membership, was `matches_path_prefix`) and `GraphStore.hotspots`' target
+  mode — both surfaces through the same primitives, per the parity rule.
+  Tests: `tests/test_filters.py`
+  (`::test_module_scope_directory_prefix_unchanged`,
+  `::test_module_scope_file_entry_matches_that_exact_file`,
+   `::test_module_scope_glob_entry_is_deterministic_fnmatch`,
+  `::test_module_scope_literal_path_with_glob_chars_matches_itself`,
+   `::test_module_scope_mixed_dir_file_glob_entries`,
+  `::test_unmatched_module_scope_names_the_entry`,
+  `::test_module_scope_error_message_names_the_entry`),
+  `tests/test_store.py` (`::test_api_surface_file_and_glob_scope`,
+  `::test_api_surface_never_matching_scope_raises_naming_it`),
+  `tests/test_mcp_server.py` (`::test_api_surface_report_file_scope`,
+  `::test_api_surface_report_glob_scope`,
+  `::test_api_surface_report_never_matching_scope_names_the_entry`,
+  `::test_dependency_cost_report_file_and_glob_targets`,
+  `::test_dependency_cost_report_never_matching_target_is_an_error_dict`),
+  `tests/test_cli.py` (`::test_api_surface_file_and_glob_scope`,
+  `::test_api_surface_never_matching_scope_is_an_error`,
+  `::test_dependency_cost_file_and_glob_targets`,
+  `::test_dependency_cost_never_matching_target_is_an_error`;
+  `::test_legacy_spelling_dispatches_like_the_canonical_command` moved its
+  api-surface/dependency-cost params to the two-dir fixture — the shared
+  `graph_path` fixture's symbols carry no definition file, so any scope now
+  errors there). Docs: `DESIGN.md` (filter-primitives section, input-hygiene
+  paragraph), `CLI_REFERENCE.md` (module-scope bullet + examples).
+
 ### Fixed
+
+- **Name resolution now repairs one prose/copy artifact — the trailing
+  sentence period — as a last-resort fallback; deliberately not the
+  hyphen-join.** A name copied out of prose — a `class_members` result quoted
+  in a sentence — can end with the sentence period (`...ReaderVersion.`), a
+  character no SCIP identifier can contain. No step of the resolution ladder
+  could match it (exact, `::`→`#`, case/separator-insensitive — the period
+  rides along and no symbol string contains it), so the advertised contract
+  "tools' outputs are acceptable inputs to the other tools" broke silently.
+  The repair lives in `cppgraph.filters.sentence_period_candidates` and fires
+  in `GraphStore.resolve` (behind every single-symbol CLI command and MCP
+  tool — `callers`, `callees`, `path`, `impact`, `explain`, bases/subtypes,
+  …): after a total miss, the stripped spelling is `has_symbol`-checked, then
+  the name ladder rerun on it — resolving only when the repair matches
+  exactly one symbol; an ambiguous repair is discarded, the not-found outcome
+  stands, and no result is annotated (the fallback is invisible when it
+  fires). ONLY the period is repaired at resolution time: a hyphen-join
+  repair (a `-` at a markdown line-wrap point removed) can join two words
+  into a different identifier, and "exactly one candidate" protects nothing
+  there — the joined name is itself a unique substring hit, so the resolution
+  would be confidently wrong. That riskier repair is allowed only in `find`'s
+  artifact tier (`cppgraph.filters.prose_artifact_candidates`, between the
+  `::`→`#` and fuzzy/leaf tiers): find returns candidate LISTS flagged
+  `relaxed` with the repaired `relaxed_query` — a visible hint the caller can
+  reject, never a silently returned resolution. An exact SCIP string can
+  never be shadowed: `has_symbol` runs before any stripping, for the raw
+  query and the repaired spelling alike, and a string ending in `.` is always
+  a genuine symbol. Tests: `tests/test_filters.py`
+  (`::test_sentence_period_candidates_*`, `::test_prose_artifact_candidates_*`),
+  `tests/test_store.py` (`::test_resolve_strips_trailing_sentence_period`,
+  `::test_resolve_never_joins_a_wrapped_hyphen`,
+  `::test_resolve_repaired_spelling_prefers_the_exact_hit`,
+  `::test_resolve_artifact_strip_stays_not_found_when_stripped_is_ambiguous`,
+  `::test_resolve_artifact_strip_works_on_a_bare_name_too`,
+  `::test_resolve_exact_symbol_ending_in_dot_is_never_stripped`),
+  `tests/test_mcp_server.py` (`::test_find_relaxes_trailing_sentence_period`,
+  `::test_find_relaxes_wrapped_hyphenation_as_a_visible_hint`).
+  Docs: tool descriptions that say "a unique name resolves automatically"
+  (`who_calls`, `what_it_calls`, `base_classes`, `path`, `class_members`,
+  `explain_symbol`, `global_init_references` — period-only; `find` names both
+  artifacts), and `DESIGN.md` (resolve paragraph + find relaxation list).
+
+- **An unmatched EXCLUDE path prefix no longer errors — only INCLUDE prefixes
+  do (both surfaces).** The reported friction: `find --exclude-path <typo>`
+  (or the MCP `exclude_paths`) exited 2 blaming the exclude even though the
+  includes were fine, and when both sides had typos the error named them
+  together, misstating what went wrong. The rule is now split by what each
+  side can hide: an include prefix matching zero indexed definition files is
+  still an explicit error naming it (a silent narrowing there is
+  indistinguishable from "no matches"); an exclude prefix matching zero files
+  is inert — it excludes nothing, so the result set is simply unfiltered by
+  it — and a result set emptied by excludes alone is a normal (empty) result,
+  never an error. The unsatisfiable-composition check
+  (`include ∧ ¬exclude` selecting zero files with every prefix individually
+  matching) still errors, and only runs when an include filter is given — an
+  exclude-only call can never error
+  (`cppgraph.filters.unmatched_path_prefixes` / `path_prefix_error`, the one
+  shared gate behind every path-filtered CLI command and MCP tool).
+  Tests: `tests/test_filters.py`
+  (`::test_unmatched_path_prefixes_exclude_typo_is_inert`,
+  `::test_unmatched_path_prefixes_reports_unmatched_includes_in_given_order`,
+  `::test_path_prefix_error_exclude_only_never_errors`,
+  `::test_unmatched_path_prefixes_eligible_empty_composition`,
+  `::test_path_prefix_error_messages_name_the_prefix`), `tests/test_cli.py`
+  (`::test_cli_exclude_path_typo_is_inert`), `tests/test_mcp_server.py`
+  (`::test_mcp_exclude_prefix_typo_is_inert`, updated
+  `::test_mcp_path_prefix_typo_is_an_explicit_error`). Docs: `DESIGN.md`
+  (input-hygiene paragraph), `CLI_REFERENCE.md` (the stderr/exit-2 contract).
+
+- **masora's zero-match line no longer implies staleness when none is
+  implied.** The rendered literal for "lineages examined but zero matched"
+  said "the base may predate this rebuild" — misleading when the base is
+  current: the real situation is simply that masora holds no claims on these
+  symbols. The line now reads "masora: N lineage(s) examined, none matched —
+  no claims are recorded on these symbols." A rendered-literal wording change
+  only: no contract-shape change, no `contract_version` bump.
+  Tests: `tests/test_masora.py`
+  (`::test_zero_facts_with_examined_lineages_render_the_derived_staleness_line`,
+  `::test_derived_line_wins_when_the_hint_drifts_non_null`).
+
+- **`find` ranks project-native results before out-of-project ones.** On a
+  large indexed repo a broad query matched hundreds of external-package
+  symbols (`is_out_of_project: true` — generated IDL code), ranked above the
+  real project-native class and burying it within the limit.
+  `cppgraph.queries.find_symbols` now stable-sorts the matches so
+  project-native (`False`) results precede out-of-project (`True`) ones —
+  null classifications (no SymbolInformation) count as native, and a graph
+  without the classification is unaffected — keeping each tier's store order;
+  the limit and relaxation behavior are unchanged.
+  Tests: `tests/test_mcp_server.py`
+  (`::test_find_ranks_project_native_before_out_of_project`).
 
 - **A miss on an uncertified-but-populated log-id table is now reported as
   UNVERIFIED, not as a definitive absence.** The real-mongo finding: the

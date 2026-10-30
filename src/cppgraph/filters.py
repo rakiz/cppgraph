@@ -9,7 +9,9 @@ label derivation those depend on. No transport, no I/O — just a store lookup.
 
 from __future__ import annotations
 
+import fnmatch
 import re
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from cppgraph.builder import READ_ACCESS, WRITE_ACCESS
@@ -51,6 +53,68 @@ def qualified_name(symbol: str) -> str:
     Falls back to the label itself when there's no `(` to cut at."""
     label = short_label(symbol)
     return label.split("(", 1)[0].rstrip(".")
+
+
+# A `-` between two identifier characters cannot occur in a C++ identifier —
+# but it is exactly what copying a name across a markdown line-wrap leaves
+# behind (`_determine-ChangeStreamReaderVersion`). A trailing `-` (operator-,
+# operator-=) is genuine C++ spelling, never an artifact.
+_WRAP_HYPHEN_RE = re.compile(r"(?<=[0-9A-Za-z_])-(?=[0-9A-Za-z_])")
+
+
+def sentence_period_candidates(name: str) -> list[str]:
+    """The trailing-sentence-period repair — the ONLY artifact
+    `GraphStore.resolve` may strip.
+
+    A `.` cannot occur inside a SCIP identifier (`.` is the descriptor
+    terminator and separator), so a name ending in one is always a copy that
+    picked up punctuation the original never had: removing it repairs the
+    name without any possibility of reaching a *different* symbol. A
+    hyphen-join does NOT have that property — removing the `-` can join two
+    words into a different identifier, and "the joined name matches exactly
+    one symbol" is then no protection (the joined name is itself a unique
+    substring hit), so `resolve` deliberately never gets it; see
+    `prose_artifact_candidates` for where the hyphen repair is allowed and
+    why. Returns the stripped spelling, or [] when the name carries no
+    trailing period.
+    """
+    dot_stripped = name.rstrip(".")
+    return [dot_stripped] if dot_stripped and dot_stripped != name else []
+
+
+def prose_artifact_candidates(name: str) -> list[str]:
+    """Artifact-repaired spellings of a symbol *name* — for `find_symbols`'s
+    artifact tier ONLY, never for `GraphStore.resolve`.
+
+    A name copied from prose can carry copy artifacts the original didn't
+    have: the sentence period left on when quoting a `class_members` result,
+    or a hyphen inserted at a markdown line-wrap point. The period repair is
+    unconditionally safe (see `sentence_period_candidates`); the hyphen-join
+    is not — removing the `-` can join two words into a different identifier,
+    and a unique match on the joined name would then be a confidently-wrong
+    answer, which is why `resolve` (one symbol, returned silently) must not
+    use it. `find` may, because its artifact tier returns a candidate LIST
+    flagged `relaxed` with the repaired `relaxed_query` — a visible hint the
+    caller can reject, never a silently guessed resolution. Limitation: a
+    joined name that happens to exist (`Widget#foo-bar` repaired to a real
+    `foobar`) surfaces as a hint, not a truth — the note names the repair.
+    Fixed order, least-stripped first (`.` only, then `-` only, then both);
+    empty when the name carries no artifact.
+    """
+    candidates: list[str] = []
+    seen: set[str] = set()
+
+    def add(form: str) -> None:
+        if form and form != name and form not in seen:
+            seen.add(form)
+            candidates.append(form)
+
+    dot_stripped = name.rstrip(".")
+    hyphen_stripped = _WRAP_HYPHEN_RE.sub("", name)
+    add(dot_stripped)
+    add(hyphen_stripped)
+    add(_WRAP_HYPHEN_RE.sub("", dot_stripped))
+    return candidates
 
 
 # Callees an LLM almost never cares about when reading "what does this call?":
@@ -154,51 +218,73 @@ def matches_path_prefix(
     return True
 
 
+def _unmatched_in_given_order(
+    normalized_files: set[str],
+    entries: list[str],
+    match: Callable[[str, str], bool],
+) -> list[str]:
+    """The given `entries` matching ZERO of `normalized_files` — deduplicated,
+    in given order. The include-check loop shared by `unmatched_path_prefixes`
+    and `unmatched_module_scope`: the two checks enforce the same policy (an
+    include-style scope matching nothing is the caller's error, never a silent
+    narrowing) and so share the loop, with only the per-entry predicate
+    injected — never a re-implementation that can drift apart."""
+    unmatched: list[str] = []
+    seen: set[str] = set()
+    for entry in entries:
+        if entry in seen:
+            continue
+        seen.add(entry)
+        if not any(match(f, entry) for f in normalized_files):
+            unmatched.append(entry)
+    return unmatched
+
+
 def unmatched_path_prefixes(
     files: set[str] | None,
     include: list[str] | None,
     exclude: list[str] | None,
 ) -> tuple[list[str], bool]:
-    """The path-prefix filters that CANNOT match anything, plus whether the
-    combined filter is unsatisfiable — the pure check behind the input-hygiene
-    rule "a filter that matches nothing is an explicit error, never a silent
-    narrowing": a typo'd prefix must not be indistinguishable from "no
-    matches".
+    """The INCLUDE path-prefix filters that CANNOT match anything, plus whether
+    the combined filter is unsatisfiable — the pure check behind the
+    input-hygiene rule "an include filter that matches nothing is an explicit
+    error, never a silent narrowing": a typo'd prefix must not be
+    indistinguishable from "no matches".
+
+    Only includes are reported: an exclude prefix matching zero files excludes
+    nothing, so the result set is simply unfiltered by it — inert, never an
+    error (naming it would blame a filter that changed nothing).
 
     Returns `(unmatched, eligible_empty)`:
-    - `unmatched` — the given include AND exclude prefixes matching ZERO of
-      `files`, under the same segment-boundary rule `matches_path_prefix`
-      applies (it is factored out and shared, never re-implemented here);
-      deduplicated, in given order. An empty/None list contributes no prefixes
-      and never errors — an absent filter is "no constraint", not a broken
-      one.
-    - `eligible_empty` — True when every given prefix individually matches
-      something yet the COMBINED filter (include ∧ ¬exclude) selects zero
-      files — e.g. `include=["src/foo"], exclude=["src/foo"]`: each prefix is
-      well-spelled, but their composition cannot be satisfied, so the error
-      must blame the composition rather than name a typo.
+    - `unmatched` — the given include prefixes matching ZERO of `files`, under
+      the same segment-boundary rule `matches_path_prefix` applies (it is
+      factored out and shared, never re-implemented here); deduplicated, in
+      given order. An empty/None list contributes no prefixes and never
+      errors — an absent filter is "no constraint", not a broken one.
+    - `eligible_empty` — True only when an INCLUDE filter is given, every
+      include prefix individually matches something, yet the COMBINED filter
+      (include ∧ ¬exclude) selects zero files — e.g. `include=["src/foo"],
+      exclude=["src/foo"]`: each prefix is well-spelled, but their composition
+      cannot be satisfied, so the error must blame the composition rather than
+      name a typo. A result set emptied by excludes alone stays silent
+      (`eligible_empty` False): excludes legitimately narrow, and an empty
+      result they produce is a fact, not a typo — the same inertness as an
+      exclude matching zero files.
 
     `files` is the universe of definition-file paths to match against
     (`GraphStore.definition_files`). A node with `file=None` has no path and
     is irrelevant to this check — it simply isn't in the set (`matches_path_prefix`
     already drops such nodes when an include filter is given); the check never
-    sees a None entry. An empty/None `files` makes every given prefix
+    sees a None entry. An empty/None `files` makes every given include prefix
     unmatched — the honest answer on a graph with no definitions."""
     include = include or []
     exclude = exclude or []
     if not include and not exclude:
         return [], False
     normalized = {f.replace("\\", "/") for f in files} if files else set()
-    unmatched: list[str] = []
-    seen: set[str] = set()
-    for prefix in [*include, *exclude]:
-        if prefix in seen:
-            continue
-        seen.add(prefix)
-        if not any(_segment_match(f, prefix) for f in normalized):
-            unmatched.append(prefix)
+    unmatched = _unmatched_in_given_order(normalized, include, _segment_match)
     eligible_empty = False
-    if not unmatched:
+    if include and not unmatched:
         eligible_empty = not any(
             matches_path_prefix(f, include=include, exclude=exclude) for f in normalized
         )
@@ -212,9 +298,13 @@ def path_prefix_error(
 ) -> str | None:
     """The error message for path filters that can match nothing, or None when
     they are satisfiable — the single wording both surfaces report, so a CLI
-    `--include-path` typo and the MCP `include_paths` one read the same. Mirrors
-    the init wizard's unmatched-substring note ("'f' matches nothing — try
-    another substring."): state the fact, name the prefix, suggest the fix."""
+    `--include-path` typo and the MCP `include_paths` one read the same. An
+    unmatched INCLUDE prefix is the error (named, with the fix suggested,
+    mirroring the init wizard's unmatched-substring note); an EXCLUDE prefix
+    is never an error — matching zero files it filters nothing, and emptying
+    the result set entirely it legitimately narrows — so blaming it (or the
+    includes) would misstate what went wrong. An exclude-only call therefore
+    ALWAYS returns None."""
     unmatched, eligible_empty = unmatched_path_prefixes(files, include, exclude)
     if unmatched:
         listed = ", ".join(repr(p) for p in unmatched)
@@ -232,6 +322,93 @@ def path_prefix_error(
             message += " minus exclude " + ", ".join(repr(p) for p in exclude)
         return message
     return None
+
+
+# --- module scoping (api_surface's module_prefix, dependency_cost's
+# --- target_paths): a directory prefix, an exact file, or a glob --------------
+
+# An entry carrying any of these is matched as a shell-style glob; everything
+# else — a directory prefix or an exact file path — stays on the
+# segment-boundary rule (an exact path is the trivial case: equality). No
+# extension sniffing to tell "file" from "directory": a plain file path already
+# matches only itself under the segment rule, so classifying by extension
+# would add a second notion of "source file" without changing any outcome.
+_GLOB_CHARS = frozenset("*?[")
+
+
+def _module_entry_match(path: str | None, entry: str) -> bool:
+    """One module-scope entry's match against an already-normalized
+    (`/`-slashed) path — THE module-scope rule, factored so
+    `matches_module_scope` and `unmatched_module_scope` cannot drift apart.
+    Literal equality first: a real file whose NAME contains a glob
+    metacharacter (`foo[1].cpp`) must match its own exact-path entry —
+    `fnmatchcase("foo[1].cpp", "foo[1].cpp")` is False (the entry's `[1]`
+    reads as a character class), so without this check such a path could
+    never match itself; equality cannot over-match. A glob entry then
+    matches fnmatch-style on the whole relative path, with
+    `fnmatchcase` — never the platform-cased `fnmatch`, so the same pattern
+    gives the same answer on every machine. There `*` crosses `/` (not
+    gitignore semantics, which fnmatch has no notion of) and `[` starts a
+    character class. Any other entry is a directory prefix via
+    `_segment_match` (which also covers an exact file path, its equality
+    case)."""
+    entry = entry.replace("\\", "/").rstrip("/")
+    if not entry or path is None:
+        return False
+    if path == entry:
+        return True
+    if _GLOB_CHARS & set(entry):
+        return fnmatch.fnmatchcase(path, entry)
+    return _segment_match(path, entry)
+
+
+def matches_module_scope(file: str | None, entries: list[str] | None) -> bool:
+    """True if `file` is IN the module scope: ANY of `entries` matches it. An
+    entry is a directory prefix (`"src/pipeline"` — segment-boundary, so never
+    `src/pipeline_extra/`), an exact definition-file path (`"src/app.cpp"`),
+    or a shell-style glob (`"src/**/change_*.cpp"` — deterministic fnmatch on
+    the relative path). The matcher behind `api_surface`'s `module_prefix` and
+    `dependency_cost`'s `target_paths` — the module scoping a feature spread
+    across directories needs (e.g. changestream code shared between `db/` and
+    `db/pipeline/`), which pure directory prefixes cannot express. Deliberately
+    NOT behind `find`'s `include_paths`/`exclude_paths`: those stay pure
+    prefixes, and widening them would change every path-filtered tool at once.
+    `file=None` (no recorded definition site) is in no module."""
+    if not entries:
+        return False
+    return any(_module_entry_match(file, entry) for entry in entries)
+
+
+def unmatched_module_scope(files: set[str] | None, entries: list[str] | None) -> list[str]:
+    """The module-scope entries matching ZERO of `files`, deduplicated in
+    given order — the shared include-check loop `_unmatched_in_given_order`
+    with the module matcher, so the zero-match policy (and its wording, via
+    `module_scope_error`) is `path_prefix_error`'s, not a parallel one. An
+    empty/None list contributes no entries and never errors; an empty `files`
+    universe makes every given entry unmatched (the honest answer on a graph
+    with no definitions)."""
+    normalized = {f.replace("\\", "/") for f in files} if files else set()
+    return _unmatched_in_given_order(normalized, entries or [], _module_entry_match)
+
+
+def module_scope_error(files: set[str] | None, entries: list[str] | None) -> str | None:
+    """The error message for a module scope that can match nothing, or None
+    when every entry matches something — the single wording both surfaces
+    report, the include-side half of `path_prefix_error`'s policy applied to
+    `module_prefix`/`target_paths` (a module scope that matches nothing is
+    always an include-style scope — there is no exclude side, so no inert
+    case to stay silent about)."""
+    unmatched = unmatched_module_scope(files, entries)
+    if not unmatched:
+        return None
+    listed = ", ".join(repr(e) for e in unmatched)
+    plural = "y" if len(unmatched) == 1 else "ies"
+    return (
+        f"no file matches module scope entr{plural} {listed} — each entry is "
+        "a directory prefix (segment-boundary match), an exact file path, or "
+        "a shell-style glob on definition-file paths (`*` crosses `/`); "
+        "`stats` lists the indexed files"
+    )
 
 
 def filter_by_path(

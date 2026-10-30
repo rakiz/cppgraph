@@ -450,8 +450,8 @@ designing the builder so this isn't a later rewrite:
   global's initializer references — the static-init-order fact, never a verdict;
   gated on `has_attributed_refs`), `boundary-violations` (declared-layering
   conformance — rules supplied per query as `--rule FROM:FORBIDDEN`; every
-  hit is a real edge, zero false positives), `api-surface <prefix>` (the
-  actually-used external surface of a module — definitions inside the prefix
+  hit is a real edge, zero false positives), `api-surface <scope>` (the
+  actually-used external surface of a module — definitions inside the scope
   called/referenced from outside it; `external_calls`/`external_refs` as
   separate counters ranked by their sum, calls-only with a note on a
   `--no-references` store), `outline <file>` (every symbol
@@ -466,7 +466,7 @@ designing the builder so this isn't a later rewrite:
     `dependency-cost` (call-site count against a target library — "if I
     replace/remove X, how many call sites change?", the `hotspots` fan-in
     ranking in its asymmetric-filter mode: callees pinned to `--target-path`
-    prefixes, `--include-path`/`--exclude-path` filtering the *caller* side
+    scopes, `--include-path`/`--exclude-path` filtering the *caller* side
     only, plus the summed total call sites over the per-symbol breakdown),
     `status` (source commit + drift check).
 - MCP server (`cppgraph-mcp`, `src/cppgraph/mcp_server.py`): exposes the same
@@ -481,7 +481,7 @@ designing the builder so this isn't a later rewrite:
    (global fan-in/fan-out/edge-count ranking), `dependency_cost`
    (call-site count against a target library — "if I replace X, how many
    call sites change?", the same ranking in its asymmetric `target_paths`
-   mode: callees pinned to the prefix, path filters on the caller side only,
+   mode: callees pinned to the scope, path filters on the caller side only,
    `total_call_sites` + per-symbol breakdown), `stats` (per-file/per-directory
    aggregate counts: symbols, call edges, refs — a module "how big/dense" view),
     `line_span` (definitions ranked by body extent) and `no_incoming_calls`
@@ -494,14 +494,14 @@ designing the builder so this isn't a later rewrite:
     `boundary_violations` (declared-layering conformance — rules supplied per
     query by the caller, the graph stores no intended architecture; every hit
     is a real edge, zero false positives, and 0 hits a lower bound, never a
-     conformance verdict), `visualize_boundary_violations` (the same check
+    conformance verdict), `visualize_boundary_violations` (the same check
     drawn as a self-contained HTML graph — nodes are the violating edges'
     endpoints, edges the violations themselves; with 0 violations nothing is
     written or opened, a clean outcome not an error), `api_surface` (the
     actually-used external surface
-    of a module — definitions under a prefix called/referenced from outside
-    it, separate `external_calls`/`external_refs` counters ranked by their
-    sum; calls-only with a note on a `--no-references` store), `outline`
+    of a module — definitions under a module scope called/referenced from
+    outside it, separate `external_calls`/`external_refs` counters ranked by
+    their sum; calls-only with a note on a `--no-references` store), `outline`
     (every symbol defined in one file, sorted
     by line — a compact symbol list that replaces reading the file),
     `class_members` (every member declared on a class/struct, by the same
@@ -511,9 +511,19 @@ designing the builder so this isn't a later rewrite:
     reach each other, the exact primitive behind "circular dependencies"; a
     graph fact, never a verdict, since mutual recursion is often legitimate),
     `explain_symbol`, `status`, `visualize`. Each symbol-taking tool accepts a plain
-  name as well as an exact SCIP string, through the shared `GraphStore.resolve`
-  (also behind the CLI): a unique name resolves, `Class::method` maps to
-  `Class#method`, an ambiguous name returns candidates, and no symbol is guessed.
+   name as well as an exact SCIP string, through the shared `GraphStore.resolve`
+   (also behind the CLI): a unique name resolves, `Class::method` maps to
+   `Class#method`, an ambiguous name returns candidates, and no symbol is guessed.
+   On a total miss only, ONE prose/copy artifact is repaired and the ladder
+   rerun on the repaired spelling (`filters.sentence_period_candidates`): a
+   trailing sentence period — a character no SCIP identifier can contain, so
+   stripping it can never reach a different symbol — so a name copied out of
+   prose (a `class_members` result quoted in a sentence) still resolves; a
+   repair matching several symbols is discarded, never guessed among, and an
+   exact hit can't be shadowed because `has_symbol` runs first (for the raw
+   query and the repaired spelling alike). A line-wrap hyphen is deliberately
+   NOT repaired here: removing it can join two words into a different
+   identifier whose unique match would be a confidently-wrong answer.
   The same step also accepts a `file:line` (1-indexed, editor convention —
   the store keeps 0-indexed lines; the trailing `:<positive integer>` shape
   belongs to neither a SCIP symbol string nor a C++ name, so recognizing it
@@ -555,12 +565,23 @@ designing the builder so this isn't a later rewrite:
       `line_span`/`no_incoming_calls`/`strongly_connected_components`
       (where the filter drops whole components from the output rather than
       their members — see the CHANGELOG entry for the compiled-binary
-      reasoning). `boundary_violations` matches its
-     layering-rule prefixes against each endpoint's definition file with the
-       same segment-boundary semantics. `dependency_cost` is the one
-       **asymmetric** use of the primitive: its `target_paths` (CLI
-       `--target-path`) pins the *callee* side to the target prefix while
-       `include_paths`/`exclude_paths` apply to the *caller* side only —
+       reasoning). `boundary_violations` matches its
+      layering-rule prefixes against each endpoint's definition file with the
+        same segment-boundary semantics. **Module scoping** is a step beyond a
+        prefix: `api_surface`'s `module_prefix` and `dependency_cost`'s
+        `target_paths` (CLI `--target-path`) take a scope entry that may be a
+        directory prefix (the same segment-boundary rule), an exact
+        definition-file path, or a shell-style glob on definition-file paths —
+        deterministic fnmatch on the relative path (`fnmatchcase`; `*` crosses
+        `/`), so a feature spread across directories (e.g. mongo's
+        changestream code shared between `db/` and `db/pipeline/`) scopes in
+        one entry instead of falling back to grep (`filters.
+        matches_module_scope`). The optional `include_paths`/`exclude_paths`
+        filters stay pure prefixes — widening them would change every
+        path-filtered tool at once. `dependency_cost` is the one
+        **asymmetric** use of the primitive: its `target_paths` (CLI
+        `--target-path`) pins the *callee* side to the target scope while
+        `include_paths`/`exclude_paths` apply to the *caller* side only —
        a mode of `hotspots`, whose symmetric both-endpoints semantics cannot
        express a cross-boundary count (see the CHANGELOG entry). These filter
     primitives live in `cppgraph.filters` and drive **both** surfaces — the MCP
@@ -568,13 +589,20 @@ designing the builder so this isn't a later rewrite:
     `--limit`, `--exclude-tests`/`--no-exclude-tests`, `--hide-trivial`,
     `--full-symbols`, `--include-path`/`--exclude-path`) — so the same question
     gives the same answer whichever way it's asked. Input hygiene, both
-    surfaces one gate: a prefix matching zero indexed definition files — or an
-    include ∧ exclude composition that cannot be satisfied — is an explicit
-    error naming the prefix (`filters.path_prefix_error` over
-    `GraphStore.definition_files`), never a silent narrowing that reads as
-    "no matches"; a valid prefix that merely filters the query to zero stays a
-    normal (empty) result. On the MCP side the dispatch itself is
-    strict-argument: an unknown parameter name (a typo like `path=`) is
+    surfaces one gate: an INCLUDE prefix matching zero indexed definition
+    files — or an include ∧ exclude composition (include filter given) that
+    cannot be satisfied — is an explicit error naming the prefix
+    (`filters.path_prefix_error` over `GraphStore.definition_files`), never a
+    silent narrowing that reads as "no matches"; an EXCLUDE prefix is never
+    an error — matching zero files it excludes nothing, and emptying the
+    result it legitimately narrows — and a valid prefix that merely filters
+    the query to zero stays a normal (empty) result. The same policy covers a
+    module scope matching zero files (`filters.module_scope_error`): a
+    `module_prefix`/`target_paths` that matches nothing is the caller's
+    error, named — never a silent "empty surface"/"0 call sites" a typo would
+    read as. On the MCP side the
+    dispatch itself is strict-argument: an unknown parameter name (a typo
+    like `path=`) is
     rejected with an error naming it, never silently dropped into an
     unfiltered result.
     Measured effect on `who_calls` for a hub symbol: ~5.5× smaller payload
@@ -583,7 +611,11 @@ designing the builder so this isn't a later rewrite:
     must appear), groups overloads sharing a qualified name under one entry —
     each with a source-derived parameter `signature`, since scip-clang
     distinguishes them only by hash — and on a zero-hit query relaxes once
-    (case/separator-insensitive, `changestream` ~ `change_stream`, then the bare
+    (C++ `::` normalized to SCIP `#`, then prose/copy artifacts repaired — a
+    trailing sentence period or line-wrap hyphen, the riskier hyphen-join
+    allowed ONLY here because the result is a flagged list, never a silent
+    resolution — then
+    case/separator-insensitive, `changestream` ~ `change_stream`, then the bare
     leaf name), flagging the response `relaxed`. `what_it_calls`, `find`, and
     `explain_symbol` take an opt-in `hide_trivial` that drops ubiquitous helpers
     (operators, `*assert`, `makeStatus`, `source_location`, generated lambdas).

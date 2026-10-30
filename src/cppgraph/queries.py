@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any
 from cppgraph.filters import (
     is_noise_symbol,
     matches_path_prefix,
+    prose_artifact_candidates,
     qualified_name,
     short_label,
 )
@@ -168,10 +169,20 @@ def find_symbols(
     On an exact-zero result, `find` relaxes and flags the response `relaxed`:
     first a C++-spelled qualified guess (`Class::method`) is retried with
     SCIP's `Class#method` separator (the same step `GraphStore.resolve` tries
-    before anything fuzzier), then case/separator-insensitively (the
+    before anything fuzzier), then prose/copy artifacts are repaired (a
+    trailing sentence period, a hyphen at a markdown line-wrap point —
+    `filters.prose_artifact_candidates`) and the repaired spelling retried,
+    then case/separator-insensitively (the
     `change_stream` vs `changeStream` vs `changestream` trap), then, for a
     *qualified* query (`Class#method`, a wrong guess), on the bare leaf name.
     So a naming miss degrades to a hint instead of a silent empty answer.
+    This tier is find-only, deliberately wider than `GraphStore.resolve`'s
+    (period-only): a hyphen-join can produce a different identifier, and here
+    that risk costs a visible `relaxed` hint listing candidates — never a
+    silently returned resolution.
+    Results are ordered project-native (`is_out_of_project=False`) before
+    out-of-project ones — generated IDL code must not bury the real class
+    within the limit; each tier keeps its store order.
 
     Grouped overloads carry a best-effort `signature` read from source (when
     `root` is available), since scip-clang distinguishes them only by hash.
@@ -201,6 +212,20 @@ def find_symbols(
             relaxation = "colon"
             relaxed_query = scip_query
     if not matches:
+        # A name quoted from prose (a `class_members` result pasted into a
+        # sentence) can carry a copy artifact no symbol can contain — the
+        # sentence period, a markdown line-wrap hyphen. No exact or fuzzy
+        # match can ever hit it, so repair the spelling and retry before
+        # loosening further; flagged `relaxed` like every other tier (find
+        # returns lists, so this is a hint, not a guess).
+        for stripped in prose_artifact_candidates(query):
+            repaired = store.find(stripped) or store.find(stripped, fuzzy=True)
+            if repaired:
+                matches = repaired
+                relaxation = "artifact"
+                relaxed_query = stripped
+                break
+    if not matches:
         fuzzy = store.find(query, fuzzy=True)
         if fuzzy:
             matches = fuzzy
@@ -224,6 +249,17 @@ def find_symbols(
             for n in matches
             if matches_path_prefix(n.file, include=include_paths, exclude=exclude_paths)
         ]
+
+    # Project-native results before out-of-project ones: on a large index a
+    # broad query matches hundreds of external-package symbols (generated IDL
+    # code), and within `find`'s single relevance tier they buried the
+    # project-native class the user is looking for. Stable sort — each tier
+    # keeps its store order, so only the tier boundary reorders; a None
+    # classification (no SymbolInformation) counts as native: the graph
+    # carries no evidence against it. A graph without the classification is
+    # all-None and the sort is a no-op.
+
+    matches = sorted(matches, key=lambda n: n.is_out_of_project is True)
 
     # Group overloads: signatures sharing a qualified name (distinct SCIP hashes
     # for the same `Class::method`) collapse into one entry, so querying doesn't
@@ -289,6 +325,14 @@ def find_symbols(
             f"no exact match for {query!r}; showing results for "
             f"{relaxed_query!r} (C++ `::` normalized to SCIP's `#` member "
             "separator)"
+        )
+    elif relaxation == "artifact":
+        result["relaxed"] = True
+        result["relaxed_query"] = relaxed_query
+        result["note"] = (
+            f"no exact match for {query!r}; showing results for the repaired "
+            f"name {relaxed_query!r} (a prose/copy artifact — a trailing "
+            "sentence period or line-wrap hyphen — was stripped)"
         )
     elif relaxation == "leaf":
         result["relaxed"] = True

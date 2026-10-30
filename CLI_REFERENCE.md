@@ -16,9 +16,11 @@ Three facts apply to nearly everything below:
   `<symbol>` accepts a human name: a unique name resolves directly, an
   ambiguous one (e.g. same-named overloads) lists the candidates so you can
   pass the exact SCIP string — `cppgraph find` shows those strings. Arguments
-  that are paths (`outline`'s file, `api-surface`'s module prefix,
+  that are paths (`outline`'s file, `api-surface`'s module scope,
   `dependency-cost`'s `--target-path`) are taken verbatim as recorded in the
-  index.
+  index. The module-scope ones accept more than a directory prefix: a scope
+  entry is a directory prefix (segment-boundary match), an exact file path, or
+  a shell-style glob on definition-file paths (`*` crosses `/`).
 - **`*` marks a required argument.** Everything else is optional; each
   Arguments column lists them in `--help` order. Test-defined symbols are
   excluded by default on the call-graph commands (`--no-exclude-tests` keeps
@@ -51,11 +53,14 @@ list of exact SCIP identities when multiple — so "0 / 1 / N matches" is never
 guessed from list lengths.
 
 Infrastructure errors are NOT documents: a missing/unreadable graph, an
-unknown flag, or an unsatisfiable `--include-path`/`--exclude-path` prefix
-prints its message on stderr, exits 2, and puts NOTHING on stdout. A machine
+unknown flag, or an `--include-path` prefix matching no indexed file (or an
+unsatisfiable include/exclude composition) prints its message on stderr,
+exits 2, and puts NOTHING on stdout. A machine
 consumer should read stdout only and treat any non-zero exit as "no document"
 (a query-level miss — unknown symbol, ambiguous name, an `available: false`
 capability gap — is different: it IS a schema:1 document, with exit 1).
+`--exclude-path` is never an error: matching no indexed file it excludes
+nothing, and emptying the result it legitimately narrows.
 
 ## Getting and keeping a graph
 
@@ -150,6 +155,7 @@ cppgraph impact parseConfig --depth 3             # everything that transitively
 cppgraph reachable-from handleRequest             # everything it transitively calls (lower bound)
 cppgraph hotspots --kind fan_in --limit 10        # the most-called symbols, globally
 cppgraph dependency-cost --target-path src/third_party/absl/   # call sites into that library
+cppgraph dependency-cost --target-path 'third_party/**/*.cpp'  # one glob, libraries across directories
 ```
 
 ## Types, files, members
@@ -191,6 +197,7 @@ shows what one global's initializer touches.
 ```bash
 cppgraph references RequestContext --root . --context 3   # use sites, with source lines
 cppgraph api-surface src/pipeline    # what of src/pipeline the rest of the code actually uses
+cppgraph api-surface 'src/**/change_stream*'   # a feature spread across directories, one scope
 cppgraph global-init-references kLogVerbosity   # needs #504 + --attributed-refs
 ```
 

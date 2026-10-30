@@ -18,7 +18,10 @@ dev = [
 # The MCP server (Phase 3) is optional: the core build/query CLI works without
 # it. Install with `pip install -e .[mcp]` to expose the graph to an LLM.
 mcp = [
-    "mcp>=1.2",
+    # Pinned <2: the mcp 2.x line broke the client API the server is written
+    # against (observed: 2.3.0 breaks every mcp-importing test). Bump only as
+    # a deliberate migration, never via a floating resolution.
+    "mcp>=1.2,<2",
 ]
 # The interactive setup/index wizards render selectable menus and info panels when
 # these are present; without them they fall back to plain numbered prompts.

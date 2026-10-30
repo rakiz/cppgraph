@@ -17,9 +17,11 @@ Two layers, deliberately split so the substance is testable without a transport:
   auto-discovered from the cwd's `.cppgraph/`) to those functions. The
   dispatch is strict-argument: an unknown tool parameter (a typo'd name) is
   rejected with an explicit error naming it — never silently dropped into an
-  unfiltered result — and a path/filter prefix matching no indexed file is
+  unfiltered result — and a path/filter prefix (or a module scope:
+  `module_prefix`/`target_paths`) matching no indexed file is
   the same explicit error on every tool that accepts one (see
-  `cppgraph.filters.path_prefix_error`).
+  `cppgraph.filters.path_prefix_error` for path filters,
+  `cppgraph.filters.module_scope_error` for module scopes).
 
 Source snippets: by default these tools return **coordinates** (`file:line`),
 which are cheap. When you actually want to see the code, pass
@@ -689,7 +691,7 @@ def dependency_cost_report(
     """Call-site count against a target library — "if I replace/remove this
     library, how many call sites change?", answered as an exact count of real
     `calls` edges whose *callee* is defined under one of the `target_paths`
-    path prefixes.
+    module-scope entries.
 
     A measured fact, never a risk assessment: it says nothing about API
     compatibility, migration difficulty, or whether the replacement is a good
@@ -697,10 +699,17 @@ def dependency_cost_report(
     sites only, so dispatch the index cannot bind (e.g. an unresolvable
     function pointer) is not in the number.
 
+    Each `target_paths` entry is a directory prefix ("spirv_cross/" —
+    segment-boundary match), an exact file path, or a shell-style glob on
+    definition-file paths (`*` crosses `/`), so a target library spread
+    across directories scopes in one entry.
     `target_paths` restricts the callee side; `include_paths`/`exclude_paths`
     filter the *caller* side only — e.g. `exclude_paths=["vendor/"]` = "count
     call sites from my code, not other vendored users of the same library" —
-    and `exclude_tests` keeps its symmetric either-endpoint shape. Backed by
+    and `exclude_tests` keeps its symmetric either-endpoint shape. A target
+    matching zero indexed definition files is an error dict naming the entry
+    (the shared zero-match policy), never a bare "0 call sites" that a typo
+    would read as. Backed by
     `GraphStore.hotspots(kind="fan_in", target_paths=…)` — the same primitive
     as `hotspots`, in its asymmetric-filter mode (see that docstring for why
     this is a mode of the same ranking, not a standalone tool). `limit` caps
@@ -710,14 +719,21 @@ def dependency_cost_report(
     """
     if not target_paths:
         raise ValueError("target_paths must be a non-empty list of path prefixes")
-    ranked, total = store.hotspots(
-        limit=None,
-        kind="fan_in",
-        exclude_tests=exclude_tests,
-        include_paths=include_paths,
-        exclude_paths=exclude_paths,
-        target_paths=target_paths,
-    )
+    try:
+        ranked, total = store.hotspots(
+            limit=None,
+            kind="fan_in",
+            exclude_tests=exclude_tests,
+            include_paths=include_paths,
+            exclude_paths=exclude_paths,
+            target_paths=target_paths,
+        )
+    except ValueError as e:
+        # The store owns the target-scope validation (a zero-match scope
+        # raises naming the entry) and words it; this only converts the
+        # refusal into the MCP error-dict convention — running the same
+        # check here too would just double the definition_files() query.
+        return {"error": str(e)}
     shown = ranked[:limit]
     items: list[dict[str, Any]] = []
     for symbol, count in shown:
@@ -902,7 +918,9 @@ def global_init_references_report(
     LLM judges the hazard.
 
     `symbol` is a name or an exact SCIP string (a unique name resolves
-    automatically). One entry per referenced global, at its first use site;
+    automatically; a prose copy artifact — a trailing sentence period, a
+    character no SCIP identifier can contain — is repaired as a fallback).
+    One entry per referenced global, at its first use site;
     callable uses in the region (a function call in the initializer) are not
     global reads. Refuses (`available: false` + reason, the `line_span`
     convention) on a graph without attributed references — a #504-built
@@ -1009,15 +1027,16 @@ def api_surface_report(
     full_symbols: bool = False,
 ) -> dict[str, Any]:
     """The actually-used external surface of a module: the definitions under a
-    directory prefix (`module_prefix`, e.g. `"src/pipeline/"`) that are called
-    or referenced from OUTSIDE it. That is the *observed* surface — what
-    outside code really uses — as opposed to what is merely declared public
-    (SCIP has no visibility info to check against anyway, so "used from
+    module scope (`module_prefix` — a directory prefix like `"src/pipeline/"`,
+    an exact file path, or a shell-style glob on definition-file paths) that
+    are called or referenced from OUTSIDE it. That is the *observed* surface —
+    what outside code really uses — as opposed to what is merely declared
+    public (SCIP has no visibility info to check against anyway, so "used from
     outside" is the fact this tool can state exactly). Onboarding and
     module-overview use case: one call replacing N manual `what_it_calls` +
     `find_references` fan-outs.
 
-    Each symbol carries `external_calls` (call sites outside the prefix) and
+    Each symbol carries `external_calls` (call sites outside the scope) and
     `external_refs` (reference use sites outside it) as separate counters,
     ranked by their sum descending — `stats`' level of per-column detail, not
     one blob number. When the graph carries no reference index (built
@@ -1027,18 +1046,24 @@ def api_surface_report(
     outside". `exclude_tests` drops a use when either the use site or the used
     definition is in a test file. `limit` caps the list (default 40); `total`
     always reports the full count. An empty `module_prefix` comes back as an
-    `{"error", "hint"}` dict, not an exception.
+    `{"error", "hint"}` dict, not an exception; a `module_prefix` matching no
+    indexed file is an error naming it (the shared zero-match policy), worded
+    exactly as the store raises it — the CLI reports the same text.
     """
     try:
         ranked, total, has_refs = store.api_surface(
             module_prefix, limit=limit, exclude_tests=exclude_tests
         )
     except ValueError as e:
+        # The store owns the validation (empty prefix, zero-match scope,
+        # negative limit) and words it; this only converts the refusal into
+        # the MCP error-dict convention — no re-wording that could drift.
         return {
-            "error": f"invalid module_prefix: {e}",
-            "hint": "module_prefix is a directory path prefix (segment-boundary "
+            "error": str(e),
+            "hint": "module_prefix is a directory prefix (segment-boundary "
             'match, e.g. "src/pipeline" covers src/pipeline/... never '
-            "src/pipeline_extra/...); `stats` lists the indexed paths",
+            "src/pipeline_extra/...), an exact file path, or a shell-style "
+            "glob on definition-file paths; `stats` lists the indexed paths",
         }
 
     items: list[dict[str, Any]] = []
@@ -1071,9 +1096,9 @@ def api_surface_report(
         )
     elif total == 0:
         result["note"] = (
-            "no external uses found — either the module is genuinely self-contained "
-            "or the prefix matches no indexed path; `stats` lists the indexed paths "
-            "(the match is on a path-segment boundary)"
+            "no external uses found — the module is genuinely self-contained "
+            "(`stats` lists the indexed paths; the match is on a path-segment "
+            "boundary for a directory-prefix scope)"
         )
     return result
 
@@ -1126,7 +1151,9 @@ def class_members_report(
     Named `class_members`, not `public_api`, because SCIP doesn't encode C++
     visibility — this lists members that *exist* (a fact), not a
     public/private claim. `symbol` is a name or an exact SCIP string (a unique
-    name resolves automatically; a bare class name typically also matches its
+    name resolves automatically; a prose copy artifact — a trailing sentence
+    period, a character no SCIP identifier can contain — is repaired as a
+    fallback; a bare class name typically also matches its
     own members, but a `#`-terminated name — e.g. `mongo/Foo#` — now resolves
     to the class itself, preferentially over those member substring matches).
     Unknown symbol → the shared error/candidates convention; a known non-type
@@ -1742,10 +1769,11 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         Also runs the path-filter input-hygiene gate centrally: any call
         passing `include_paths`/`exclude_paths` first checks those prefixes
         against the graph's definition files (`filters.path_prefix_error`, the
-        same helper the CLI commands run) — a prefix matching zero files is an
-        explicit error naming it, never a silent narrowing that reads as "no
-        matches". Central here so every tool that accepts the filters —
-        current or future — is covered by construction."""
+        same helper the CLI commands run) — an include prefix matching zero
+        files is an explicit error naming it, never a silent narrowing that
+        reads as "no matches"; an exclude prefix matching zero files is never
+        an error (it excludes nothing). Central here so every tool that
+        accepts the filters — current or future — is covered by construction."""
         s = stores.get()
         if s is None:
             return _no_graph_notice()
@@ -1781,7 +1809,9 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
     ) -> dict[str, Any]:
         """Use this instead of grep/ripgrep to locate a code symbol by name.
         Find C++ symbols by name. The other tools also accept a plain name (a
-        unique one resolves automatically), but `find` is how you disambiguate
+        unique one resolves automatically, with prose copy artifacts — a
+        trailing sentence period or line-wrap hyphen — repaired as a fallback),
+        but `find` is how you disambiguate
         when several symbols share a name and inspect signatures/overloads. A multi-word query is an
         order-free AND (every word must appear); overloads sharing a qualified
         name group under one result, each with a source-derived `signature` so
@@ -1835,7 +1865,9 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         exclude_paths: list[str] | None = None,
     ) -> dict[str, Any]:
         """Direct callers of a symbol (one call hop). `symbol` is a name or an
-        exact SCIP string — a unique name resolves automatically, an ambiguous one
+        exact SCIP string — a unique name resolves automatically (a prose copy
+        artifact — a trailing sentence period, a character no SCIP identifier
+        can contain — is repaired as a fallback), an ambiguous one
         returns candidates. Each caller is returned by human `name` + `file:line`
         (compact); set `full_symbols=True` for the raw SCIP strings. Test callers
         are dropped by default — pass `exclude_tests=False` to include them.
@@ -1871,7 +1903,9 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         exclude_paths: list[str] | None = None,
     ) -> dict[str, Any]:
         """Direct callees of a symbol (one call hop). `symbol` is a name or an
-        exact SCIP string — a unique name resolves automatically, an ambiguous one
+        exact SCIP string — a unique name resolves automatically (a prose copy
+        artifact — a trailing sentence period, a character no SCIP identifier
+        can contain — is repaired as a fallback), an ambiguous one
         returns candidates. Compact `name` + `file:line` by default
         (`full_symbols=True` for raw SCIP); callees in test files dropped unless
         `exclude_tests=False`. Set `hide_trivial=True` to drop ubiquitous helpers
@@ -1911,7 +1945,9 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         symbol: str, limit: int = DEFAULT_LIMIT, full_symbols: bool = False
     ) -> dict[str, Any]:
         """Direct base classes a type inherits from (`symbol` is a name or an exact
-        SCIP type string, ending in `#`; a unique name resolves automatically).
+        SCIP type string, ending in `#`; a unique name resolves automatically —
+        a prose copy artifact (a trailing sentence period, a character no SCIP
+        identifier can contain) is repaired as a fallback).
         For the full transitive base hierarchy use `reachable_from` with
         kind="inherits". Compact `name` + `file:line` by default; `full_symbols=True`
         for raw SCIP strings. `limit` caps the list.
@@ -1974,7 +2010,9 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
     @mcp.tool()
     def path(src: str, dst: str) -> dict[str, Any]:
         """Shortest chain of `calls` edges from `src` to `dst` (names or exact
-        SCIP strings; a unique name resolves automatically), as an ordered node
+        SCIP strings; a unique name resolves automatically, with a prose copy
+        artifact (a trailing sentence period, a character no SCIP identifier
+        can contain) repaired as a fallback), as an ordered node
         list with `hops`. Returns `found=false` with
         a `hint` when there's no *static* path — which may mean the flow crosses
         runtime dispatch (a virtual call / a registered factory), not that the two
@@ -2100,13 +2138,16 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
     ) -> dict[str, Any]:
         """Call-site count against a target library — "if I replace/remove this
         library, how many call sites change?", the exact number of real `calls`
-        edges whose callee is defined under one of the `target_paths` prefixes
-        (e.g. ["spirv_cross/"]). A fact, not a risk assessment: it judges
+        edges whose callee is defined under one of the `target_paths`
+        module-scope entries (e.g. ["spirv_cross/"] — each entry is a directory
+        prefix, an exact file path, or a shell-style glob on definition-file
+        paths). A fact, not a risk assessment: it judges
         nothing about API compatibility or migration difficulty. `include_paths`/
         `exclude_paths` filter the CALLER side only (e.g. exclude_paths=["vendor/"]
         = "call sites from my code, not other vendored users of the same
         library"); pass `exclude_tests=True` to drop edges touching test-defined
-        symbols. Response: `total_call_sites` (the headline "N call sites"
+        symbols. A target matching zero indexed files is an error naming the
+        entry. Response: `total_call_sites` (the headline "N call sites"
         answer), `distinct_target_symbols`, and `top_targets` — which symbols
         in the library are hit hardest, bounded by `limit` (raise it when
         `truncated`; the totals are always full). The complementary inward view —
@@ -2224,7 +2265,10 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         region may run lazily rather than at initialization — the tool reports
         the reference (a standing `note` on every response), the LLM judges
         the hazard. `symbol` is a name or an exact SCIP string (a unique name
-        resolves automatically); each entry names the referenced global and
+        resolves automatically; a prose copy artifact — a trailing sentence
+        period, a character no SCIP identifier can contain — is repaired as a
+        fallback); each entry names the
+        referenced global and
         its first use site in the region. Needs a graph with attributed
         references (a #504-built scip-clang AND `--attributed-refs` /
         `enrich-refs`): on anything less the tool returns `available: false`
@@ -2358,7 +2402,9 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         full_symbols: bool = False,
     ) -> dict[str, Any]:
         """The actually-used external surface of a module: definitions under a
-        directory prefix (`module_prefix`, e.g. "src/pipeline/") that are
+        module scope (`module_prefix` — a directory prefix like "src/pipeline/",
+        an exact file path, or a shell-style glob on definition-file paths)
+        that are
         called/referenced from OUTSIDE it — the observed surface, as opposed
         to what is merely declared public (SCIP has no visibility info to
         check against anyway). Each entry carries `external_calls` and
@@ -2367,16 +2413,17 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         answer is call sites only, flagged `refs_available: false` with a
         note (type uses are invisible without the reference index).
         `exclude_tests` drops uses whose use site or used definition is in a
-        test file. `module_prefix` is the directory path prefix, passed by its
+        test file. `module_prefix` is the scope string, passed by its
         exact name — unknown parameter names (a typo like `path=`) are
-        rejected, never ignored. `limit` caps
+        rejected, never ignored. A scope matching zero indexed files is an
+        error naming it. `limit` caps
         the list (default 40): raise it when
         `truncated` — `total` always reports the full count. The complementary
         outward view — how many call sites outside code runs into a module
         (e.g. before replacing it) — is `dependency_cost`."""
         return _call(
             api_surface_report,
-            module_prefix,
+            module_prefix=module_prefix,
             limit=limit,
             exclude_tests=exclude_tests,
             full_symbols=full_symbols,
@@ -2417,7 +2464,9 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
     ) -> dict[str, Any]:
         """Every member declared on a class/struct — methods, fields, nested
         types — the class's real member list, replacing a header grep. `symbol`
-        is a name or an exact SCIP string (a unique name resolves automatically,
+        is a name or an exact SCIP string (a unique name resolves automatically —
+        a prose copy artifact such as a trailing sentence period or line-wrap
+        hyphen is repaired as a fallback,
         an ambiguous one returns candidates — a bare class name typically also
         matches its own members, so pick the `#`-terminated entry); an unknown
         or non-type symbol comes back as an error dict. Named `class_members`,
@@ -2474,7 +2523,10 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         hide_trivial: bool = False,
     ) -> dict[str, Any]:
         """Use this instead of grep/sed/opening the file to read a symbol's
-        definition. Definition site + caller/callee summary for `symbol`. Returns
+        definition. Definition site + caller/callee summary for `symbol` — a
+        name or an exact SCIP string (a unique name resolves; a prose copy
+        artifact — a trailing sentence period, a character no SCIP identifier
+        can contain — is repaired as a fallback). Returns
         `file:line` coordinates by default; set `include_source=True` to also get
         the definition's source snippet **inline** (cppgraph reads it for you — no
         separate file read needed), `context` lines around the definition. `limit`
