@@ -680,6 +680,15 @@ def write_sqlite(graph: Graph, path: str | Path, *, meta: dict[str, str] | None 
         # confident false negative.
         if graph.log_ids_extracted:
             all_meta.setdefault("log_ids_extracted", "true")
+        # The skip count behind the marker above (how many scanned documents'
+        # sources were unreadable): recorded whenever the extraction RAN —
+        # 0 on a certified table, N on an uncertified one — so a read-time
+        # miss on an uncertified table can state the actual incompleteness
+        # instead of a blanket "rebuild". None (extraction never ran —
+        # e.g. the incremental paths' partial graphs with no usable
+        # project_root) records nothing.
+        if graph.log_id_skips is not None:
+            all_meta.setdefault("log_id_skips", str(graph.log_id_skips))
         # External-package symbol metadata (`Index.external_symbols`
         # classification): set by the BUILDER (`graph.has_external_symbols`) on
         # any graph it produces, so a FULL build claims the capability
@@ -2875,8 +2884,20 @@ class GraphStore:
                     "INSERT INTO meta(key, value) VALUES ('log_ids_extracted', 'true') "
                     "ON CONFLICT(key) DO UPDATE SET value = 'true'"
                 )
+                # Both halves re-extracted completely (0 skips each side), so
+                # the recorded count — alongside the marker it qualifies —
+                # stays consistent at 0.
+                con.execute(
+                    "INSERT INTO meta(key, value) VALUES ('log_id_skips', '0') "
+                    "ON CONFLICT(key) DO UPDATE SET value = '0'"
+                )
             else:
                 con.execute("DELETE FROM meta WHERE key = 'log_ids_extracted'")
+                # The skip count qualifies the marker; once the marker is
+                # gone the old count no longer describes the store (the
+                # partial covered only the changed files) — drop it rather
+                # than report a stale N.
+                con.execute("DELETE FROM meta WHERE key = 'log_id_skips'")
             if stale_shape:
                 con.execute(
                     "INSERT INTO meta(key, value) VALUES ('schema_version', ?) "

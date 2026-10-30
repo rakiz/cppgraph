@@ -79,6 +79,21 @@ ECHOED back — cppgraph never resolves it against anything it doesn't have
   guessed symbol. Note the honest limit: the table maps ids to ENCLOSING
   symbols of occurrences indexed at build time; a log statement added
   after the index build is `not_found` even on the right revision.
+- **Miss semantics under v2 — the three cases, exactly**: (a) a FOUND row is
+  always real evidence, certified table or not — it answers with the normal
+  `found: true` shape; (b) a MISS on a CERTIFIED table (`log_id_table: true`)
+  is definitive — "no log-id entry for this id in this graph"; (c) a MISS on
+  an UNCERTIFIED table (the table exists but the `log_ids_extracted` marker
+  is unset — e.g. a checkout where some indexed documents' sources were
+  absent, so their rows could not be extracted) is UNVERIFIED, never a
+  definitive absence: the reason names the recorded skip count
+  (`log_id_skips` meta) — "…the log-id table is not certified complete (N
+  source document(s) unreadable at build time): treat this miss as
+  unverified, not as a definitive absence" — or stays generic when no count
+  was recorded (a store whose extraction never ran at all). `log_id_table`
+  is `false` on an uncertified table either way, and `contract_version`
+  stays 2 — the `reason` string was always freeform, so this is a wording
+  refinement, not a shape change.
 - **Bounded**: `callers` is capped; the whole answer stays within
   redwood's ≤ 1500-token budget for ≤ 2 ids per call.
 

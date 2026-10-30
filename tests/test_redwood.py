@@ -290,7 +290,9 @@ def test_update_on_v5_store_without_marker_still_degrades(repo) -> None:
     re-extracts its changed files completely: the marker must still be absent
     — the partial's true claim cannot certify rows for the UNCHANGED files,
     which were never extracted (the two-true-conjuncts invariant). The store
-    degrades honestly instead of answering confident false found:false."""
+    degrades honestly: found rows are real evidence and answer normally, but
+    a MISS stays unverified (uncertified reason, log_id_table False) instead
+    of a confident false negative."""
     from cppgraph.pipeline import update_store
 
     r, _c, _h = repo
@@ -301,8 +303,11 @@ def test_update_on_v5_store_without_marker_still_degrades(repo) -> None:
     con.close()
     doc = log_id_lookup_document(db, r, [12983100], None)
     assert doc["log_id_table"] is False
-    assert doc["ids"][0]["found"] is False
-    assert doc["ids"][0]["reason"]
+    # The partial re-extracted src.cpp's rows: found = evidence.
+    assert doc["ids"][0]["found"] is True
+    miss = log_id_lookup_document(db, r, [9999999], None)["ids"][0]
+    assert miss["found"] is False
+    assert "not certified complete" in miss["reason"]
 
 
 def test_full_build_marker_preserved_through_update(repo) -> None:
@@ -387,9 +392,142 @@ def test_full_build_with_unreadable_source_withholds_marker(repo) -> None:
     assert con.execute("SELECT value FROM meta WHERE key='log_ids_extracted'").fetchone() is None
     con.close()
     doc = log_id_lookup_document(db, r, [12983100], None)
+    # The table is uncertified (log_id_table stays False), but the readable
+    # document's rows are real evidence: a present id answers found:True
+    # normally; only misses degrade to the unverified reason.
+    assert doc["log_id_table"] is False
+    assert doc["ids"][0]["found"] is True
+    miss = log_id_lookup_document(db, r, [9999999], None)["ids"][0]
+    assert miss["found"] is False
+    assert "1" in miss["reason"] and "unverified" in miss["reason"]
+
+
+# --- uncertified-but-populated tables: found = evidence, miss = unverified -----
+
+
+def _store_with_ghost_document(repo) -> Path:
+    """A FULL extraction build where one scanned document's source is
+    unreadable (the real-mongo finding: bazel-generated files absent from the
+    checkout): the table IS populated with the readable documents' rows, but
+    the `log_ids_extracted` marker is withheld and the skip count is 1."""
+    r, commit, _head = repo
+    index = _index()
+    ghost = index.documents.add()
+    ghost.relative_path = "ghost.cpp"  # not on disk
+    gs = ghost.symbols.add()
+    gs.symbol = H
+    gs.display_name = "h"
+    gocc = ghost.occurrences.add()
+    gocc.symbol = H
+    gocc.symbol_roles = 1
+    gocc.range.extend([0, 0, 2, 1])
+    gocc.enclosing_range.extend([0, 0, 2, 1])
+    index.metadata.project_root = f"file://{r}"
+    graph = build_graph(index, extract_log_ids=True)
+    db = r / ".cppgraph" / "t.graph.db"
+    write_sqlite(graph, db, meta={"source_commit": commit})
+    return db
+
+
+def test_store_records_log_id_skip_count(repo) -> None:
+    """A build with skipped (unreadable) documents records the count in the
+    store meta (`log_id_skips`) alongside the withheld marker; a clean build
+    records 0."""
+    r, _c, _h = repo
+    db = _store_with_ghost_document(repo)
+    con = sqlite3.connect(db)
+    assert con.execute("SELECT value FROM meta WHERE key='log_id_skips'").fetchone()[0] == "1"
+    assert con.execute("SELECT value FROM meta WHERE key='log_ids_extracted'").fetchone() is None
+    con.close()
+    clean = _store_with(repo)
+    con = sqlite3.connect(clean)
+    assert con.execute("SELECT value FROM meta WHERE key='log_id_skips'").fetchone()[0] == "0"
+    con.close()
+
+
+def test_miss_on_uncertified_table_names_skip_count(repo) -> None:
+    """A miss on a populated-but-uncertified table is precise: not a
+    definitive absence — the reason carries the skip count N from meta and
+    says the miss is unverified. `log_id_table` stays False (no semantics
+    change on the flag)."""
+    r, _c, _h = repo
+    doc = log_id_lookup_document(_store_with_ghost_document(repo), r, [9999999], None)
+    assert doc["log_id_table"] is False
+    miss = doc["ids"][0]
+    assert miss["found"] is False
+    assert "1" in miss["reason"]
+    assert "unverified" in miss["reason"]
+    assert "not certified complete" in miss["reason"]
+
+
+def test_found_row_on_uncertified_table_answers_normally(repo) -> None:
+    """A found row is always real evidence: the same uncertified store answers
+    a present id with the normal found:True shape (symbol, scip, location,
+    callers)."""
+    r, _c, _h = repo
+    doc = log_id_lookup_document(_store_with_ghost_document(repo), r, [12983100], None)
+    assert doc["log_id_table"] is False  # uncertified: the flag stays False
+    hit = doc["ids"][0]
+    assert hit["found"] is True
+    assert hit["scip"] == F
+    assert hit["location"] == "src.cpp:2"
+
+
+def test_miss_on_certified_table_keeps_plain_reason(repo) -> None:
+    """On a marker-set store a miss stays the plain definitive reason."""
+    r, _c, _h = repo
+    doc = log_id_lookup_document(_store_with(repo), r, [9999999], None)
+    assert doc["log_id_table"] is True
+    assert doc["ids"][0]["reason"] == "no log-id entry for this id in this graph"
+
+
+def test_no_table_store_keeps_old_reason(repo) -> None:
+    """A store without the table keeps the v1 reason, unchanged."""
+    r, _c, _h = repo
+    graph = _build(r)
+    db = r / ".cppgraph" / "t.graph.db"
+    write_sqlite(graph, db, meta={"source_commit": repo[1]})
+    con = sqlite3.connect(db)
+    con.execute("DROP TABLE log_ids")
+    con.commit()
+    con.close()
+    doc = log_id_lookup_document(db, r, [12983100], None)
+    assert doc["ids"][0]["reason"] == ("graph store predates the log-id table (rebuild to get it)")
+
+
+def test_uncertified_table_without_skip_meta_keeps_generic_reason(repo) -> None:
+    """A table whose marker is unset but which carries no skip count (a
+    v5-upgraded store,     never extracted) keeps the generic uncertified reason —
+    no fabricated N."""
+    from cppgraph.store import enrich_references
+
+    r, _c, _h = repo
+    db = _make_v5_store(repo, with_refs=True)
+
+    enrich_references(db, _index())  # creates the (empty) table, no marker, no count
+    doc = log_id_lookup_document(db, r, [12983100], None)
     assert doc["log_id_table"] is False
     assert doc["ids"][0]["found"] is False
-    assert doc["ids"][0]["reason"]
+    assert "not certified complete" in doc["ids"][0]["reason"]
+    assert "unverified" not in doc["ids"][0]["reason"]
+
+
+def test_zero_skip_meta_falls_back_to_generic_reason(repo) -> None:
+    """Belt-and-braces: a hypothetic `log_id_skips='0'` under a WITHHELD
+    marker (an inconsistent store — 0 skips would have set the marker) falls
+    back to the generic reason instead of the nonsensical "0 source
+    document(s) unreadable"."""
+    r, _c, _h = repo
+    db = _store_with(repo)  # log_id_skips='0', marker set
+    con = sqlite3.connect(db)
+    con.execute("DELETE FROM meta WHERE key='log_ids_extracted'")
+    con.commit()
+    con.close()
+    doc = log_id_lookup_document(db, r, [9999999], None)
+    assert doc["log_id_table"] is False
+    assert doc["ids"][0]["found"] is False
+    assert "not certified complete" in doc["ids"][0]["reason"]
+    assert "unverified" not in doc["ids"][0]["reason"]
 
 
 # --- the query surface (pure function) ----------------------------------------

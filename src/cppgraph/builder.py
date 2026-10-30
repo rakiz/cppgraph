@@ -420,7 +420,10 @@ def build_graph(
     the marker means "extraction ran to completion over all scanned
     sources", i.e. "every row is complete", and a store without it degrades
     at read time to a reasoned `found: false` instead of confident false
-    negatives. Written to the store's `log_ids` table by `write_sqlite`.
+    negatives — the skip count is recorded too (`Graph.log_id_skips` → the
+    store's `log_id_skips` meta), so a miss on such a table states HOW
+    incomplete the build was (an unverified miss, not a definitive absence).
+    Written to the store's `log_ids` table by `write_sqlite`.
 
     Always-on (no parameter): `Index.external_symbols` — symbols referenced
     from this index but defined in an un-indexed external package — is
@@ -446,12 +449,14 @@ def build_graph(
         # Provisionally claim extraction ran; finalized after the document
         # loop below — the marker is withheld when ANY scanned document's
         # source was unreadable (see log_id_skips), because it means "every
-        # row is complete", not "best-effort rows".
+        # row is complete", not "best-effort rows". The skip count is recorded
+        # on the graph regardless (store meta `log_id_skips`, alongside the
+        # marker) so an uncertified table can state HOW incomplete it was.
         if log_source_root is not None:
             graph.log_ids_extracted = True
-            log_id_skips = 0
+            graph.log_id_skips = 0
         else:
-            log_id_skips = None
+            graph.log_id_skips = None
 
     # `Index.external_symbols` first: symbols referenced from this index but
     # defined in an un-indexed external package (boost/absl/stdlib/… — a
@@ -596,7 +601,8 @@ def build_graph(
 
             source = read_source(log_source_root, doc.relative_path)
             if source is None:
-                log_id_skips += 1  # completeness marker withheld (finalized below)
+                # completeness marker withheld (finalized below)
+                graph.log_id_skips = (graph.log_id_skips or 0) + 1
             else:
                 occurrences = extract_log_occurrences(source)
                 attributed = _attribute_containment(
@@ -650,7 +656,9 @@ def build_graph(
         # Finalize the completeness marker (see the provisional claim above):
         # it stands only when EVERY scanned document's source was readable —
         # a single skip means rows are missing for that document, and the
-        # claim "extraction ran to completion" would be false.
-        graph.log_ids_extracted = log_id_skips == 0
+        # claim "extraction ran to completion" would be false. The skip count
+        # itself stays on the graph (`log_id_skips`) — `write_sqlite` records
+        # it in the store meta even when the marker is withheld.
+        graph.log_ids_extracted = graph.log_id_skips == 0
 
     return graph

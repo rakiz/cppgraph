@@ -8,6 +8,42 @@ on-disk store also carries its own `schema_version` for forward-compatibility.
 
 ### Fixed
 
+- **A miss on an uncertified-but-populated log-id table is now reported as
+  UNVERIFIED, not as a definitive absence.** The real-mongo finding: the
+  store WAS built with extraction (rows present in `log_ids`), but the
+  `log_ids_extracted` marker was withheld because some scip documents'
+  sources (bazel-generated files) were absent from the checkout — and the
+  lookup then answered every miss with the blanket "table not certified
+  complete — rebuild", making the feature dead on any real imperfect
+  checkout. The refinement keeps the honesty and restores usability: the
+  dangerous direction is only the not-found side, so (1) the build now
+  records its skip count in the store meta (`log_id_skips=N` alongside the
+  marker; the marker stays "true" iff N==0, semantics unchanged —
+  `Graph.log_id_skips`, `write_sqlite`; `apply_update` keeps it consistent:
+  set to 0 when the marker is preserved, dropped when cleared); (2) on a
+  table that EXISTS but is uncertified, a found row now answers with the
+  normal `found: true` shape (a found row is always real evidence —
+  `log_id_table` stays `false` on uncertified tables, no flag-semantics
+  change), and a miss's reason names the recorded count: "no log-id entry
+  for this id — the log-id table is not certified complete (N source
+  document(s) unreadable at build time): treat this miss as unverified, not
+  as a definitive absence" (generic reason when no count was recorded, e.g.
+  a store whose extraction never ran; `contract_version` stays 2 — the
+  reason string was always freeform). Certified-table misses keep the plain
+  definitive reason; no-table stores keep the old reason.
+  Tests: `tests/test_redwood.py`
+  (`::test_store_records_log_id_skip_count`,
+  `::test_miss_on_uncertified_table_names_skip_count`,
+  `::test_found_row_on_uncertified_table_answers_normally`,
+  `::test_miss_on_certified_table_keeps_plain_reason`,
+  `::test_no_table_store_keeps_old_reason`,
+  `::test_uncertified_table_without_skip_meta_keeps_generic_reason`, updated
+  `::test_full_build_with_unreadable_source_withholds_marker`,
+  `::test_update_on_v5_store_without_marker_still_degrades` — a
+  valid-root partial's re-extracted rows are evidence, so its ids now
+  answer `found: true` on the still-uncertified store). Doc:
+  redwood_integration.md §1 (miss semantics under v2, the three cases).
+
 - **The redwood log-id extractor now matches mongo's canonical `LOGV2` form
   (contract bumped v1 → v2).**
   Validating on a mongo checkout showed the extraction pattern deliberately

@@ -136,6 +136,13 @@ class Graph:
     # (table created empty by `apply_update`/`enrich_references`, never
     # backfilled) would answer every LOG id a confident false `found: false`.
     log_ids_extracted: bool = False
+    # The number of scanned documents whose source was unreadable during the
+    # log-id extraction (None when extraction did not run at all). `write_sqlite`
+    # records it as the `log_id_skips` meta entry alongside the
+    # `log_ids_extracted` marker (which stays "true" iff this is 0), so a
+    # read-time miss on an uncertified table can say HOW incomplete the build
+    # was instead of a blanket "rebuild".
+    log_id_skips: int | None = None
 
     def add_node(self, symbol: str, *, display_name: str = "") -> Node:
         node = self.nodes.get(symbol)

@@ -117,12 +117,16 @@ convention, same as `resolve`).
   table presence AND the `log_ids_extracted` meta marker, which means
   "extraction ran to completion over all scanned sources" — every row is
   complete: a FULL build withholds it when any document's source was
-  unreadable, `apply_update` clears it when the partial re-extraction could
+  unreadable (the skip count is recorded as the `log_id_skips` meta entry),
+  `apply_update` clears it when the partial re-extraction could
   not run (e.g. the index's project_root missing on disk — the changed
   files' rows would otherwise be silently lost under a true marker), and
   `enrich_references` never sets it (it never backfills). Either absence
-  degrades to the reasoned `found: false`, never a confident false
-  negative.
+  keeps `log_id_table: false`, and the miss semantics are threefold: a
+  FOUND row is always real evidence (an uncertified table is queried too);
+  a miss on a CERTIFIED table is definitive; a miss on an UNCERTIFIED table
+  is UNVERIFIED — the reason names the recorded skip count ("N source
+  document(s) unreadable at build time"), never a confident false negative.
 - Bounded: `callers` is capped at `CALLERS_LIMIT` entries with visible
   `truncated`/`total`; the whole answer stays within redwood's ≤1500-token
   budget for ≤ 2 ids.
@@ -172,13 +176,33 @@ _PLAIN_INT_RE = re.compile(r"^[0-9]+$")
 
 _NO_TABLE_REASON = "graph store predates the log-id table (rebuild to get it)"
 # An upgraded store, or one whose extraction did not run to completion: the
-# table exists but the `log_ids_extracted` marker is unset — its rows were
-# never (fully) backfilled, so answering would be a confident false negative.
+# table exists but the `log_ids_extracted` marker is unset AND no skip count
+# is recorded (never extracted at all) — its rows were never backfilled, so
+# answering would be a confident false negative.
 _NOT_EXTRACTED_REASON = (
     "graph store's log-id table is not certified complete "
     "(log_ids_extracted unset — rebuild with cppgraph build to extract it)"
 )
 _NO_ROW_REASON = "no log-id entry for this id in this graph"
+
+
+def _uncertified_miss_reason(meta: dict[str, str]) -> str:
+    """The miss reason on a table that exists but is not certified complete
+    (marker unset). When the build recorded its skip count (`log_id_skips`
+    meta, written by `write_sqlite`), the reason is precise: a miss on such a
+    table is UNVERIFIED — the rows that were extracted are real evidence (a
+    found row always answers normally), but this id may live in one of the N
+    documents whose source was unreadable at build time. Without a recorded
+    count the reason stays generic (no fabricated N, and a hypothetic "0" —
+    skips without a withheld marker — falls back to generic too)."""
+    raw = meta.get("log_id_skips")
+    if raw is not None and raw.isdigit() and int(raw) > 0:
+        return (
+            f"no log-id entry for this id — the log-id table is not certified complete "
+            f"({raw} source document(s) unreadable at build time): treat this miss as "
+            f"unverified, not as a definitive absence"
+        )
+    return _NOT_EXTRACTED_REASON
 
 
 class LogIdLookupError(RuntimeError):
@@ -360,7 +384,9 @@ def _open_store(db: Path) -> tuple[SQLiteConnection, dict[str, str], bool, bool]
     completion over all scanned sources"; set only by a full extraction
     build, preserved by `apply_update` only when its partial re-extracted
     completely, cleared when it could not, never set by `enrich_references`)
-    — live with the SQL, in `store.py`."""
+    — live with the SQL, in `store.py`. The `log_id_skips` meta entry (the
+    count behind a withheld marker) is read from the meta this returns and
+    drives the uncertified-miss reason's precision."""
     try:
         return open_log_id_capability(db)
     except IncompatibleStoreError as e:
@@ -431,10 +457,14 @@ def log_id_lookup_document(
         has_table = table_present and extracted
         for log_id in ids:
             entry: dict[str, Any] = {"id": log_id}
-            if not has_table:
-                reason = _NO_TABLE_REASON if not table_present else _NOT_EXTRACTED_REASON
-                entries.append({**entry, "found": False, "reason": reason})
+            if not table_present:
+                entries.append({**entry, "found": False, "reason": _NO_TABLE_REASON})
                 continue
+            # The table exists: its rows are always real evidence, certified
+            # or not — an uncertified table is consulted too, and only the
+            # NOT-FOUND side carries the caveat (below). `log_id_table`
+            # reports the certified gate (`table_present and extracted`), so
+            # an uncertified table keeps the flag False — no semantics change.
             rows = conn.execute(
                 """
                 SELECT s.symbol, s.display_name, f.path, l.line
@@ -447,7 +477,8 @@ def log_id_lookup_document(
                 (log_id,),
             ).fetchall()
             if not rows:
-                entries.append({**entry, "found": False, "reason": _NO_ROW_REASON})
+                reason = _NO_ROW_REASON if extracted else _uncertified_miss_reason(meta)
+                entries.append({**entry, "found": False, "reason": reason})
                 continue
             scip, display, path, line = rows[0]
             hit = {
