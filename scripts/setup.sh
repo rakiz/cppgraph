@@ -96,7 +96,7 @@ if [ -n "${VIRTUAL_ENV:-}" ] && [ "$VIRTUAL_ENV" != "$VENV" ]; then
   echo "  note: ignoring active VIRTUAL_ENV ($VIRTUAL_ENV); installing into $VENV"
 fi
 [ -d "$VENV" ] && echo "  reusing existing .venv" || uv venv "$VENV"
-uv pip install --python "$VENV/bin/python" -e ".[dev,mcp,tui]"
+uv pip install --python "$VENV/bin/python" -e ".[dev,tui]"
 
 # Hand off to the interactive setup (scip-clang -> MCP -> project index wizard).
 exec "$VENV/bin/cppgraph" setup ${passthrough[@]+"${passthrough[@]}"}

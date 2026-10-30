@@ -61,11 +61,12 @@ This installs the committed, pre-generated protobuf bindings' runtime
 dependency (`protobuf`) — you do **not** need `protoc` for this step. See
 §3 for when `protoc` actually is needed.
 
-To also run the MCP server (`cppgraph-mcp`, exposes the graph to an LLM),
-install the optional `mcp` extra — it's not needed for the core build/query CLI:
+The MCP server (`cppgraph-mcp`, exposes the graph to an LLM) needs no extra —
+it is part of the core install (a hand-rolled stdio JSON-RPC server, zero
+third-party protocol dependencies):
 
 ```bash
-uv pip install -e ".[dev,mcp]"
+uv pip install -e ".[dev,tui]"
 # then, pointed at a built graph:
 .venv/bin/cppgraph-mcp --graph scratch/myproject.graph.db --root /path/to/checkout
 ```

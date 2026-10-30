@@ -6,6 +6,50 @@ on-disk store also carries its own `schema_version` for forward-compatibility.
 
 ## [Unreleased]
 
+### Changed
+
+- **Zero-dependency MCP server: the hand-rolled stdio server replaces the
+  FastMCP-based one (TODO "Drop the `mcp` dependency", DECIDED 2026-10-30).**
+  `cppgraph-mcp` now speaks newline-delimited JSON-RPC 2.0 over stdio directly
+  (stdlib only), with exactly five methods — `initialize` (echoes the client's requested
+  version when it is one of 2024-11-05 / 2025-03-26 / 2025-06-18, else the
+  pinned newest `PROTOCOL_VERSION` "2025-06-18"; malformed params → -32602),
+  `notifications/initialized`, `ping` (answered with an empty result, as the
+  spec requires), `tools/list`, `tools/call` — following the
+  pattern masora proved at 12 tools: tool failures are `isError: true` results,
+  never protocol crashes; protocol-level failures are JSON-RPC errors
+  (-32700/-32600/-32601/-32602/-32603); a malformed line never stops the loop
+  (stderr warning) — including undecodable stdin bytes, an unserializable tool
+  payload (an `isError` result) and any unexpected per-line failure (-32603
+  when the request id is recoverable). Wire shape unchanged — a golden test
+  (`test_tools_list_golden_matches_the_pre_hand_rolled_wire_shape`, fixture
+  `tests/fixtures/mcp_tools_list_old_fastmcp.json`, captured over real stdio
+  from the old stack) pins the 26 tools' names, descriptions, schemas, and
+  order byte-equivalent. The 26 tool wrappers and their docstrings are
+  untouched; the `@mcp.tool()` decorators became a hand-declared registry
+  (schemas derived from each handler's signature — the same shapes the library
+  generated, so they cannot drift), the strict unknown-parameter gate
+  (`_StrictArgsFastMCP`'s semantics, §9.8a) lives in the dispatch
+  (`call_tool`), plus fail-closed required/wrong-type argument validation
+  naming the parameter — including wrong-typed list elements (an error naming
+  the parameter and the element's index path). That validation is deliberately
+  NARROWER than the library's lax mode, and clients may notice: `5.0` for an
+  integer parameter and `"true"` for a boolean (which the old stack coerced)
+  are now refused with an explicit argument-validation error; a digit string
+  (`"40"`) is the one integer coercion kept.   Deliberate changes, visible only on the protocol edge:
+  `serverInfo.version` now reports cppgraph's own version (the old stack
+  leaked the MCP library's) and an unknown method
+  returns the spec-correct -32601 (the library returned -32602); an explicit
+  `null` for a nullable (`X | None`) parameter is now accepted — the schema
+  advertises it, and the first hand-rolled validation refused it. The
+  `mcp>=1.2,<2` dependency and the `mcp` extra are gone from `pyproject.toml`
+  (the pin problem is deleted, not resolved — no mcp 2.x migration needed, no
+  OTel footprint); `setup.sh` installs `.[dev,tui]`; INSTALL.md updated (the
+  MCP server needs no extra). Tests: `tests/test_mcp_server.py` protocol
+  section (initialize negotiation, error paths, malformed-line resilience,
+  end-to-end tools/call over injected stdio), full suite green with the `mcp`
+  package uninstalled from the venv.
+
 ### Added
 
 - **Module scoping by files and globs, not only by directory.** `api-surface`'s

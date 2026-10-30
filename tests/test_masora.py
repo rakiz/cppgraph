@@ -1226,7 +1226,7 @@ def mcp_store(tmp_path: Path) -> Any:
 
 
 def _tool(server: Any, name: str) -> Any:
-    return server._tool_manager._tools[name].fn
+    return server.tools[name].fn
 
 
 def test_mcp_wrappers_attach_masora_field(

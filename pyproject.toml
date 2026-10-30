@@ -15,14 +15,8 @@ dev = [
     "pytest>=8.0",
     "ruff>=0.10",
 ]
-# The MCP server (Phase 3) is optional: the core build/query CLI works without
-# it. Install with `pip install -e .[mcp]` to expose the graph to an LLM.
-mcp = [
-    # Pinned <2: the mcp 2.x line broke the client API the server is written
-    # against (observed: 2.3.0 breaks every mcp-importing test). Bump only as
-    # a deliberate migration, never via a floating resolution.
-    "mcp>=1.2,<2",
-]
+# The MCP server (`cppgraph-mcp`) needs no extra: it is a hand-rolled stdio
+# JSON-RPC server over the standard library (no third-party protocol package).
 # The interactive setup/index wizards render selectable menus and info panels when
 # these are present; without them they fall back to plain numbered prompts.
 tui = [

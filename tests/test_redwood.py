@@ -727,7 +727,6 @@ def test_mcp_parity_same_function(repo: Path) -> None:
     the CLI (`cppgraph.redwood.log_id_lookup_document`) — parity by routing,
     not by forked logic. Dispatched through the server's PUBLIC `call_tool`
     (the tests/test_json_docs.py MCP-parity pattern), no internals reached."""
-    import asyncio
 
     from cppgraph import mcp_server
 
@@ -736,13 +735,9 @@ def test_mcp_parity_same_function(repo: Path) -> None:
     server = mcp_server.build_server(str(db), root=str(r))
 
     def _call(arguments: dict[str, Any]) -> dict[str, Any]:
-        result = asyncio.run(server.call_tool("log_id_lookup", arguments))
-        # PINNED shape of the installed FastMCP: a `(list[TextContent], dict)`
-        # tuple whose 2nd element IS the structured payload (verified
-        # empirically against the installed version; no multi-shape fallback).
-        assert isinstance(result, tuple) and len(result) == 2
-        assert isinstance(result[0], list) and isinstance(result[1], dict)
-        return result[1]
+        result = server.call_tool("log_id_lookup", arguments)
+        assert not result.get("isError"), result
+        return json.loads(result["content"][0]["text"])
 
     doc = _call({"ids": [12983100], "revision": "deadbeef"})
     expected = log_id_lookup_document(db, r, [12983100], "deadbeef")

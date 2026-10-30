@@ -1,0 +1,1375 @@
+[
+ {
+  "name": "find",
+  "description": "Use this instead of grep/ripgrep to locate a code symbol by name.\nFind C++ symbols by name. The other tools also accept a plain name (a\nunique one resolves automatically, with prose copy artifacts — a\ntrailing sentence period or line-wrap hyphen — repaired as a fallback),\nbut `find` is how you disambiguate\nwhen several symbols share a name and inspect signatures/overloads. A multi-word query is an\norder-free AND (every word must appear); overloads sharing a qualified\nname group under one result, each with a source-derived `signature` so\nthe arms are distinguishable. When the graph was built from a\nkind-patched scip-clang (`has_symbol_kind`), the symbol's fine-grained\nSCIP kind is returned as `scip_kind` (e.g. \"StaticMethod\") on the entry\nand each `signatures[i]` arm — absent on graphs without that data.\nWhen the graph carries external-package symbol metadata\n(`has_external_symbols`), `is_out_of_project` (true = defined in an\nun-indexed external package, false = project-native, null = no\nSymbolInformation from either source; a grouped entry is null when its\narms disagree) rides on the entry and each arm — absent on graphs\nwithout that data. If\nnothing matches exactly, `find` relaxes\n(a `Class::method` guess is first retried with SCIP's `Class#method`\nseparator, then case/separator-insensitively — `changestream` ~\n`change_stream` — then, for a `Class#method` guess, the bare leaf name)\nand flags the response `relaxed`. Set `hide_trivial=True` to drop compiler-generated /\nboilerplate hits (lambdas, operators, `*assert`, `makeStatus`, …) —\n`trivial_hidden` reports how many were cut. `include_paths`/\n`exclude_paths` filter matches by their definition file's path prefix\n(e.g. scope out vendored deps) — if a broad query returns mostly\ngenerated-code clutter (IDL Spec/getter classes and the like), scope it\nwith these prefixes; the tool won't auto-detect \"generated code\".\n`limit` caps the list\n(default 40): lower it to spend fewer tokens, raise it when `truncated`.\nWhen the `CPPGRAPH_MASORA` flag is on, matching Masora facts ride along\nas the `masora` field — ONE batched spawn for all result symbols\n(§9.10); a zero-fact response carries one of §6's v3 notices —\nmasora's presence hint verbatim on an empty base, the derived\nstaleness line otherwise; absent when nothing injects.",
+  "inputSchema": {
+   "properties": {
+    "query": {
+     "title": "Query",
+     "type": "string"
+    },
+    "limit": {
+     "default": 40,
+     "title": "Limit",
+     "type": "integer"
+    },
+    "hide_trivial": {
+     "default": false,
+     "title": "Hide Trivial",
+     "type": "boolean"
+    },
+    "include_paths": {
+     "anyOf": [
+      {
+       "items": {
+        "type": "string"
+       },
+       "type": "array"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Include Paths"
+    },
+    "exclude_paths": {
+     "anyOf": [
+      {
+       "items": {
+        "type": "string"
+       },
+       "type": "array"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Exclude Paths"
+    }
+   },
+   "required": [
+    "query"
+   ],
+   "title": "findArguments",
+   "type": "object"
+  },
+  "outputSchema": {
+   "additionalProperties": true,
+   "title": "findDictOutput",
+   "type": "object"
+  }
+ },
+ {
+  "name": "who_calls",
+  "description": "Direct callers of a symbol (one call hop). `symbol` is a name or an\nexact SCIP string — a unique name resolves automatically (a prose copy\nartifact — a trailing sentence period, a character no SCIP identifier\ncan contain — is repaired as a fallback), an ambiguous one\nreturns candidates. Each caller is returned by human `name` + `file:line`\n(compact); set `full_symbols=True` for the raw SCIP strings. Test callers\nare dropped by default — pass `exclude_tests=False` to include them.\n`include_paths`/`exclude_paths` further filter callers by their\ndefinition file's path prefix (e.g. scope out vendored deps).\n`limit` caps the list (default 40): lower it to spend fewer tokens when a\nfew callers are enough, raise it when `truncated` is true.\nWhen the `CPPGRAPH_MASORA` flag is on, matching Masora facts ride\nalong as the `masora` field (rendered lines; a zero-fact response\ncarries one of §6's v3 notices — masora's presence hint verbatim or\nthe derived staleness line; absent when nothing injected — the same\nlines the CLI's `callers` appends).",
+  "inputSchema": {
+   "properties": {
+    "symbol": {
+     "title": "Symbol",
+     "type": "string"
+    },
+    "limit": {
+     "default": 40,
+     "title": "Limit",
+     "type": "integer"
+    },
+    "full_symbols": {
+     "default": false,
+     "title": "Full Symbols",
+     "type": "boolean"
+    },
+    "exclude_tests": {
+     "default": true,
+     "title": "Exclude Tests",
+     "type": "boolean"
+    },
+    "include_paths": {
+     "anyOf": [
+      {
+       "items": {
+        "type": "string"
+       },
+       "type": "array"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Include Paths"
+    },
+    "exclude_paths": {
+     "anyOf": [
+      {
+       "items": {
+        "type": "string"
+       },
+       "type": "array"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Exclude Paths"
+    }
+   },
+   "required": [
+    "symbol"
+   ],
+   "title": "who_callsArguments",
+   "type": "object"
+  },
+  "outputSchema": {
+   "additionalProperties": true,
+   "title": "who_callsDictOutput",
+   "type": "object"
+  }
+ },
+ {
+  "name": "what_it_calls",
+  "description": "Direct callees of a symbol (one call hop). `symbol` is a name or an\nexact SCIP string — a unique name resolves automatically (a prose copy\nartifact — a trailing sentence period, a character no SCIP identifier\ncan contain — is repaired as a fallback), an ambiguous one\nreturns candidates. Compact `name` + `file:line` by default\n(`full_symbols=True` for raw SCIP); callees in test files dropped unless\n`exclude_tests=False`. Set `hide_trivial=True` to drop ubiquitous helpers\n(operators, tassert/uassert, makeStatus, source_location, …) so the\ndomain edges stand out — `trivial_hidden` reports how many were cut.\n`include_paths`/`exclude_paths` further filter callees by their\ndefinition file's path prefix (e.g. scope out vendored deps).\n`limit` caps the list (default 40): lower it to spend fewer tokens when a\nfew callees are enough, raise it when `truncated` is true.\n\nNOTE: this is an unordered *set* of callees, not an execution sequence.\nIt cannot tell you the order calls happen in, nor which are conditional\n(`if (…) x();`). For stage/step order, read the function body — sorting\ncallees by `file:line` only approximates textual order, not runtime\norder.\n\nWhen the `CPPGRAPH_MASORA` flag is on, matching Masora facts ride\nalong as the `masora` field (rendered lines; a zero-fact response\ncarries one of §6's v3 notices — masora's presence hint verbatim or\nthe derived staleness line; absent when nothing injected — the same\nlines the CLI's `callees` appends).",
+  "inputSchema": {
+   "properties": {
+    "symbol": {
+     "title": "Symbol",
+     "type": "string"
+    },
+    "limit": {
+     "default": 40,
+     "title": "Limit",
+     "type": "integer"
+    },
+    "full_symbols": {
+     "default": false,
+     "title": "Full Symbols",
+     "type": "boolean"
+    },
+    "exclude_tests": {
+     "default": true,
+     "title": "Exclude Tests",
+     "type": "boolean"
+    },
+    "hide_trivial": {
+     "default": false,
+     "title": "Hide Trivial",
+     "type": "boolean"
+    },
+    "include_paths": {
+     "anyOf": [
+      {
+       "items": {
+        "type": "string"
+       },
+       "type": "array"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Include Paths"
+    },
+    "exclude_paths": {
+     "anyOf": [
+      {
+       "items": {
+        "type": "string"
+       },
+       "type": "array"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Exclude Paths"
+    }
+   },
+   "required": [
+    "symbol"
+   ],
+   "title": "what_it_callsArguments",
+   "type": "object"
+  },
+  "outputSchema": {
+   "additionalProperties": true,
+   "title": "what_it_callsDictOutput",
+   "type": "object"
+  }
+ },
+ {
+  "name": "base_classes",
+  "description": "Direct base classes a type inherits from (`symbol` is a name or an exact\nSCIP type string, ending in `#`; a unique name resolves automatically —\na prose copy artifact (a trailing sentence period, a character no SCIP\nidentifier can contain) is repaired as a fallback).\nFor the full transitive base hierarchy use `reachable_from` with\nkind=\"inherits\". Compact `name` + `file:line` by default; `full_symbols=True`\nfor raw SCIP strings. `limit` caps the list.\nAn empty result carries a `note` (the type may be a root, or a holder\nwith no base) rather than a bare `0`.",
+  "inputSchema": {
+   "properties": {
+    "symbol": {
+     "title": "Symbol",
+     "type": "string"
+    },
+    "limit": {
+     "default": 40,
+     "title": "Limit",
+     "type": "integer"
+    },
+    "full_symbols": {
+     "default": false,
+     "title": "Full Symbols",
+     "type": "boolean"
+    }
+   },
+   "required": [
+    "symbol"
+   ],
+   "title": "base_classesArguments",
+   "type": "object"
+  },
+  "outputSchema": {
+   "additionalProperties": true,
+   "title": "base_classesDictOutput",
+   "type": "object"
+  }
+ },
+ {
+  "name": "subclasses",
+  "description": "Direct subclasses of a type (one inheritance hop). For the whole\nsubtree use `impact_of` with kind=\"inherits\". Compact `name` +\n`file:line` by default; `full_symbols=True` for raw SCIP strings. `limit`\ncaps the list. An empty result carries a `note` (the type may be a leaf,\nor a holder that isn't itself a base) rather than a bare `0`.",
+  "inputSchema": {
+   "properties": {
+    "symbol": {
+     "title": "Symbol",
+     "type": "string"
+    },
+    "limit": {
+     "default": 40,
+     "title": "Limit",
+     "type": "integer"
+    },
+    "full_symbols": {
+     "default": false,
+     "title": "Full Symbols",
+     "type": "boolean"
+    }
+   },
+   "required": [
+    "symbol"
+   ],
+   "title": "subclassesArguments",
+   "type": "object"
+  },
+  "outputSchema": {
+   "additionalProperties": true,
+   "title": "subclassesDictOutput",
+   "type": "object"
+  }
+ },
+ {
+  "name": "find_references",
+  "description": "Exact use sites of a symbol (\"where is this type/symbol used?\") — the\ndependency the call graph can't show (a struct has no callers). Returns\n`file:line` coordinates; set `include_source=True` to also get the code\n**inline** (cppgraph reads it for you — no separate file read needed),\ngrouped by file with overlapping windows merged (no duplicated lines).\n`context` sets the lines shown around each site. Test-file uses are\ndropped by default — pass `exclude_tests=False` to include them.\n`include_paths`/`exclude_paths` further filter uses by their file's path\nprefix (e.g. scope out vendored deps). `access` ('read' | 'write')\nfilters by the indexer's read/write analysis and tags each returned site\n(\"write\"/\"read+write\") — only when the graph carries that data (built\nwith a scip-clang ReadAccess/WriteAccess-patch binary); on a graph\nwithout it the tool reports `available: false` rather than guessing.\nTo see the use sites as a graph rather than a list,\n`visualize(symbol, mode=\"usage\")` draws the symbol->file usage graph.\n`limit` caps the list. If the graph was built with `--no-references`,\n`available` is false (rebuild with references to enable this).",
+  "inputSchema": {
+   "properties": {
+    "symbol": {
+     "title": "Symbol",
+     "type": "string"
+    },
+    "include_source": {
+     "default": false,
+     "title": "Include Source",
+     "type": "boolean"
+    },
+    "context": {
+     "default": 0,
+     "title": "Context",
+     "type": "integer"
+    },
+    "limit": {
+     "default": 40,
+     "title": "Limit",
+     "type": "integer"
+    },
+    "exclude_tests": {
+     "default": true,
+     "title": "Exclude Tests",
+     "type": "boolean"
+    },
+    "include_paths": {
+     "anyOf": [
+      {
+       "items": {
+        "type": "string"
+       },
+       "type": "array"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Include Paths"
+    },
+    "exclude_paths": {
+     "anyOf": [
+      {
+       "items": {
+        "type": "string"
+       },
+       "type": "array"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Exclude Paths"
+    },
+    "access": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Access"
+    }
+   },
+   "required": [
+    "symbol"
+   ],
+   "title": "find_referencesArguments",
+   "type": "object"
+  },
+  "outputSchema": {
+   "additionalProperties": true,
+   "title": "find_referencesDictOutput",
+   "type": "object"
+  }
+ },
+ {
+  "name": "path",
+  "description": "Shortest chain of `calls` edges from `src` to `dst` (names or exact\nSCIP strings; a unique name resolves automatically, with a prose copy\nartifact (a trailing sentence period, a character no SCIP identifier\ncan contain) repaired as a fallback), as an ordered node\nlist with `hops`. Returns `found=false` with\na `hint` when there's no *static* path — which may mean the flow crosses\nruntime dispatch (a virtual call / a registered factory), not that the two\nare unrelated. To see the chain rendered as a graph rather than read it\nas a list, `visualize(symbol=src, mode=\"path\", dst=dst)` draws it\n(corridor and context knobs included).",
+  "inputSchema": {
+   "properties": {
+    "src": {
+     "title": "Src",
+     "type": "string"
+    },
+    "dst": {
+     "title": "Dst",
+     "type": "string"
+    }
+   },
+   "required": [
+    "src",
+    "dst"
+   ],
+   "title": "pathArguments",
+   "type": "object"
+  },
+  "outputSchema": {
+   "additionalProperties": true,
+   "title": "pathDictOutput",
+   "type": "object"
+  }
+ },
+ {
+  "name": "impact_of",
+  "description": "Reverse blast-radius: everything that transitively reaches `symbol`.\nkind=\"calls\" (default) = transitive callers (\"what could break if I\nchange this function?\"); kind=\"inherits\" = every transitive subclass of\na base type; kind=\"typed-by\" = the fields/variables typed as that type\n(reverse impact on a type returns the fields/variables typed as it —\nneeds the typed-by patch's edges). `depth` bounds the hops. Compact `name` + `file:line` by\ndefault (`full_symbols=True` for raw SCIP); symbols in test files dropped\nunless `exclude_tests=False`. `include_paths`/`exclude_paths` further\nfilter by definition-file path prefix (e.g. scope out vendored deps).\n`limit` caps the list (default 40): lower it\nto spend fewer tokens, raise it when `truncated`.",
+  "inputSchema": {
+   "properties": {
+    "symbol": {
+     "title": "Symbol",
+     "type": "string"
+    },
+    "depth": {
+     "anyOf": [
+      {
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Depth"
+    },
+    "limit": {
+     "default": 40,
+     "title": "Limit",
+     "type": "integer"
+    },
+    "kind": {
+     "default": "calls",
+     "title": "Kind",
+     "type": "string"
+    },
+    "full_symbols": {
+     "default": false,
+     "title": "Full Symbols",
+     "type": "boolean"
+    },
+    "exclude_tests": {
+     "default": true,
+     "title": "Exclude Tests",
+     "type": "boolean"
+    },
+    "include_paths": {
+     "anyOf": [
+      {
+       "items": {
+        "type": "string"
+       },
+       "type": "array"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Include Paths"
+    },
+    "exclude_paths": {
+     "anyOf": [
+      {
+       "items": {
+        "type": "string"
+       },
+       "type": "array"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Exclude Paths"
+    }
+   },
+   "required": [
+    "symbol"
+   ],
+   "title": "impact_ofArguments",
+   "type": "object"
+  },
+  "outputSchema": {
+   "additionalProperties": true,
+   "title": "impact_ofDictOutput",
+   "type": "object"
+  }
+ },
+ {
+  "name": "reachable_from",
+  "description": "Forward reachability: everything `symbol` transitively reaches — the\nexact mirror of `impact_of` (which reports what reaches the symbol).\nkind=\"calls\" (default) = the forward call closure from an entry point\n(\"what can this external handler trigger?\" — attack-surface mapping;\nalso migration scope: what am I pulling in if I keep this dependency's\nworld?); kind=\"inherits\" = the transitive base hierarchy above a\nderived type; kind=\"typed-by\" = forward reachability from a\nfield/variable returns its declared type (needs the typed-by patch's\nedges). A LOWER BOUND on runtime reachability: static\ncompiler-traced edges only — virtual dispatch, function pointers and\nruntime registration are not captured, so the true reachable set may\nbe larger; read it as \"at least these are reachable\", never as a set\nwhose absent members are safe to ignore (the standing `note` says so).\n`depth` bounds the hops. Compact `name` + `file:line` by default\n(`full_symbols=True` for raw SCIP); symbols in test files dropped\nunless `exclude_tests=False`. `include_paths`/`exclude_paths` further\nfilter by definition-file path prefix (e.g. scope out vendored deps).\n`limit` caps the list (default 40): lower it to spend fewer tokens,\nraise it when `truncated`.",
+  "inputSchema": {
+   "properties": {
+    "symbol": {
+     "title": "Symbol",
+     "type": "string"
+    },
+    "depth": {
+     "anyOf": [
+      {
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Depth"
+    },
+    "limit": {
+     "default": 40,
+     "title": "Limit",
+     "type": "integer"
+    },
+    "kind": {
+     "default": "calls",
+     "title": "Kind",
+     "type": "string"
+    },
+    "full_symbols": {
+     "default": false,
+     "title": "Full Symbols",
+     "type": "boolean"
+    },
+    "exclude_tests": {
+     "default": true,
+     "title": "Exclude Tests",
+     "type": "boolean"
+    },
+    "include_paths": {
+     "anyOf": [
+      {
+       "items": {
+        "type": "string"
+       },
+       "type": "array"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Include Paths"
+    },
+    "exclude_paths": {
+     "anyOf": [
+      {
+       "items": {
+        "type": "string"
+       },
+       "type": "array"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Exclude Paths"
+    }
+   },
+   "required": [
+    "symbol"
+   ],
+   "title": "reachable_fromArguments",
+   "type": "object"
+  },
+  "outputSchema": {
+   "additionalProperties": true,
+   "title": "reachable_fromDictOutput",
+   "type": "object"
+  }
+ },
+ {
+  "name": "hotspots",
+  "description": "Global ranking by call-edge volume — \"top N most-called / most-calling\nsymbols in the project\", the question `who_calls`/`what_it_calls` can't\nanswer without N manual calls. kind=\"fan_in\" (default) = most-called\n(incoming `calls` edges); kind=\"fan_out\" = most-calling (outgoing);\nkind=\"edges\" = both summed. Compact `name` + `file:line` by default\n(`full_symbols=True` for raw SCIP); pass `exclude_tests=True` to drop\nedges whose call site is in a test file. `include_paths`/`exclude_paths`\nfurther filter by definition-file path prefix (e.g. scope out vendored\ndeps; unknown parameter names are rejected, never ignored). `limit` caps\nthe list (default 40): lower it to spend fewer tokens, raise it when\n`truncated`.",
+  "inputSchema": {
+   "properties": {
+    "limit": {
+     "default": 40,
+     "title": "Limit",
+     "type": "integer"
+    },
+    "kind": {
+     "default": "fan_in",
+     "title": "Kind",
+     "type": "string"
+    },
+    "exclude_tests": {
+     "default": false,
+     "title": "Exclude Tests",
+     "type": "boolean"
+    },
+    "full_symbols": {
+     "default": false,
+     "title": "Full Symbols",
+     "type": "boolean"
+    },
+    "include_paths": {
+     "anyOf": [
+      {
+       "items": {
+        "type": "string"
+       },
+       "type": "array"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Include Paths"
+    },
+    "exclude_paths": {
+     "anyOf": [
+      {
+       "items": {
+        "type": "string"
+       },
+       "type": "array"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Exclude Paths"
+    }
+   },
+   "title": "hotspotsArguments",
+   "type": "object"
+  },
+  "outputSchema": {
+   "additionalProperties": true,
+   "title": "hotspotsDictOutput",
+   "type": "object"
+  }
+ },
+ {
+  "name": "dependency_cost",
+  "description": "Call-site count against a target library — \"if I replace/remove this\nlibrary, how many call sites change?\", the exact number of real `calls`\nedges whose callee is defined under one of the `target_paths`\nmodule-scope entries (e.g. [\"spirv_cross/\"] — each entry is a directory\nprefix, an exact file path, or a shell-style glob on definition-file\npaths). A fact, not a risk assessment: it judges\nnothing about API compatibility or migration difficulty. `include_paths`/\n`exclude_paths` filter the CALLER side only (e.g. exclude_paths=[\"vendor/\"]\n= \"call sites from my code, not other vendored users of the same\nlibrary\"); pass `exclude_tests=True` to drop edges touching test-defined\nsymbols. A target matching zero indexed files is an error naming the\nentry. Response: `total_call_sites` (the headline \"N call sites\"\nanswer), `distinct_target_symbols`, and `top_targets` — which symbols\nin the library are hit hardest, bounded by `limit` (raise it when\n`truncated`; the totals are always full). The complementary inward view —\nwhat a module exposes to outside callers, rather than what outside code\nconsumes of a target — is `api_surface`.",
+  "inputSchema": {
+   "properties": {
+    "target_paths": {
+     "items": {
+      "type": "string"
+     },
+     "title": "Target Paths",
+     "type": "array"
+    },
+    "limit": {
+     "default": 40,
+     "title": "Limit",
+     "type": "integer"
+    },
+    "exclude_tests": {
+     "default": false,
+     "title": "Exclude Tests",
+     "type": "boolean"
+    },
+    "full_symbols": {
+     "default": false,
+     "title": "Full Symbols",
+     "type": "boolean"
+    },
+    "include_paths": {
+     "anyOf": [
+      {
+       "items": {
+        "type": "string"
+       },
+       "type": "array"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Include Paths"
+    },
+    "exclude_paths": {
+     "anyOf": [
+      {
+       "items": {
+        "type": "string"
+       },
+       "type": "array"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Exclude Paths"
+    }
+   },
+   "required": [
+    "target_paths"
+   ],
+   "title": "dependency_costArguments",
+   "type": "object"
+  },
+  "outputSchema": {
+   "additionalProperties": true,
+   "title": "dependency_costDictOutput",
+   "type": "object"
+  }
+ },
+ {
+  "name": "stats",
+  "description": "Module-level aggregate counts — \"how big / how dense is this part of\nthe codebase?\" without reading a single file: symbols defined, `calls`\nedges whose call site, and ref use sites per file (group_by=\"file\",\ndefault) or rolled up per directory (group_by=\"dir\"), sorted by the\nthree summed descending. Scales an unfamiliar module/repo at a glance,\nthe size/density view next to `hotspots`' \"what's most-called\".\n`include_paths`/`exclude_paths` drop a file's counts on path-prefix\nmismatch (e.g. scope out vendored deps). `limit` caps the list (default\n40): lower it to spend fewer tokens, raise it when `truncated` —\n`total` always reports the full group count.",
+  "inputSchema": {
+   "properties": {
+    "group_by": {
+     "default": "file",
+     "title": "Group By",
+     "type": "string"
+    },
+    "limit": {
+     "default": 40,
+     "title": "Limit",
+     "type": "integer"
+    },
+    "include_paths": {
+     "anyOf": [
+      {
+       "items": {
+        "type": "string"
+       },
+       "type": "array"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Include Paths"
+    },
+    "exclude_paths": {
+     "anyOf": [
+      {
+       "items": {
+        "type": "string"
+       },
+       "type": "array"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Exclude Paths"
+    }
+   },
+   "title": "statsArguments",
+   "type": "object"
+  },
+  "outputSchema": {
+   "additionalProperties": true,
+   "title": "statsDictOutput",
+   "type": "object"
+  }
+ },
+ {
+  "name": "line_span",
+  "description": "Definitions ranked by body extent — top N largest bodies\n(`end_line - start line`, largest first), the exact extents from\n`enclosing_range`, not a def→next-symbol heuristic. Needs a graph\nindexed with a #504-built scip-clang (the same binary `status`'s\nusage-view upgrade advice names — it is what emits enclosing ranges):\non a stock-binary graph the tool returns `available: false` with the\nrebuild pointer instead of a silently empty list. `exclude_tests` drops\ndefinitions in test files; `include_paths`/`exclude_paths` filter by\ndefinition-file path prefix (unknown parameter names are rejected,\nnever ignored). `limit` caps the list (default 40): lower it to spend\nfewer tokens, raise it when `truncated` — `total` always reports the\nfull count.",
+  "inputSchema": {
+   "properties": {
+    "limit": {
+     "default": 40,
+     "title": "Limit",
+     "type": "integer"
+    },
+    "exclude_tests": {
+     "default": false,
+     "title": "Exclude Tests",
+     "type": "boolean"
+    },
+    "full_symbols": {
+     "default": false,
+     "title": "Full Symbols",
+     "type": "boolean"
+    },
+    "include_paths": {
+     "anyOf": [
+      {
+       "items": {
+        "type": "string"
+       },
+       "type": "array"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Include Paths"
+    },
+    "exclude_paths": {
+     "anyOf": [
+      {
+       "items": {
+        "type": "string"
+       },
+       "type": "array"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Exclude Paths"
+    }
+   },
+   "title": "line_spanArguments",
+   "type": "object"
+  },
+  "outputSchema": {
+   "additionalProperties": true,
+   "title": "line_spanDictOutput",
+   "type": "object"
+  }
+ },
+ {
+  "name": "no_incoming_calls",
+  "description": "Callable definitions with zero incoming `calls` edges — the exact\nprimitive behind the \"dead code\" question, stated as a graph fact\n(`callers_of(sym) == []`), never a verdict. Unreliable as \"dead\" —\nvtable dispatch, exported API, templates, entry points all have no\nstatic caller yet are live — so the tool states the fact (a standing\n`note` on every response) and the LLM judges. Only trustworthy on a\ngraph indexed with a #504-built scip-clang: on a stock binary, caller\nattribution can mis-attribute a bodyless declaration site to the\npreceding definition — a phantom caller that turns a real 0 into a\nfalse 1 — so there the tool refuses (`available: false`, reason\nincluded) instead of answering. Compact `name` + `file:line` by\ndefault (`full_symbols=True` for raw SCIP). `exclude_tests` drops\ndefinitions in test files, but a test caller still counts as a caller.\n`include_paths`/`exclude_paths` filter by definition-file path prefix\n(unknown parameter names are rejected, never ignored). `limit` caps\nthe list (default 40) — `total` always reports the full count.",
+  "inputSchema": {
+   "properties": {
+    "limit": {
+     "default": 40,
+     "title": "Limit",
+     "type": "integer"
+    },
+    "exclude_tests": {
+     "default": false,
+     "title": "Exclude Tests",
+     "type": "boolean"
+    },
+    "full_symbols": {
+     "default": false,
+     "title": "Full Symbols",
+     "type": "boolean"
+    },
+    "include_paths": {
+     "anyOf": [
+      {
+       "items": {
+        "type": "string"
+       },
+       "type": "array"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Include Paths"
+    },
+    "exclude_paths": {
+     "anyOf": [
+      {
+       "items": {
+        "type": "string"
+       },
+       "type": "array"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Exclude Paths"
+    }
+   },
+   "title": "no_incoming_callsArguments",
+   "type": "object"
+  },
+  "outputSchema": {
+   "additionalProperties": true,
+   "title": "no_incoming_callsDictOutput",
+   "type": "object"
+  }
+ },
+ {
+  "name": "global_init_references",
+  "description": "Which globals does this global's initializer reference — the graph\nfact behind the \"static initialization order fiasco\": global A's\ninitializer reads global B, and across translation units the\ninitialization order is unspecified (the read may see an uninitialized\nB). NOT a verdict: a `constexpr`/`constinit` initializer is\nconstant-initialized and safe, and a read inside a lambda body in the\nregion may run lazily rather than at initialization — the tool reports\nthe reference (a standing `note` on every response), the LLM judges\nthe hazard. `symbol` is a name or an exact SCIP string (a unique name\nresolves automatically; a prose copy artifact — a trailing sentence\nperiod, a character no SCIP identifier can contain — is repaired as a\nfallback); each entry names the\nreferenced global and\nits first use site in the region. Needs a graph with attributed\nreferences (a #504-built scip-clang AND `--attributed-refs` /\n`enrich-refs`): on anything less the tool returns `available: false`\nwith the rebuild pointer instead of a silently empty list; an unknown\nor non-global symbol is an error dict. `limit` caps the list (default\n40) — `total` always reports the full count.",
+  "inputSchema": {
+   "properties": {
+    "symbol": {
+     "title": "Symbol",
+     "type": "string"
+    },
+    "limit": {
+     "default": 40,
+     "title": "Limit",
+     "type": "integer"
+    },
+    "full_symbols": {
+     "default": false,
+     "title": "Full Symbols",
+     "type": "boolean"
+    }
+   },
+   "required": [
+    "symbol"
+   ],
+   "title": "global_init_referencesArguments",
+   "type": "object"
+  },
+  "outputSchema": {
+   "additionalProperties": true,
+   "title": "global_init_referencesDictOutput",
+   "type": "object"
+  }
+ },
+ {
+  "name": "boundary_violations",
+  "description": "Declared-layering conformance check. Takes rules from YOU (the\nproject's intended layering — the graph doesn't know it): each rule is\n[from_prefix, forbidden_prefix], e.g. rules=[[\"common/\", \"platform/\"]]\n= \"no symbol defined under common/ may call one defined under\nplatform/\". Reports every calls/inherits edge that crosses a rule —\neach violation IS a real compiler-traced edge, so zero false positives;\n0 violations is a lower bound (no *statically indexed* edge crosses —\nruntime dispatch may), never proof the layering holds. Directory\nmembership is the endpoint's own definition file, matched on a\npath-segment boundary (\"common/\" matches common/util.cpp, never\ncommons/util.cpp). edge_kinds defaults to [\"calls\", \"inherits\"]\n(\"implements\" also accepted). To see the shape of the violations rather\nthan read the list, `visualize_boundary_violations(rules=..., ...)`\n(same `rules`/`edge_kinds` shape) renders the violating edges as a\ngraph. `limit` caps the list (default 40):\nlower it to spend fewer tokens, raise it when `truncated` — `total`\nalways reports the full count.",
+  "inputSchema": {
+   "properties": {
+    "rules": {
+     "items": {
+      "items": {
+       "type": "string"
+      },
+      "type": "array"
+     },
+     "title": "Rules",
+     "type": "array"
+    },
+    "edge_kinds": {
+     "anyOf": [
+      {
+       "items": {
+        "type": "string"
+       },
+       "type": "array"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Edge Kinds"
+    },
+    "limit": {
+     "default": 40,
+     "title": "Limit",
+     "type": "integer"
+    },
+    "full_symbols": {
+     "default": false,
+     "title": "Full Symbols",
+     "type": "boolean"
+    }
+   },
+   "required": [
+    "rules"
+   ],
+   "title": "boundary_violationsArguments",
+   "type": "object"
+  },
+  "outputSchema": {
+   "additionalProperties": true,
+   "title": "boundary_violationsDictOutput",
+   "type": "object"
+  }
+ },
+ {
+  "name": "visualize_boundary_violations",
+  "description": "Render the edges that cross your declared layering rules as a\nself-contained HTML graph in a temp dir and (by default) open it in the\nuser's browser — the visual counterpart of `boundary_violations`, for\nwhen a violations list is easier to judge as a picture. Same rules from\nYOU ([from_prefix, forbidden_prefix] pairs, e.g.\n[[\"common/\", \"platform/\"]] = \"no symbol defined under common/ may call\none defined under platform/\"), same exact edges: nodes are every\ndistinct endpoint of a violating edge, edges are the violations\nthemselves (direct — the violation check already computed them; no\ninduction/BFS). A violation matching several rules appears once per\nrule, drawn from the same pair of endpoints. edge_kinds defaults to\n[\"calls\", \"inherits\"] (\"implements\"/\"typed-by\" opt-in). `limit` caps\nthe list (default 40) — the graph renders the reported (capped)\nviolations and the reply flags `truncated: true` with the full `total`\nwhen more exist. full_symbols=True labels nodes with the raw SCIP\nstrings instead of readable display names. With ZERO violations\nnothing is written or opened — 0 is a real, good outcome, not an\nerror: the reply says so (`violations: 0` + a note, `path: null`)\ninstead of launching a browser for an empty picture, and the standing\nlower-bound caveat still applies (0 means no *statically indexed* edge\ncrosses these rules — runtime dispatch can). Malformed rules come back\nas an `{\"error\", \"hint\"}` dict, not an exception. Returns the HTML\npath and the command to open it (in case the browser didn't\nlaunch).",
+  "inputSchema": {
+   "properties": {
+    "rules": {
+     "items": {
+      "items": {
+       "type": "string"
+      },
+      "type": "array"
+     },
+     "title": "Rules",
+     "type": "array"
+    },
+    "edge_kinds": {
+     "anyOf": [
+      {
+       "items": {
+        "type": "string"
+       },
+       "type": "array"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Edge Kinds"
+    },
+    "limit": {
+     "default": 40,
+     "title": "Limit",
+     "type": "integer"
+    },
+    "full_symbols": {
+     "default": false,
+     "title": "Full Symbols",
+     "type": "boolean"
+    },
+    "open_browser": {
+     "default": true,
+     "title": "Open Browser",
+     "type": "boolean"
+    }
+   },
+   "required": [
+    "rules"
+   ],
+   "title": "visualize_boundary_violationsArguments",
+   "type": "object"
+  },
+  "outputSchema": {
+   "additionalProperties": true,
+   "title": "visualize_boundary_violationsDictOutput",
+   "type": "object"
+  }
+ },
+ {
+  "name": "api_surface",
+  "description": "The actually-used external surface of a module: definitions under a\nmodule scope (`module_prefix` — a directory prefix like \"src/pipeline/\",\nan exact file path, or a shell-style glob on definition-file paths)\nthat are\ncalled/referenced from OUTSIDE it — the observed surface, as opposed\nto what is merely declared public (SCIP has no visibility info to\ncheck against anyway). Each entry carries `external_calls` and\n`external_refs` as separate counters, ranked by their sum — a fact,\nnever an API-design verdict. On a graph built `--no-references` the\nanswer is call sites only, flagged `refs_available: false` with a\nnote (type uses are invisible without the reference index).\n`exclude_tests` drops uses whose use site or used definition is in a\ntest file. `module_prefix` is the scope string, passed by its\nexact name — unknown parameter names (a typo like `path=`) are\nrejected, never ignored. A scope matching zero indexed files is an\nerror naming it. `limit` caps\nthe list (default 40): raise it when\n`truncated` — `total` always reports the full count. The complementary\noutward view — how many call sites outside code runs into a module\n(e.g. before replacing it) — is `dependency_cost`.",
+  "inputSchema": {
+   "properties": {
+    "module_prefix": {
+     "title": "Module Prefix",
+     "type": "string"
+    },
+    "limit": {
+     "default": 40,
+     "title": "Limit",
+     "type": "integer"
+    },
+    "exclude_tests": {
+     "default": false,
+     "title": "Exclude Tests",
+     "type": "boolean"
+    },
+    "full_symbols": {
+     "default": false,
+     "title": "Full Symbols",
+     "type": "boolean"
+    }
+   },
+   "required": [
+    "module_prefix"
+   ],
+   "title": "api_surfaceArguments",
+   "type": "object"
+  },
+  "outputSchema": {
+   "additionalProperties": true,
+   "title": "api_surfaceDictOutput",
+   "type": "object"
+  }
+ },
+ {
+  "name": "outline",
+  "description": "Use this instead of Read/opening a file to see what's in it: the\noutline of one file — every symbol defined in it, sorted by line. A\ncompact symbol list that replaces reading a 1400-line file, exact and\navailable on any graph.         `file` is the exact path as recorded in the\nindex (relative, e.g. `src/app.cpp`, not a prefix) — `stats` lists the\nindexed files; an empty result carries a note explaining that, never a\nbare zero. Compact `name` + `file:line` by default (`full_symbols=True`\nfor raw SCIP). `limit` caps the list (default 40): raise it when\n`truncated` — `total` always reports the full count. When the\n`CPPGRAPH_MASORA` flag is on, matching Masora facts ride along as the\n`masora` field — ONE batched spawn for all defined symbols (§9.10);\na zero-fact response carries one of §6's v3 notices — masora's\npresence hint verbatim on an empty base, the derived staleness line\notherwise; absent when nothing injects.",
+  "inputSchema": {
+   "properties": {
+    "file": {
+     "title": "File",
+     "type": "string"
+    },
+    "limit": {
+     "default": 40,
+     "title": "Limit",
+     "type": "integer"
+    },
+    "full_symbols": {
+     "default": false,
+     "title": "Full Symbols",
+     "type": "boolean"
+    }
+   },
+   "required": [
+    "file"
+   ],
+   "title": "outlineArguments",
+   "type": "object"
+  },
+  "outputSchema": {
+   "additionalProperties": true,
+   "title": "outlineDictOutput",
+   "type": "object"
+  }
+ },
+ {
+  "name": "class_members",
+  "description": "Every member declared on a class/struct — methods, fields, nested\ntypes — the class's real member list, replacing a header grep. `symbol`\nis a name or an exact SCIP string (a unique name resolves automatically —\na prose copy artifact such as a trailing sentence period or line-wrap\nhyphen is repaired as a fallback,\nan ambiguous one returns candidates — a bare class name typically also\nmatches its own members, so pick the `#`-terminated entry); an unknown\nor non-type symbol comes back as an error dict. Named `class_members`,\nnot `public_api`, because SCIP doesn't encode C++ visibility — members\nthat *exist* (a fact), not a public/private claim. Compact `name` +\n`file:line` by default (`full_symbols=True` for raw SCIP). `limit` caps\nthe list (default 40): raise it when `truncated` — `total` always\nreports the full count.",
+  "inputSchema": {
+   "properties": {
+    "symbol": {
+     "title": "Symbol",
+     "type": "string"
+    },
+    "limit": {
+     "default": 40,
+     "title": "Limit",
+     "type": "integer"
+    },
+    "full_symbols": {
+     "default": false,
+     "title": "Full Symbols",
+     "type": "boolean"
+    }
+   },
+   "required": [
+    "symbol"
+   ],
+   "title": "class_membersArguments",
+   "type": "object"
+  },
+  "outputSchema": {
+   "additionalProperties": true,
+   "title": "class_membersDictOutput",
+   "type": "object"
+  }
+ },
+ {
+  "name": "strongly_connected_components",
+  "description": "Cycles in the call graph: the strongly-connected components of the\n`calls` subgraph with more than one member — maximal sets of symbols\nthat can all reach each other, the exact primitive behind \"circular\ndependencies\". A graph FACT, not a verdict: mutual recursion is often\ncompletely legitimate (a visitor pattern, a recursive-descent parser's\nmutually-recursive rules) — you decide which cycles, if any, are\nactually a problem. Components are sorted biggest first, members by\ndefinition file:line; compact `name` + `file:line` by default\n(`full_symbols=True` for raw SCIP). `exclude_tests` and\n`include_paths`/`exclude_paths` filter which components are REPORTED:\na component is dropped only when every member is filtered out, and a\nreported one always lists all its members (the cycle is a fact about\nthe compiled binary). To see the shape of a cycle rather than just its\nmember list, `visualize(symbol=..., mode=\"cycle\")` renders the actual\ninduced subgraph (nodes and edges) of the cycle containing a given\nsymbol. `limit` caps the number of components (default\n40), never a partial one — `total` always reports the full count,\n`truncated` says if more exist.",
+  "inputSchema": {
+   "properties": {
+    "limit": {
+     "default": 40,
+     "title": "Limit",
+     "type": "integer"
+    },
+    "exclude_tests": {
+     "default": false,
+     "title": "Exclude Tests",
+     "type": "boolean"
+    },
+    "full_symbols": {
+     "default": false,
+     "title": "Full Symbols",
+     "type": "boolean"
+    },
+    "include_paths": {
+     "anyOf": [
+      {
+       "items": {
+        "type": "string"
+       },
+       "type": "array"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Include Paths"
+    },
+    "exclude_paths": {
+     "anyOf": [
+      {
+       "items": {
+        "type": "string"
+       },
+       "type": "array"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Exclude Paths"
+    }
+   },
+   "title": "strongly_connected_componentsArguments",
+   "type": "object"
+  },
+  "outputSchema": {
+   "additionalProperties": true,
+   "title": "strongly_connected_componentsDictOutput",
+   "type": "object"
+  }
+ },
+ {
+  "name": "explain_symbol",
+  "description": "Use this instead of grep/sed/opening the file to read a symbol's\ndefinition. Definition site + caller/callee summary for `symbol` — a\nname or an exact SCIP string (a unique name resolves; a prose copy\nartifact — a trailing sentence period, a character no SCIP identifier\ncan contain — is repaired as a fallback). Returns\n`file:line` coordinates by default; set `include_source=True` to also get\nthe definition's source snippet **inline** (cppgraph reads it for you — no\nseparate file read needed), `context` lines around the definition. `limit`\ncaps each of the caller/callee lists (default 10): lower it to spend fewer\ntokens, raise it when `truncated` is true and you need more. Caller/callee lists\nare compact `name` + `file:line` (`full_symbols=True` for raw SCIP) and\ndrop test files unless `exclude_tests=False`. Set `hide_trivial=True` to\nalso drop ubiquitous helpers (operators, `*assert`, `makeStatus`,\n`source_location`, …) — each list reports its `trivial_hidden` count.\nWith a checkout configured (`--root`), also returns `signature`: the\nparameter list read from source, including any default argument value\nverbatim (e.g. `(bool useNullIfMissing = false)`) — a defaulted param is\notherwise invisible without opening the header. Independently of\n`--root`, a graph built from a signature-emitting scip-clang returns the\nsignature recorded at index time as `signature_documentation` (stored in\nthe graph, so no checkout is needed for it) — a distinct key from the\nsource-derived `signature`, which can capture defaulted parameters the\nrecorded text may lack. When the symbol\nhas a genuine doc comment, it is returned as `documentation` (extracted\nat index time; scip-clang's placeholder/auto-generated text filtered\nout) — no checkout needed for that one. When the graph was built from a\nkind-patched scip-clang (`has_symbol_kind`), the symbol's fine-grained\nSCIP kind is returned as `scip_kind` (e.g. \"StaticMethod\"); the key is\nabsent on graphs without that data. When the graph carries\nexternal-package symbol metadata (`has_external_symbols`),\n`is_out_of_project` is returned as true (defined in an un-indexed\nexternal package, e.g. boost/stdlib), false (project-native) or null\n(no SymbolInformation from either source); absent on graphs without\nthat data. A `callers.total`\nof `0` carries `zero_callers_reliable: false` + a `note` when the graph\nlacks #504 enclosing-range data — stock-binary attribution can\nfabricate a phantom caller from a bodyless declaration site or drop an\nunattributable call site, so only a #504 0 is exact; a nonzero count\ncarries no caveat (over-capture is the safe direction).\nWhen the `CPPGRAPH_MASORA` flag is on, matching Masora facts ride\nalong as the `masora` field (rendered lines; a zero-fact response\ncarries one of §6's v3 notices — masora's presence hint verbatim or\nthe derived staleness line; absent when nothing injected — the same\nlines the CLI's `explain` appends).",
+  "inputSchema": {
+   "properties": {
+    "symbol": {
+     "title": "Symbol",
+     "type": "string"
+    },
+    "include_source": {
+     "default": false,
+     "title": "Include Source",
+     "type": "boolean"
+    },
+    "context": {
+     "default": 3,
+     "title": "Context",
+     "type": "integer"
+    },
+    "limit": {
+     "default": 10,
+     "title": "Limit",
+     "type": "integer"
+    },
+    "full_symbols": {
+     "default": false,
+     "title": "Full Symbols",
+     "type": "boolean"
+    },
+    "exclude_tests": {
+     "default": true,
+     "title": "Exclude Tests",
+     "type": "boolean"
+    },
+    "hide_trivial": {
+     "default": false,
+     "title": "Hide Trivial",
+     "type": "boolean"
+    }
+   },
+   "required": [
+    "symbol"
+   ],
+   "title": "explain_symbolArguments",
+   "type": "object"
+  },
+  "outputSchema": {
+   "additionalProperties": true,
+   "title": "explain_symbolDictOutput",
+   "type": "object"
+  }
+ },
+ {
+  "name": "status",
+  "description": "Graph provenance and drift: is this graph still current for the\ncheckout? Run first — if `drift.up_to_date` is false, re-index before\ntrusting the topology. Also reports `tool`: whether a newer cppgraph is\npublished and, if so, at which `rebuild` level adopting it costs — `none`\n(no rebuild), `store` (rebuild the store from the existing .scip), or\n`reindex` (re-run scip-clang) — so you can warn before an upgrade blocks\non indexing. The update check is cached; `force_update_check=True`\nrefetches now.",
+  "inputSchema": {
+   "properties": {
+    "force_update_check": {
+     "default": false,
+     "title": "Force Update Check",
+     "type": "boolean"
+    }
+   },
+   "title": "statusArguments",
+   "type": "object"
+  },
+  "outputSchema": {
+   "additionalProperties": true,
+   "title": "statusDictOutput",
+   "type": "object"
+  }
+ },
+ {
+  "name": "fingerprints",
+  "description": "The masora fingerprint contract (masora_integration.md §2): the\nspawned-command surface's data as one document — `contract_version`,\n`repo_root`, `graph_source_commit`, `repo_head`, `graph_behind_head`\n(the store's indexed commit is an ancestor-or-equal of the checkout\nHEAD), `symbol_format`, and one entry per queried identity: `symbol`,\n`found`, and when found the `definition_fingerprint` (sha256 of the\nnormalized definition-range source) and `edge_snapshot` (own\n`calls`-edge-set hash plus each 1-hop neighbour's, self excluded).\nMatching is verbatim on exact SCIP identity strings — no fuzzy\nresolution; an identity matching nothing is `found: false`, never a\nguessed fingerprint. Driven by the same pure function as the\n`cppgraph fingerprints` CLI command (`cppgraph.fingerprints`), which\nis the fail-closed surface masora spawns (its expected caller budget:\n2 s wall-clock).",
+  "inputSchema": {
+   "properties": {
+    "symbols": {
+     "anyOf": [
+      {
+       "items": {
+        "type": "string"
+       },
+       "type": "array"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Symbols"
+    }
+   },
+   "title": "fingerprintsArguments",
+   "type": "object"
+  },
+  "outputSchema": {
+   "additionalProperties": true,
+   "title": "fingerprintsDictOutput",
+   "type": "object"
+  }
+ },
+ {
+  "name": "log_id_lookup",
+  "description": "Resolve redwood LOG ids to their enclosing symbols\n(redwood_integration.md §1, contract v1). One batched call, entirely\nin code: the id→symbol table was extracted at INDEX time (the id\nargument of `LOG(...)`/`MONGO_LOGV2(...)`/`LOGV2(...)` calls, a plain\ninteger literal, mapped to the enclosing definition symbol —\nsee `cppgraph.redwood` for the narrow pattern and its limits).\n\nThe document: `schema`/`command`/`contract_version`,\n`resolved_against` (graph_source_commit, repo_head, head_matches_graph\n— the revision guard, the SAME merge-base computation `fingerprints`\nuses — and `revision`, ECHOED back, never resolved against anything\ncppgraph doesn't have), `log_id_table` (a pre-v6 store has none), and\none entry per id: found/symbol/scip/location/bounded callers (visible\ntruncated/total).\n\nAt most 2 ids per call — MORE is an error dict, not a truncation.\nFail-closed: an unknown id is `found: false`, never a guessed symbol;\nno usable graph is an explicit error. Driven by the same pure\nfunction as the `cppgraph log-id-lookup` CLI command\n(`cppgraph.redwood.log_id_lookup_document`).",
+  "inputSchema": {
+   "properties": {
+    "ids": {
+     "items": {
+      "type": "integer"
+     },
+     "title": "Ids",
+     "type": "array"
+    },
+    "revision": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Revision"
+    }
+   },
+   "required": [
+    "ids"
+   ],
+   "title": "log_id_lookupArguments",
+   "type": "object"
+  },
+  "outputSchema": {
+   "additionalProperties": true,
+   "title": "log_id_lookupDictOutput",
+   "type": "object"
+  }
+ },
+ {
+  "name": "visualize",
+  "description": "Render a small graph around `symbol` as a self-contained HTML in a temp\ndir and (by default) open it in the user's browser — the \"show me the\ndependency graph of X\" tool. Keep it small: a big neighbourhood is an\nunreadable hairball, so prefer depth 1-2. mode=\"deps\" (default) = the\ncall/inherit subgraph; mode=\"usage\" = a graph of where the symbol is used\n(the right view for a type, which has no call edges). Usage is drawn at\nSYMBOL granularity (symbol -> the definitions that use it) when the graph\nwas built with attributed references, else at file granularity; both are\nexact. See `status` (`usage_view`) for which, and how to upgrade.\ndirection (deps mode) = \"both\" (default) both callers and callees, \"out\"\nonly what the symbol reaches, \"in\" only what reaches it. Set\nexclude_tests=True to drop test files and show production usage only. Set\nopen_browser=False to just get the HTML path without launching a browser.\nmode=\"path\" = instead of a neighbourhood, render the call graph between\n`symbol` and `dst` (required in this mode; a plain name or exact SCIP\nstring, resolved like `symbol` itself) — the \"how do these two connect?\"\nview. expand_paths=False (default) draws the single shortest `calls`\nchain; expand_paths=True draws the CORRIDOR: every node/edge lying on\nSOME `calls` path between the two (two capped BFS passes intersected —\nthe chain is always inside it; siblings that don't reach `dst` are not).\nIn path mode `depth` means context, not the answer's radius: every\nchain/corridor node's depth-hop neighbourhood (same mixed-edge-kind walk\nas deps mode, honouring `direction`) is unioned into the graph. It\ndefaults to 0 in path mode — the pure chain/corridor without context —\nvs deps mode's 2-hop radius; set depth=1+ for context.\n`limit` (path mode, default 40) caps the final node count — chain/\ncorridor nodes kept first, then context; when the result was cut, the\nreply carries `truncated: true` and the pre-cut node count as `total`.\nWith no static chain the reply says so (`found: false` + a hint) instead\nof writing/opening a near-empty HTML; `hops` reports the number of\n`calls` edges in the chain/corridor proper. mode=\"cycle\" = the\nmulti-member call cycle (strongly-connected component of the `calls`\nsubgraph) containing `symbol` — the visual counterpart of\n`strongly_connected_components`, centered on one of its members. Nodes\nare the cycle's members, edges every `calls` edge induced on them (a\nchord between two members is drawn even though nothing needs it to walk\nthe loop). `dst` is not used in this mode and ignored if passed (a cycle\nis found from `symbol` alone; passing one adds a note to the reply).\ndepth/limit behave EXACTLY as in path mode: depth > 0 unions every\nmember's neighbourhood into the graph (default 0 — the pure cycle),\nlimit caps the merged node count; the reply carries `hops` (the cycle's\nown `calls` edges, before context expansion), `truncated` and `total`.\nA valid symbol in no multi-member cycle returns `found: false` + a note\n(no HTML written/opened — the same clean shape as path mode's no-chain\ncase). Returns the HTML path and\nthe command to open it (in case the browser didn't launch). Separate\nfrom the symbol-centred modes, `visualize_boundary_violations(rules=...)`\nrenders declared-layering violations as a graph.",
+  "inputSchema": {
+   "properties": {
+    "symbol": {
+     "title": "Symbol",
+     "type": "string"
+    },
+    "mode": {
+     "default": "deps",
+     "title": "Mode",
+     "type": "string"
+    },
+    "depth": {
+     "anyOf": [
+      {
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Depth"
+    },
+    "direction": {
+     "default": "both",
+     "title": "Direction",
+     "type": "string"
+    },
+    "exclude_tests": {
+     "default": false,
+     "title": "Exclude Tests",
+     "type": "boolean"
+    },
+    "open_browser": {
+     "default": true,
+     "title": "Open Browser",
+     "type": "boolean"
+    },
+    "dst": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Dst"
+    },
+    "expand_paths": {
+     "default": false,
+     "title": "Expand Paths",
+     "type": "boolean"
+    },
+    "limit": {
+     "default": 40,
+     "title": "Limit",
+     "type": "integer"
+    }
+   },
+   "required": [
+    "symbol"
+   ],
+   "title": "visualizeArguments",
+   "type": "object"
+  },
+  "outputSchema": {
+   "additionalProperties": true,
+   "title": "visualizeDictOutput",
+   "type": "object"
+  }
+ }
+]

@@ -15,7 +15,6 @@ unambiguous none/unique/multiple signal).
 
 from __future__ import annotations
 
-import asyncio
 import json
 from pathlib import Path
 from typing import Any
@@ -346,11 +345,9 @@ def test_text_output_byte_identical_without_json_flag(
 
 
 def _mcp_payload(server: Any, tool: str, arguments: dict) -> dict:
-    result = asyncio.run(server.call_tool(tool, arguments))
-    if isinstance(result, tuple) and len(result) == 2 and isinstance(result[1], dict):
-        return result[1]
-    blocks = result[0] if isinstance(result, tuple) else result
-    return json.loads(blocks[0].text)
+    result = server.call_tool(tool, arguments)
+    assert not result.get("isError"), result
+    return json.loads(result["content"][0]["text"])
 
 
 def test_callers_json_matches_mcp_who_calls_payload(

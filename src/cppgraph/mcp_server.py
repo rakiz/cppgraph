@@ -12,8 +12,9 @@ Two layers, deliberately split so the substance is testable without a transport:
   JSON-serialisable, *token-budgeted* dicts. Lists are capped with an explicit
   `truncated` flag and a `total` count, so a fan-out query (a symbol with
   hundreds of callers) never dumps the whole set into the model's context.
-- **Transport wiring** (`build_server` / `main`): a thin FastMCP layer that
-  binds one long-lived `GraphStore` (resolved at launch — from `--graph` or
+- **Transport wiring** (`build_server` / `main`): a thin hand-rolled MCP layer
+  (newline-delimited JSON-RPC 2.0 over stdio — zero third-party dependencies)
+  that binds one long-lived `GraphStore` (resolved at launch — from `--graph` or
   auto-discovered from the cwd's `.cppgraph/`) to those functions. The
   dispatch is strict-argument: an unknown tool parameter (a typo'd name) is
   rejected with an explicit error naming it — never silently dropped into an
@@ -35,10 +36,15 @@ out of the box: the checkout root is auto-discovered (the project that owns the
 from __future__ import annotations
 
 import argparse
+import inspect
+import json
 import logging
 import sys
+import types
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as _package_version
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, get_args, get_origin, get_type_hints
 
 from cppgraph import masora
 from cppgraph import messages as _messages
@@ -1709,8 +1715,398 @@ def _server_instructions(store: GraphStore | None) -> str:
     )
 
 
-def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
-    """A FastMCP server for one project's graph (opened once, reused per call).
+PROTOCOL_VERSION = "2025-06-18"
+# Revisions a client may negotiate; `initialize` echoes the requested one so a
+# client on an older revision is never answered with one it did not ask for.
+SUPPORTED_PROTOCOL_VERSIONS = ("2024-11-05", "2025-03-26", PROTOCOL_VERSION)
+SERVER_NAME = "cppgraph"
+
+
+def _server_version() -> str:
+    """The installed cppgraph version, for `initialize`'s `serverInfo`. Older
+    releases leaked the third-party MCP library's version here (the library
+    reported itself); the server now reports its own. Running without an
+    installed distribution (a raw `PYTHONPATH=src` import has no metadata to
+    read) falls back to "0.0.0" — with a stderr warning, never silently."""
+    try:
+        return _package_version("cppgraph")
+    except PackageNotFoundError:
+        _LOGGER.warning(
+            "cppgraph is not installed as a package (no distribution metadata) — "
+            "reporting serverInfo.version 0.0.0"
+        )
+        return "0.0.0"
+
+
+class _Tool:
+    """One registered MCP tool: the handler plus the JSON-Schema `tools/list`
+    advertises for it."""
+
+    def __init__(self, name: str, description: str, input_schema: dict[str, Any], fn: Any) -> None:
+        self.name = name
+        self.description = description
+        self.input_schema = input_schema
+        self.fn = fn
+
+
+# The JSON-Schema fragments for the parameter types the 26 tools declare. The
+# shapes mirror what the previous library-generated schemas produced (an
+# optional scalar becomes an `anyOf` union with `null`, a required list keeps
+# `type: array` + `items`) so `tools/list` stays byte-equivalent for clients —
+# pinned by the golden test against the pre-hand-rolled wire capture. Lookups
+# here are exact type-object matches (`bool` and `int` are distinct keys); the
+# isinstance-level bool/int distinction that validation needs lives in
+# `_validated_arguments`.
+_SCALAR_JSON_TYPES: dict[type, str] = {str: "string", int: "integer", bool: "boolean"}
+
+
+def _json_type(annotation: Any, param: str) -> dict[str, Any]:
+    """The flat schema fragment for one (non-nullable) annotation."""
+    if annotation in _SCALAR_JSON_TYPES:
+        return {"type": _SCALAR_JSON_TYPES[annotation]}
+    if get_origin(annotation) is list:
+        (item,) = get_args(annotation)
+        return {"type": "array", "items": _json_type(item, param)}
+    raise ValueError(
+        f"tool parameter {param!r} has an unsupported type for the schema "
+        f"({annotation!r}) — add the mapping to the schema builder"
+    )
+
+
+def _assert_items_are_schemas(param: str, spec: dict[str, Any]) -> None:
+    """Every `items` a schema fragment carries must itself be a schema object
+    (a dict), recursively. The generated fragments always satisfy this
+    (`_json_type` builds `items` by recursion); the guard exists for a future
+    hand-written fragment, because the argument validation RECURSES into
+    `items` — a non-dict one would make that recursion fail open (the element
+    would be passed unchecked). Registration refuses the tool instead."""
+    items = spec.get("items")
+    if items is not None and not isinstance(items, dict):
+        raise ValueError(
+            f"tool parameter {param!r}: schema 'items' must be a schema object, got {items!r}"
+        )
+    if isinstance(items, dict):
+        _assert_items_are_schemas(param, items)
+
+
+def _tool_input_schema(fn: Any) -> dict[str, Any]:
+    """The `inputSchema` for one tool, derived from its handler's signature.
+
+    Every handler's parameters are the tool's declared parameters (the schema
+    is generated from the source of truth, so signature and advertised schema
+    cannot drift). A nullable (`X | None`) parameter is advertised as an
+    `anyOf` union with `null` — the shape the library-generated schemas had;
+    plain-default parameters stay flat. Unknown annotations and malformed
+    fragments raise at registration — a future tool with an unsupported
+    parameter type (or a hand-edited schema whose `items` would make argument
+    validation fail open) fails loudly, never advertises a lie.
+    """
+    hints = get_type_hints(fn)
+    properties: dict[str, Any] = {}
+    required: list[str] = []
+    for param in inspect.signature(fn).parameters.values():
+        annotation = hints[param.name]
+        nullable = False
+        if get_origin(annotation) is types.UnionType:
+            args = [a for a in get_args(annotation) if a is not types.NoneType]
+            if len(args) != 1:
+                raise ValueError(
+                    f"tool parameter {param.name!r}: only `X | None` unions are supported"
+                )
+            annotation, nullable = args[0], True
+        spec = _json_type(annotation, param.name)
+        _assert_items_are_schemas(param.name, spec)
+        if nullable:
+            spec = {"anyOf": [spec, {"type": "null"}]}
+        if param.default is not inspect.Parameter.empty:
+            spec["default"] = param.default
+        title = " ".join(word.capitalize() for word in param.name.split("_"))
+        properties[param.name] = {"title": title, **spec}
+        if param.default is inspect.Parameter.empty and not nullable:
+            required.append(param.name)
+    return {
+        "properties": properties,
+        **({"required": required} if required else {}),
+        "title": f"{fn.__name__}Arguments",
+        "type": "object",
+    }
+
+
+def _tool_text_result(text: str, *, is_error: bool = False) -> dict[str, Any]:
+    result: dict[str, Any] = {"content": [{"type": "text", "text": text}]}
+    if is_error:
+        result["isError"] = True
+    return result
+
+
+def _tool_payload_result(payload: dict[str, Any]) -> dict[str, Any]:
+    text = json.dumps(payload, indent=2)
+    return {
+        "content": [{"type": "text", "text": text}],
+        "structuredContent": payload,
+    }
+
+
+class _ArgumentError(Exception):
+    """A tool call's arguments failed validation — an isError tool result."""
+
+
+def _non_null_branch(spec: dict[str, Any]) -> dict[str, Any]:
+    """The value-shape of a declared schema fragment: a nullable (`X | None`)
+    property is advertised as an `anyOf` union with `null` — its shape is the
+    non-null branch's. A flat fragment is returned as-is."""
+    if isinstance(spec.get("anyOf"), list):
+        for branch in spec["anyOf"]:
+            if isinstance(branch, dict) and branch.get("type") != "null":
+                return branch
+    return spec
+
+
+def _validated_arguments(tool: _Tool, arguments: dict[str, Any]) -> dict[str, Any]:
+    """Validate (and where advertised, coerce) `arguments` against the tool's
+    schema, fail-closed.
+
+    Missing required parameters, values of the wrong type and wrong-typed
+    LIST ELEMENTS are explicit errors naming the parameter (and the element's
+    index path) — never `None` defaults or unfiltered lists sneaking into a
+    query, and never a wrong-typed value dying later as "Internal error".
+    An explicit `null` for a nullable parameter is valid (the schema
+    advertises it) and passes through. Coercion is deliberately narrow (a
+    digit string for an integer is the only one; `5.0` and `"true"` are
+    refused): real clients generate arguments from the schema, so anything
+    that arrives out of shape is a bug worth reporting, not smoothing over.
+    """
+    declared = tool.input_schema.get("properties", {})
+    missing = [name for name in tool.input_schema.get("required", []) if name not in arguments]
+    if missing:
+        raise _ArgumentError(f"missing required argument(s): {', '.join(missing)}")
+    kwargs: dict[str, Any] = {}
+    for name, value in arguments.items():
+        spec = declared.get(name, {})
+        nullable = isinstance(spec.get("anyOf"), list)
+        if nullable and value is None:
+            kwargs[name] = None
+            continue
+        kwargs[name] = _checked_value(name, _non_null_branch(spec), value)
+    return kwargs
+
+
+def _checked_value(param: str, spec: dict[str, Any], value: Any) -> Any:
+    """One argument value against one (non-nullable) schema fragment. Array
+    elements recurse into the fragment's `items`, with the failure labeled by
+    the full index path (`rules[0][1]`)."""
+    json_type = spec.get("type")
+    if json_type == "string" and isinstance(value, str):
+        return value
+    if json_type == "boolean" and isinstance(value, bool):
+        return value
+    if json_type == "integer" and isinstance(value, int) and not isinstance(value, bool):
+        return value
+    if json_type == "integer" and isinstance(value, str) and value.isdigit():
+        # `str.isdigit` also accepts characters `int` rejects ("²").
+        try:
+            return int(value)
+        except ValueError:
+            pass  # fall through to the error below
+    if json_type == "array" and isinstance(value, list):
+        items = spec.get("items")
+        if isinstance(items, dict):
+            return [_checked_value(f"{param}[{i}]", items, item) for i, item in enumerate(value)]
+        # Unreachable from the registry — `_tool_input_schema` refuses a
+        # non-dict `items` at registration — kept fail-closed so a schema
+        # shape drift can never pass elements unchecked.
+        raise _ArgumentError(f"argument {param!r}: schema 'items' is not a schema object")
+    raise _ArgumentError(f"argument {param!r} must be of type {json_type}, got {value!r}")
+
+
+class _CppgraphMcpServer:
+    """The minimal MCP server over the 26 query tools — no third-party protocol
+    library.
+
+    Dispatch is strict-argument: an unknown tool parameter (a typo'd name) is
+    rejected with an explicit error naming it — never silently dropped into an
+    unfiltered result (the input-hygiene contract, Masora integration doc
+    §9.8a). The check is central — every registered tool, and every future
+    one, inherits it — and fires BEFORE required-argument validation, so a
+    call carrying only an unknown parameter reports the typo rather than a
+    misleading missing-required-argument error. Tool failures (a rejected
+    argument, an unexpected crash) are MCP tool RESULTS with `isError: true`,
+    never protocol crashes.
+    """
+
+    def __init__(self, instructions: str, tools: dict[str, _Tool]) -> None:
+        self.instructions = instructions
+        self.tools = tools
+
+    def list_tools(self) -> list[dict[str, Any]]:
+        """The `tools/list` payload, registration order (what `tools/list`
+        returned all along). Every tool returns a dict, so the structured
+        output schema is the same object shape for all of them."""
+        return [
+            {
+                "name": tool.name,
+                "description": tool.description,
+                "inputSchema": tool.input_schema,
+                "outputSchema": {
+                    "additionalProperties": True,
+                    "title": f"{tool.name}DictOutput",
+                    "type": "object",
+                },
+            }
+            for tool in self.tools.values()
+        ]
+
+    def call_tool(self, name: Any, arguments: Any) -> dict[str, Any]:
+        """Run one tool, returning the MCP result envelope (isError on
+        failure). The dict payload travels as `structuredContent` and as one
+        indented-JSON text block — the shape clients have always seen."""
+        tool = self.tools.get(name) if isinstance(name, str) else None
+        if tool is None:
+            return _tool_text_result(f"Unknown tool: {name}", is_error=True)
+        if not isinstance(arguments, dict):
+            return _tool_text_result("params.arguments must be an object", is_error=True)
+        properties = tool.input_schema.get("properties", {})
+        unknown = sorted(set(arguments) - set(properties))
+        if unknown:
+            return _tool_text_result(f"unknown parameter(s): {', '.join(unknown)}", is_error=True)
+        try:
+            kwargs = _validated_arguments(tool, arguments)
+        except _ArgumentError as e:
+            return _tool_text_result(str(e), is_error=True)
+        try:
+            # Serialization is part of the tool call: an unserializable
+            # payload is a tool failure, not a protocol crash.
+            return _tool_payload_result(tool.fn(**kwargs))
+        except Exception as exc:  # noqa: BLE001 — the server must survive any tool crash
+            return _tool_text_result(f"Internal error: {exc!r}", is_error=True)
+
+    def run(self, stdin: Any = None, stdout: Any = None) -> int:
+        """Serve newline-delimited JSON-RPC over stdio until EOF."""
+        # Real stdin is read as bytes and decoded per line, so one undecodable
+        # line is a recoverable parse error instead of an exception that ends
+        # the iteration.
+        stream_in = stdin if stdin is not None else getattr(sys.stdin, "buffer", sys.stdin)
+        stream_out = stdout if stdout is not None else sys.stdout
+        if stdout is None and hasattr(stream_out, "reconfigure"):
+            stream_out.reconfigure(encoding="utf-8")
+        for raw in stream_in:
+            reply = _serve_line(self, raw)
+            if reply is not None:
+                stream_out.write(reply + "\n")
+                stream_out.flush()
+        return 0
+
+
+def _error_response(msg_id: Any, code: int, message: str) -> dict[str, Any]:
+    return {"jsonrpc": "2.0", "id": msg_id, "error": {"code": code, "message": message}}
+
+
+def _serve_line(server: _CppgraphMcpServer, raw: str | bytes) -> str | None:
+    """One input line → the serialized reply (None for blank lines and
+    notifications). Nothing may escape: a malformed line never stops the
+    loop, so an unexpected failure is logged and answered with -32603 when the
+    line carries a request id."""
+    line = ""
+    try:
+        line = (raw.decode("utf-8") if isinstance(raw, bytes) else raw).strip()
+        if not line:
+            return None
+        response = _handle_line(server, line)
+        return None if response is None else json.dumps(response)
+    except UnicodeDecodeError as exc:
+        _LOGGER.warning("undecodable input line discarded: %s", exc)
+        return json.dumps(_error_response(None, -32700, f"Parse error: undecodable input: {exc}"))
+    except Exception:  # noqa: BLE001 — the loop must survive any per-line failure
+        _LOGGER.exception("unexpected failure serving a line; the loop continues")
+        return _internal_error_reply(line)
+
+
+def _internal_error_reply(line: str) -> str | None:
+    """A -32603 reply for a request line whose handling crashed — None when
+    the line is a notification or its id cannot be recovered."""
+    try:
+        message = json.loads(line)
+        if isinstance(message, dict) and "id" in message:
+            return json.dumps(_error_response(message["id"], -32603, "Internal error"))
+    except Exception:  # noqa: BLE001 — best effort; the caller already logged
+        pass
+    return None
+
+
+def _initialize(server: _CppgraphMcpServer, params: dict[str, Any], msg_id: Any) -> dict[str, Any]:
+    requested = params.get("protocolVersion")
+    if requested is None or not isinstance(requested, str):
+        return _error_response(
+            msg_id,
+            -32602,
+            f"params.protocolVersion is required and must be a string, got {requested!r}",
+        )
+    return {
+        "jsonrpc": "2.0",
+        "id": msg_id,
+        "result": {
+            "protocolVersion": (
+                requested if requested in SUPPORTED_PROTOCOL_VERSIONS else PROTOCOL_VERSION
+            ),
+            "capabilities": {"tools": {"listChanged": False}},
+            "serverInfo": {"name": SERVER_NAME, "version": _server_version()},
+            "instructions": server.instructions,
+        },
+    }
+
+
+def _tools_call(server: _CppgraphMcpServer, params: dict[str, Any], msg_id: Any) -> dict[str, Any]:
+    return {
+        "jsonrpc": "2.0",
+        "id": msg_id,
+        "result": server.call_tool(params.get("name"), params.get("arguments")),
+    }
+
+
+def _dispatch(server: _CppgraphMcpServer, message: dict[str, Any]) -> dict[str, Any] | None:
+    method = message.get("method")
+    if not isinstance(method, str):
+        return _error_response(
+            message.get("id"), -32600, "Invalid Request: expected a 'method' member"
+        )
+    params = message.get("params")
+    if not isinstance(params, dict):
+        params = {}
+    has_id = "id" in message
+    msg_id = message.get("id")
+    if method == "initialize":
+        return _initialize(server, params, msg_id) if has_id else None
+    if method == "notifications/initialized":
+        return None
+    if method == "ping":  # the spec requires every receiver to answer it
+        return {"jsonrpc": "2.0", "id": msg_id, "result": {}} if has_id else None
+    if method == "tools/list":
+        if not has_id:
+            return None
+        return {"jsonrpc": "2.0", "id": msg_id, "result": {"tools": server.list_tools()}}
+    if method == "tools/call":
+        if not has_id:
+            return None
+        return _tools_call(server, params, msg_id)
+    if has_id:
+        return _error_response(msg_id, -32601, f"Method not found: {method}")
+    return None
+
+
+def _handle_line(server: _CppgraphMcpServer, line: str) -> dict[str, Any] | None:
+    try:
+        message = json.loads(line)
+    except json.JSONDecodeError as exc:
+        _LOGGER.warning("malformed JSON discarded: %s", exc)
+        return _error_response(None, -32700, f"Parse error: {exc}")
+    if not isinstance(message, dict):
+        _LOGGER.warning("message is not a JSON object")
+        return _error_response(None, -32600, "Invalid Request: expected a JSON-RPC message object")
+    return _dispatch(server, message)
+
+
+def build_server(graph_path: str | Path | None, root: str | None = None) -> _CppgraphMcpServer:
+    """The MCP server for one project's graph (opened once, reused per call).
 
     `graph_path` is resolved at launch — explicitly (`--graph`) or discovered
     from the cwd (`discover_graph`) — so tools never take a graph argument. If it
@@ -1718,38 +2114,20 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
     every tool returns a clear "not indexed here" message. `root` is the checkout
     used for `status` drift and source snippets.
     """
-    from mcp.server.fastmcp import FastMCP
-    from mcp.server.fastmcp.exceptions import ToolError
-
-    class _StrictArgsFastMCP(FastMCP):
-        """FastMCP that rejects unknown tool parameters instead of dropping
-        them.
-
-        The stock dispatch silently DROPS argument keys no declared parameter
-        covers (empirical: `call_tool("greet", {"name": "x", "lvel": 2})` on a
-        `(name: str, level: int = 1)` tool runs with `level=1`, no error) — so
-        a typo'd parameter name narrows nothing and quietly returns UNFILTERED
-        results, the exact failure the input-hygiene contract forbids (Masora
-        integration doc §9.8a: an unknown parameter is an explicit error
-        naming it). The check is central — every registered tool, and every
-        future one, inherits it — and fires BEFORE argument validation, so a
-        call carrying only an unknown parameter reports the typo rather than
-        a misleading missing-required-argument error. The raised ToolError
-        reaches the caller directly from `call_tool`; over the stdio transport
-        the low-level server converts it into the isError response carrying
-        the message — the explicit error the contract asks for."""
-
-        async def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
-            tool = self._tool_manager.get_tool(name)
-            if tool is not None and arguments:
-                declared = set(tool.parameters.get("properties", {}))
-                unknown = sorted(set(arguments) - declared)
-                if unknown:
-                    raise ToolError(f"unknown parameter(s): {', '.join(unknown)}")
-            return await super().call_tool(name, arguments)
-
     stores = _ReloadingStore(graph_path)
-    mcp = _StrictArgsFastMCP("cppgraph", instructions=_server_instructions(stores.get()))
+
+    tools: dict[str, _Tool] = {}
+
+    def _register(fn: Any) -> Any:
+        """The registry entry replacing the old decorator: keep the handler,
+        declare its schema, done."""
+        tools[fn.__name__] = _Tool(
+            name=fn.__name__,
+            description=inspect.cleandoc(fn.__doc__ or ""),
+            input_schema=_tool_input_schema(fn),
+            fn=fn,
+        )
+        return fn
 
     def _no_graph_notice() -> dict[str, Any]:
         """What a tool returns when no usable store is open: the specific
@@ -1799,7 +2177,7 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
                 result["stale"] = None
         return result
 
-    @mcp.tool()
+    @_register
     def find(
         query: str,
         limit: int = DEFAULT_LIMIT,
@@ -1855,7 +2233,7 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         _masora_field(result, stores.get(), symbols=response_symbols(result))
         return result
 
-    @mcp.tool()
+    @_register
     def who_calls(
         symbol: str,
         limit: int = DEFAULT_LIMIT,
@@ -1892,7 +2270,7 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         _masora_field(result, stores.get())
         return result
 
-    @mcp.tool()
+    @_register
     def what_it_calls(
         symbol: str,
         limit: int = DEFAULT_LIMIT,
@@ -1940,7 +2318,7 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         _masora_field(result, stores.get())
         return result
 
-    @mcp.tool()
+    @_register
     def base_classes(
         symbol: str, limit: int = DEFAULT_LIMIT, full_symbols: bool = False
     ) -> dict[str, Any]:
@@ -1955,7 +2333,7 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         with no base) rather than a bare `0`."""
         return _call(bases, symbol, limit=limit, full_symbols=full_symbols)
 
-    @mcp.tool()
+    @_register
     def subclasses(
         symbol: str, limit: int = DEFAULT_LIMIT, full_symbols: bool = False
     ) -> dict[str, Any]:
@@ -1966,7 +2344,7 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         or a holder that isn't itself a base) rather than a bare `0`."""
         return _call(subtypes, symbol, limit=limit, full_symbols=full_symbols)
 
-    @mcp.tool()
+    @_register
     def find_references(
         symbol: str,
         include_source: bool = False,
@@ -2007,7 +2385,7 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
             access=access,
         )
 
-    @mcp.tool()
+    @_register
     def path(src: str, dst: str) -> dict[str, Any]:
         """Shortest chain of `calls` edges from `src` to `dst` (names or exact
         SCIP strings; a unique name resolves automatically, with a prose copy
@@ -2021,7 +2399,7 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         (corridor and context knobs included)."""
         return _call(call_path, src, dst)
 
-    @mcp.tool()
+    @_register
     def impact_of(
         symbol: str,
         depth: int | None = None,
@@ -2055,7 +2433,7 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
             exclude_paths=exclude_paths,
         )
 
-    @mcp.tool()
+    @_register
     def reachable_from(
         symbol: str,
         depth: int | None = None,
@@ -2097,7 +2475,7 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
             exclude_paths=exclude_paths,
         )
 
-    @mcp.tool()
+    @_register
     def hotspots(
         limit: int = DEFAULT_LIMIT,
         kind: str = "fan_in",
@@ -2127,7 +2505,7 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
             exclude_paths=exclude_paths,
         )
 
-    @mcp.tool()
+    @_register
     def dependency_cost(
         target_paths: list[str],
         limit: int = DEFAULT_LIMIT,
@@ -2163,7 +2541,7 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
             exclude_paths=exclude_paths,
         )
 
-    @mcp.tool()
+    @_register
     def stats(
         group_by: str = "file",
         limit: int = DEFAULT_LIMIT,
@@ -2188,7 +2566,7 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
             exclude_paths=exclude_paths,
         )
 
-    @mcp.tool()
+    @_register
     def line_span(
         limit: int = DEFAULT_LIMIT,
         exclude_tests: bool = False,
@@ -2217,7 +2595,7 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
             exclude_paths=exclude_paths,
         )
 
-    @mcp.tool()
+    @_register
     def no_incoming_calls(
         limit: int = DEFAULT_LIMIT,
         exclude_tests: bool = False,
@@ -2250,7 +2628,7 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
             exclude_paths=exclude_paths,
         )
 
-    @mcp.tool()
+    @_register
     def global_init_references(
         symbol: str,
         limit: int = DEFAULT_LIMIT,
@@ -2282,7 +2660,7 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
             full_symbols=full_symbols,
         )
 
-    @mcp.tool()
+    @_register
     def boundary_violations(
         rules: list[list[str]],
         edge_kinds: list[str] | None = None,
@@ -2314,7 +2692,7 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
             full_symbols=full_symbols,
         )
 
-    @mcp.tool()
+    @_register
     def visualize_boundary_violations(
         rules: list[list[str]],
         edge_kinds: list[str] | None = None,
@@ -2394,7 +2772,7 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
             result["opened"] = launched
         return result
 
-    @mcp.tool()
+    @_register
     def api_surface(
         module_prefix: str,
         limit: int = DEFAULT_LIMIT,
@@ -2429,7 +2807,7 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
             full_symbols=full_symbols,
         )
 
-    @mcp.tool()
+    @_register
     def outline(
         file: str, limit: int = DEFAULT_LIMIT, full_symbols: bool = False
     ) -> dict[str, Any]:
@@ -2456,7 +2834,7 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
             _masora_field(result, store, symbols=[node.symbol for node in nodes])
         return result
 
-    @mcp.tool()
+    @_register
     def class_members(
         symbol: str,
         limit: int = DEFAULT_LIMIT,
@@ -2477,7 +2855,7 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         reports the full count."""
         return _call(class_members_report, symbol, limit=limit, full_symbols=full_symbols)
 
-    @mcp.tool()
+    @_register
     def strongly_connected_components(
         limit: int = DEFAULT_LIMIT,
         exclude_tests: bool = False,
@@ -2512,7 +2890,7 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
             exclude_paths=exclude_paths,
         )
 
-    @mcp.tool()
+    @_register
     def explain_symbol(
         symbol: str,
         include_source: bool = False,
@@ -2580,7 +2958,7 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         _masora_field(result, stores.get())
         return result
 
-    @mcp.tool()
+    @_register
     def status(force_update_check: bool = False) -> dict[str, Any]:
         """Graph provenance and drift: is this graph still current for the
         checkout? Run first — if `drift.up_to_date` is false, re-index before
@@ -2592,7 +2970,7 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         refetches now."""
         return _call(status_report, root=root, force=force_update_check)
 
-    @mcp.tool()
+    @_register
     def fingerprints(symbols: list[str] | None = None) -> dict[str, Any]:
         """The masora fingerprint contract (masora_integration.md §2): the
         spawned-command surface's data as one document — `contract_version`,
@@ -2623,7 +3001,7 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         except FingerprintsError as e:
             return {"error": str(e)}
 
-    @mcp.tool()
+    @_register
     def log_id_lookup(ids: list[int], revision: str | None = None) -> dict[str, Any]:
         """Resolve redwood LOG ids to their enclosing symbols
         (redwood_integration.md §1, contract v1). One batched call, entirely
@@ -2660,7 +3038,7 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
         except LogIdLookupError as e:
             return {"error": str(e)}
 
-    @mcp.tool()
+    @_register
     def visualize(
         symbol: str,
         mode: str = "deps",
@@ -2799,7 +3177,10 @@ def build_server(graph_path: str | Path | None, root: str | None = None) -> Any:
             result["opened"] = launched
         return result
 
-    return mcp
+    return _CppgraphMcpServer(
+        instructions=_server_instructions(stores.get()),
+        tools=tools,
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -2836,8 +3217,7 @@ def main(argv: list[str] | None = None) -> int:
     # report "not indexed here" — so a single global registration is harmless in
     # projects that haven't been indexed yet.
     server = build_server(graph, root=root)
-    server.run()  # stdio transport
-    return 0
+    return server.run()  # stdio transport, until EOF
 
 
 if __name__ == "__main__":

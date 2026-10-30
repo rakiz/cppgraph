@@ -9,23 +9,6 @@ in `CHANGELOG.md`, releases in `versions.json`.
 
 ## Other
 
-- **Drop the `mcp` dependency — hand-rolled stdio server (DECIDED 2026-10-30,
-  replaces the mcp 2.x migration).** The FastMCP surface actually used reduces to
-  the import, the `@mcp.tool()` decorator, `run()` stdio, and error codes — so
-  little that the repo already subclasses it (`_StrictArgsFastMCP`) to re-add
-  strict unknown-parameter gating, i.e. re-implementing what the lib should do.
-  Scope (scoped 2026-10-30 via a throwaway-venv probe): JSON-RPC 2.0 over
-  newline-delimited stdio, exactly the four methods the protocol needs here
-  (`initialize` with a pinned PROTOCOL_VERSION, `notifications/initialized`,
-  `tools/list`, `tools/call`) — the pattern masora proved at 12 tools
-  (hand-rolled, zero deps, fail-closed: a malformed line never stops the loop).
-  The 26 tools' queries are already unit-tested without a transport (DESIGN.md
-  "thin wiring"), so the decorators are replaced by hand-declared schemas +
-  a dispatch table. Kills the `mcp<2` pin, the mcp 2.x migration, and the OTel
-  footprint in one move; protocol-level failures stay JSON-RPC errors
-  (-32700/-32600/-32601/-32602/-32603), tool failures stay `isError: true`
-  results — wire shape unchanged, clients notice nothing.
-
 - **Attributed references as first-class `uses` edges.** `impact_of`/`path` traverse
   `calls`/`inherits` only, so a *type* has no reachable callers — "what breaks if I
   change this struct?" isn't answerable transitively; the answer lives in
@@ -177,7 +160,7 @@ in `CHANGELOG.md`, releases in `versions.json`.
   **Measured breakdown, not a guess** (checked before parking this, not after;
   re-measured after the `find_symbols`/`queries.py` extraction below, since
   that extraction shifted these numbers):
-  - `mcp_server.py`: `build_server()`+`main()` (the actual FastMCP wiring) is
+  - `mcp_server.py`: `build_server()`+`main()` (the actual MCP wiring) is
     only ~960 lines; the other ~1740 lines are "pure query functions" that the
     module's own docstring already claims are conceptually separate from the
     transport layer — they just never got split into their own module. A first

@@ -10,7 +10,6 @@ compare.
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import json
 import sqlite3
@@ -415,11 +414,9 @@ def test_mcp_tool_fingerprints_same_document(repo: tuple[Path, str, str], capsys
     server = mcp_server.build_server(str(db), root=str(r))
 
     def _payload(arguments: dict) -> dict:
-        result = asyncio.run(server.call_tool("fingerprints", arguments))
-        if isinstance(result, tuple) and len(result) == 2 and isinstance(result[1], dict):
-            return result[1]
-        blocks = result[0] if isinstance(result, tuple) else result
-        return json.loads(blocks[0].text)
+        result = server.call_tool("fingerprints", arguments)
+        assert not result.get("isError"), result
+        return json.loads(result["content"][0]["text"])
 
     assert _payload({"symbols": [F, MISSING]}) == cli_doc
     # The not-found branch via the same dispatch: found: false, nothing guessed.

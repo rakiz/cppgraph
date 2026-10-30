@@ -470,7 +470,9 @@ designing the builder so this isn't a later rewrite:
     only, plus the summed total call sites over the per-symbol breakdown),
     `status` (source commit + drift check).
 - MCP server (`cppgraph-mcp`, `src/cppgraph/mcp_server.py`): exposes the same
-  queries to an LLM, token-budgeted. FastMCP over stdio; the graph store is
+  queries to an LLM, token-budgeted. A hand-rolled minimal MCP server over
+  stdio (newline-delimited JSON-RPC 2.0 — five methods, zero third-party
+  protocol dependencies); the graph store is
   fixed at launch (`--graph <db>`, optional `--root <checkout>`) so tools never
   take — and the LLM never has to guess or repeat — a filesystem path. Tools:
     `find`, `who_calls`, `what_it_calls`, `base_classes`, `subclasses`,
@@ -638,7 +640,7 @@ designing the builder so this isn't a later rewrite:
     CHANGELOG, not the registry). Fetched best-effort with a 24h on-disk cache,
     fails soft offline; `cppgraph.updates.compute_advice` is the pure, tested core.
   - *Testable core*: the substance is a pure `(store, …) -> dict` layer
-    (unit-tested without a transport); the FastMCP decorators are thin wiring
+    (unit-tested without a transport); the MCP dispatch table is thin wiring
     over it. Errors (unknown symbol) come back as an `{"error": …}` dict
     pointing at `find`, not an exception.
 - Export: optional graphify-compatible `graph.json` purely for visualization.

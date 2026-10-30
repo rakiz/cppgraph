@@ -1,23 +1,24 @@
 """Tests for the MCP server's query layer.
 
-The MCP transport (stdio) is thin FastMCP wiring; the substance is the pure
-`(store, ...) -> dict` functions that turn GraphStore results into
+The MCP transport (stdio) is thin hand-rolled JSON-RPC wiring; the substance is
+the pure `(store, ...) -> dict` functions that turn GraphStore results into
 token-budgeted, JSON-serialisable payloads. We test those directly against a
 tiny fixture store — no transport needed.
+
 """
 
 from __future__ import annotations
 
-import asyncio
+import io
 import json
 import re
 import sqlite3
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
 import pytest
-from mcp.server.fastmcp.exceptions import ToolError
 
 from cppgraph import mcp_server
 from cppgraph import updates as mcp_server_updates
@@ -501,7 +502,7 @@ def test_stats_tool_registered_and_routes_through_call(tmp_path: Path) -> None:
     path = tmp_path / "g.db"
     write_sqlite(graph, path)
     server = build_server(str(path))
-    stats_tool = server._tool_manager._tools["stats"].fn
+    stats_tool = server.tools["stats"].fn
     assert stats_tool(group_by="dir")["stats"] == [
         {"dir": ".", "symbols": 1, "edges": 0, "refs": 0}
     ]
@@ -582,7 +583,7 @@ def test_line_span_tool_registered_and_routes_through_call(tmp_path: Path) -> No
     path = tmp_path / "g.db"
     write_sqlite(Graph(), path)
     server = build_server(str(path))
-    tool = server._tool_manager._tools["line_span"].fn
+    tool = server.tools["line_span"].fn
     assert tool()["available"] is False  # no enclosing-range data in this store
 
 
@@ -634,7 +635,7 @@ def test_no_incoming_calls_tool_registered_and_routes_through_call(
     path = tmp_path / "g.db"
     write_sqlite(Graph(), path)
     server = build_server(str(path))
-    tool = server._tool_manager._tools["no_incoming_calls"].fn
+    tool = server.tools["no_incoming_calls"].fn
     assert tool()["available"] is False  # stock-binary store: refused, not guessed
 
 
@@ -750,7 +751,7 @@ def test_global_init_references_tool_registered_and_routes_through_call(
     path = tmp_path / "g.db"
     write_sqlite(graph, path)
     server = build_server(str(path))
-    tool = server._tool_manager._tools["global_init_references"].fn
+    tool = server.tools["global_init_references"].fn
     assert tool("g")["available"] is False  # no attributed refs: refused, not guessed
 
 
@@ -858,7 +859,7 @@ def test_boundary_violations_tool_registered_and_routes_through_call(
     path = tmp_path / "g.db"
     write_sqlite(graph, path)
     server = build_server(str(path))
-    tool = server._tool_manager._tools["boundary_violations"].fn
+    tool = server.tools["boundary_violations"].fn
     result = tool(rules=[["common/", "platform/"]])
     assert result["total"] == 1
     assert result["violations"][0]["dst"] == "platform_secret"
@@ -877,7 +878,7 @@ def test_visualize_boundary_violations_renders_violations(tmp_path: Path) -> Non
     path = tmp_path / "g.db"
     write_sqlite(graph, path)
     server = build_server(str(path))
-    viz = server._tool_manager._tools["visualize_boundary_violations"].fn
+    viz = server.tools["visualize_boundary_violations"].fn
     r = viz(rules=[["common/", "platform/"]], open_browser=False)
     assert "error" not in r
     assert r["nodes"] == 2 and r["edges"] == 1
@@ -902,7 +903,7 @@ def test_visualize_boundary_violations_zero_violations_skip_html(tmp_path: Path)
     path = tmp_path / "g.db"
     write_sqlite(graph, path)
     server = build_server(str(path))
-    viz = server._tool_manager._tools["visualize_boundary_violations"].fn
+    viz = server.tools["visualize_boundary_violations"].fn
     r = viz(rules=[["common/", "platform/"]], open_browser=True)
     assert r["violations"] == 0
     assert r["total"] == 0
@@ -922,7 +923,7 @@ def test_visualize_boundary_violations_invalid_rules_are_error(tmp_path: Path) -
     path = tmp_path / "g.db"
     write_sqlite(graph, path)
     server = build_server(str(path))
-    viz = server._tool_manager._tools["visualize_boundary_violations"].fn
+    viz = server.tools["visualize_boundary_violations"].fn
     r = viz(rules=[["common/"]])  # not a pair
     assert "error" in r
     assert "[from_prefix, forbidden_prefix]" in r["hint"]
@@ -952,7 +953,7 @@ def test_visualize_boundary_violations_full_symbols_labels_raw_scip(tmp_path: Pa
     path = tmp_path / "g.db"
     write_sqlite(graph, path)
     server = build_server(str(path))
-    viz = server._tool_manager._tools["visualize_boundary_violations"].fn
+    viz = server.tools["visualize_boundary_violations"].fn
 
     r = viz(rules=[["common/", "platform/"]], open_browser=False)
     default_graph = _embedded_graph(r["path"])
@@ -1062,7 +1063,7 @@ def test_api_surface_tool_registered_and_routes_through_call(tmp_path: Path) -> 
     path = tmp_path / "g.db"
     write_sqlite(graph, path)
     server = build_server(str(path))
-    tool = server._tool_manager._tools["api_surface"].fn
+    tool = server.tools["api_surface"].fn
     result = tool(module_prefix="mod/")
     assert result["total"] == 1
     assert result["surface"][0]["name"] == "called_fn"
@@ -1258,7 +1259,7 @@ def test_outline_tool_registered_and_routes_through_call(tmp_path: Path) -> None
     path = tmp_path / "g.db"
     write_sqlite(graph, path)
     server = build_server(str(path))
-    tool = server._tool_manager._tools["outline"].fn
+    tool = server.tools["outline"].fn
     result = tool(file="src/app.cpp")
     assert result["total"] == 1
     assert result["definitions"][0]["name"] == "src/app#main(m1)."
@@ -1278,7 +1279,7 @@ def test_class_members_tool_registered_and_routes_through_call(tmp_path: Path) -
     path = tmp_path / "g.db"
     write_sqlite(graph, path)
     server = build_server(str(path))
-    tool = server._tool_manager._tools["class_members"].fn
+    tool = server.tools["class_members"].fn
     result = tool(symbol=FOO_TYPE)
     assert result["total"] == 2
     assert [d["name"] for d in result["members"]] == [
@@ -1374,7 +1375,7 @@ def test_scc_tool_registered_and_routes_through_call(tmp_path: Path) -> None:
     path = tmp_path / "g.db"
     write_sqlite(graph, path)
     server = build_server(str(path))
-    tool = server._tool_manager._tools["strongly_connected_components"].fn
+    tool = server.tools["strongly_connected_components"].fn
     result = tool()
     assert result["total"] == 1
     assert [d["name"] for d in result["components"][0]] == ["a", "b"]
@@ -2150,7 +2151,7 @@ def test_call_attaches_stale_flag(tmp_path: Path) -> None:
     write_sqlite(graph, path, meta={"source_commit": commit})
 
     server = build_server(str(path), root=str(root))
-    find_tool = server._tool_manager._tools["find"].fn
+    find_tool = server.tools["find"].fn
     assert find_tool(query="makeResumeToken")["stale"] is False
 
     (root / "a.cpp").write_text("int main(){return 1;}\n")  # drift
@@ -2182,7 +2183,7 @@ def test_call_logs_and_neuters_stale_check_failure(tmp_path: Path, monkeypatch) 
             records.append(record)
 
     server = build_server(str(path), root=str(tmp_path))
-    find_tool = server._tool_manager._tools["find"].fn
+    find_tool = server.tools["find"].fn
 
     logger = logging.getLogger("cppgraph.mcp_server")
     handler = _Capture()
@@ -2218,7 +2219,7 @@ def test_tool_reports_too_new_schema_as_clean_error_dict(tmp_path: Path) -> None
     con.close()
 
     server = build_server(str(path))
-    find_tool = server._tool_manager._tools["find"].fn
+    find_tool = server.tools["find"].fn
     result = find_tool(query="makeResumeToken")
     assert set(result) == {"error"}
     assert "newer than this cppgraph" in result["error"]
@@ -2258,7 +2259,7 @@ def test_visualize_tool_resolves_plain_unique_name(tmp_path: Path) -> None:
     path = tmp_path / "g.db"
     write_sqlite(graph, path)
     server = build_server(str(path))
-    viz = server._tool_manager._tools["visualize"].fn
+    viz = server.tools["visualize"].fn
     r = viz("makeResumeToken", open_browser=False)
     assert "error" not in r
     assert "path" in r
@@ -2277,7 +2278,7 @@ def test_visualize_tool_ambiguous_name_lists_candidates(tmp_path: Path) -> None:
     path = tmp_path / "g.db"
     write_sqlite(graph, path)
     server = build_server(str(path))
-    viz = server._tool_manager._tools["visualize"].fn
+    viz = server.tools["visualize"].fn
     r = viz("Foo", open_browser=False)
     assert r.get("ambiguous") == "Foo"
     assert {"ambiguous", "total", "candidates", "hint"} <= r.keys()
@@ -2303,7 +2304,7 @@ def test_visualize_tool_path_mode_renders_chain(tmp_path: Path) -> None:
     """mode="path" renders the shortest chain between symbol and dst — both
     accepted as plain unique names, like every other tool parameter."""
     server = _chain_server(tmp_path)
-    viz = server._tool_manager._tools["visualize"].fn
+    viz = server.tools["visualize"].fn
     r = viz("caller", mode="path", dst="makeResumeToken", open_browser=False)
     assert "error" not in r
     assert r["mode"] == "path"
@@ -2316,7 +2317,7 @@ def test_visualize_tool_path_mode_renders_chain(tmp_path: Path) -> None:
 
 def test_visualize_tool_path_mode_requires_dst(tmp_path: Path) -> None:
     server = _chain_server(tmp_path)
-    viz = server._tool_manager._tools["visualize"].fn
+    viz = server.tools["visualize"].fn
     r = viz("caller", mode="path", open_browser=False)
     assert set(r) == {"error"}
     assert "mode='path' requires dst" in r["error"]
@@ -2324,7 +2325,7 @@ def test_visualize_tool_path_mode_requires_dst(tmp_path: Path) -> None:
 
 def test_visualize_tool_path_mode_unknown_dst_is_error(tmp_path: Path) -> None:
     server = _chain_server(tmp_path)
-    viz = server._tool_manager._tools["visualize"].fn
+    viz = server.tools["visualize"].fn
     r = viz("caller", mode="path", dst="does::not::exist", open_browser=False)
     assert "error" in r
     assert "does::not::exist" in r["error"]
@@ -2332,7 +2333,7 @@ def test_visualize_tool_path_mode_unknown_dst_is_error(tmp_path: Path) -> None:
 
 def test_visualize_tool_path_mode_ambiguous_dst_lists_candidates(tmp_path: Path) -> None:
     server = _chain_server(tmp_path)
-    viz = server._tool_manager._tools["visualize"].fn
+    viz = server.tools["visualize"].fn
     r = viz("caller", mode="path", dst="Foo", open_browser=False)
     assert r.get("ambiguous") == "Foo"
     assert {"ambiguous", "total", "candidates", "hint"} <= r.keys()
@@ -2342,7 +2343,7 @@ def test_visualize_tool_path_mode_no_path_says_found_false(tmp_path: Path) -> No
     """No static chain between valid symbols: `found: False` + the shared hint,
     NOT a written/opened near-empty HTML the caller can't tell from success."""
     server = _chain_server(tmp_path)
-    viz = server._tool_manager._tools["visualize"].fn
+    viz = server.tools["visualize"].fn
     r = viz("makeResumeToken", mode="path", dst="caller", open_browser=False)
     assert r["found"] is False
     assert r["src"] == FOO and r["dst"] == CALLER
@@ -2387,7 +2388,7 @@ def test_visualize_tool_path_mode_expand_paths_renders_corridor(tmp_path: Path) 
     """expand_paths=True: the corridor — both diamond routes at once, not just
     the BFS-first chain (which would be 3 nodes / 2 edges)."""
     server = _diamond_server(tmp_path)
-    viz = server._tool_manager._tools["visualize"].fn
+    viz = server.tools["visualize"].fn
     r = viz(
         "cxx . . $ mongo/Flow#src(a1).",
         mode="path",
@@ -2410,7 +2411,7 @@ def test_visualize_tool_path_mode_depth_expands_context(tmp_path: Path) -> None:
     """depth=1 in path mode unions every chain/corridor node's neighbourhood
     (the deps-mode walk) into the graph — the dead-end sibling joins it."""
     server = _diamond_server(tmp_path, with_sibling=True)
-    viz = server._tool_manager._tools["visualize"].fn
+    viz = server.tools["visualize"].fn
     r = viz(
         "cxx . . $ mongo/Flow#src(a1).",
         mode="path",
@@ -2427,7 +2428,7 @@ def test_visualize_tool_path_mode_omitted_depth_stays_pure(tmp_path: Path) -> No
     must NOT leak into path mode — omitting depth keeps the pure chain, so the
     pre-feature callers see exactly what they saw before."""
     server = _diamond_server(tmp_path, with_sibling=True)
-    viz = server._tool_manager._tools["visualize"].fn
+    viz = server.tools["visualize"].fn
     r = viz(
         "cxx . . $ mongo/Flow#src(a1).",
         mode="path",
@@ -2442,7 +2443,7 @@ def test_visualize_tool_path_mode_limit_truncation_reported(tmp_path: Path) -> N
     the response reports the `truncated`/`total` pair like the other capped
     tools."""
     server = _diamond_server(tmp_path, with_sibling=True)
-    viz = server._tool_manager._tools["visualize"].fn
+    viz = server.tools["visualize"].fn
     r = viz(
         "cxx . . $ mongo/Flow#src(a1).",
         mode="path",
@@ -2494,7 +2495,7 @@ def test_visualize_tool_cycle_mode_renders_cycle(tmp_path: Path) -> None:
     plain unique name resolves like in every other mode) — members as nodes,
     induced edges as links, chord included."""
     server = _cycle_server(tmp_path)
-    viz = server._tool_manager._tools["visualize"].fn
+    viz = server.tools["visualize"].fn
     r = viz("n1", mode="cycle", open_browser=False)
     assert "error" not in r
     assert r["mode"] == "cycle"
@@ -2510,7 +2511,7 @@ def test_visualize_tool_cycle_mode_no_cycle_says_found_false(tmp_path: Path) -> 
     """A valid symbol in no multi-member cycle: found=false + a note, no HTML
     written or opened (the clean shape of path mode's no-chain case)."""
     server = _chain_server(tmp_path)  # caller -> mid -> makeResumeToken: acyclic
-    viz = server._tool_manager._tools["visualize"].fn
+    viz = server.tools["visualize"].fn
     r = viz("caller", mode="cycle", open_browser=False)
     assert r["found"] is False
     assert r["path"] is None
@@ -2523,7 +2524,7 @@ def test_visualize_tool_cycle_mode_depth_expands_context(tmp_path: Path) -> None
     graph (the same walk path/deps modes use) — the outside caller and callee
     join their cycle members."""
     server = _cycle_server(tmp_path, with_outsiders=True)
-    viz = server._tool_manager._tools["visualize"].fn
+    viz = server.tools["visualize"].fn
     r = viz("n1", mode="cycle", depth=1, open_browser=False)
     assert r["nodes"] == 5 and r["edges"] == 6
     assert r["hops"] == 4  # the cycle proper, unchanged by the context union
@@ -2554,7 +2555,7 @@ def test_visualize_tool_cycle_mode_depth_exclude_tests_filters_test_context(tmp_
     db = tmp_path / "cycle_test.db"
     write_sqlite(graph, db)
     server = build_server(str(db))
-    viz = server._tool_manager._tools["visualize"].fn
+    viz = server.tools["visualize"].fn
 
     unfiltered = viz("n1", mode="cycle", depth=1, open_browser=False)
     assert unfiltered["nodes"] == 4 and unfiltered["edges"] == 4  # fixture sanity
@@ -2569,7 +2570,7 @@ def test_visualize_tool_cycle_mode_omitted_depth_stays_pure(tmp_path: Path) -> N
     default of 2 must NOT leak into cycle mode — omitting depth keeps the pure
     cycle, however many context neighbours are one hop away."""
     server = _cycle_server(tmp_path, with_outsiders=True)
-    viz = server._tool_manager._tools["visualize"].fn
+    viz = server.tools["visualize"].fn
     r = viz("n1", mode="cycle", open_browser=False)
     assert r["nodes"] == 3 and r["edges"] == 4  # members only, no caller/callee
 
@@ -2578,7 +2579,7 @@ def test_visualize_tool_cycle_mode_limit_truncation_reported(tmp_path: Path) -> 
     """limit caps the merged node count (cycle kept whole, context cut) and
     the response reports the `truncated`/`total` pair like path mode."""
     server = _cycle_server(tmp_path, with_outsiders=True)
-    viz = server._tool_manager._tools["visualize"].fn
+    viz = server.tools["visualize"].fn
     r = viz("n1", mode="cycle", depth=1, limit=4, open_browser=False)
     assert r["nodes"] == 4 and r["truncated"] is True and r["total"] == 5
     assert r["hops"] == 4
@@ -2589,7 +2590,7 @@ def test_visualize_tool_cycle_mode_dst_gets_an_ignored_note(tmp_path: Path) -> N
     resolved — but noted, not silently swallowed (the CLI's
     test_export_cycle_mode_dst_gets_an_ignored_note covers the same note)."""
     server = _cycle_server(tmp_path)
-    viz = server._tool_manager._tools["visualize"].fn
+    viz = server.tools["visualize"].fn
     r = viz("n1", mode="cycle", dst="ignored_target", open_browser=False)
     assert "error" not in r
     assert r["note"] == "dst is ignored in mode='cycle' (a cycle is found from the symbol alone)"
@@ -3099,11 +3100,10 @@ def test_explain_shows_class_name_and_member_files(tmp_path: Path) -> None:
 
 # --- strict argument dispatch: unknown tool parameters are rejected (§9.8a) ------
 #
-# FastMCP's stock dispatch silently DROPS argument keys no declared parameter
-# covers (verified on the installed mcp package: `call_tool("greet", {"name":
-# "x", "lvel": 2})` runs with level=1, no error) — so a typo'd parameter name
-# quietly returns unfiltered results. The overridden dispatch turns one into an
-# explicit error naming the parameter, centrally, on every tool.
+# A lax dispatch silently DROPS argument keys no declared parameter covers —
+# so a typo'd parameter name narrows nothing and quietly returns unfiltered
+# results. The dispatch turns one into an explicit error naming the parameter,
+# centrally, on every tool.
 
 OTHER = "cxx . . $ mongo/Other#thing(a1)."
 
@@ -3112,19 +3112,16 @@ def _tool(server: Any, name: str) -> Any:
     """A tool's inner function, bypassing the dispatch — for asserting on the
     payload shape directly (the dispatch itself is covered by the
     strict-argument tests using `server.call_tool`)."""
-    return server._tool_manager._tools[name].fn
+    return server.tools[name].fn
 
 
 def _dispatch_payload(server: Any, name: str, arguments: dict[str, Any]) -> Any:
-    """The JSON payload a dispatch-level call produces. `FastMCP.call_tool`
-    (convert_result=True) returns a `(content_blocks, structured)` tuple for
-    these dict-returning tools — take the structured half, falling back to
-    parsing the single text content block."""
-    result = asyncio.run(server.call_tool(name, arguments))
-    if isinstance(result, tuple) and len(result) == 2 and isinstance(result[1], dict):
-        return result[1]
-    blocks = result[0] if isinstance(result, tuple) else result
-    return json.loads(blocks[0].text)
+    """The JSON payload a dispatch-level call produces. A successful call
+    travels as the envelope's `structuredContent` (mirrored by the single
+    text block); a failure is an `isError` result and fails the helper."""
+    result = server.call_tool(name, arguments)
+    assert not result.get("isError"), result
+    return json.loads(result["content"][0]["text"])
 
 
 @pytest.fixture
@@ -3154,22 +3151,18 @@ def test_every_tool_rejects_an_unknown_parameter(strict_server: Any) -> None:
     an unknown parameter must produce an error naming it — never a silently
     unfiltered result. The check is central, so future tools inherit it."""
     failures = []
-    for name in sorted(strict_server._tool_manager._tools):
-        try:
-            asyncio.run(strict_server.call_tool(name, {"_typo_param_": 1}))
-        except ToolError as e:
-            if "_typo_param_" not in str(e):
-                failures.append(f"{name}: error does not name the parameter: {e}")
-        except Exception as e:  # any other error shape is not the contract
-            failures.append(f"{name}: raised {type(e).__name__}: {e}")
-        else:
+    for name in sorted(strict_server.tools):
+        result = strict_server.call_tool(name, {"_typo_param_": 1})
+        if not result.get("isError"):
             failures.append(f"{name}: no error — unknown parameter was silently dropped")
+        elif "_typo_param_" not in result["content"][0]["text"]:
+            failures.append(f"{name}: error does not name the parameter: {result}")
     assert not failures, "strict-argument violations:\n" + "\n".join(failures)
 
 
 def test_clean_call_through_the_dispatch_unchanged(strict_server: Any) -> None:
     """No regression: a call with only declared parameters runs the tool and
-    returns its JSON payload as before (the override passes clean calls
+    returns its JSON payload as before (the gate passes clean calls
     through untouched)."""
     result = _dispatch_payload(strict_server, "who_calls", {"symbol": CALLER})
     assert "error" not in result
@@ -3183,8 +3176,10 @@ def test_unknown_parameter_wins_over_missing_required_argument(
     """The unknown-param check fires BEFORE argument validation: a call with
     ONLY an unknown parameter reports the typo, not a misleading
     missing-required-argument error (`find` requires `query`)."""
-    with pytest.raises(ToolError, match="_typo_param_"):
-        asyncio.run(strict_server.call_tool("find", {"_typo_param_": 1}))
+    result = strict_server.call_tool("find", {"_typo_param_": 1})
+    assert result.get("isError")
+    assert "_typo_param_" in result["content"][0]["text"]
+    assert "required" not in result["content"][0]["text"]
 
 
 # --- input hygiene: an unmatched INCLUDE path prefix is an explicit error ---
@@ -3295,3 +3290,377 @@ def test_mcp_every_path_filtered_tool_rejects_an_unmatched_prefix(
     )
     assert "error" in result, tool_name
     assert "no/such/prefix" in result["error"], tool_name
+
+
+# --- hand-rolled stdio protocol: framing, negotiation, error paths --------------
+#
+# The server speaks newline-delimited JSON-RPC 2.0 over stdio with exactly five
+# methods (`initialize`, `notifications/initialized`, `ping`, `tools/list`,
+# `tools/call`). Protocol-level failures are JSON-RPC errors; tool failures are
+# `isError` RESULTS — a malformed line never stops the loop. These tests speak
+# the wire protocol directly over injected streams (the masora precedent), no
+# third-party client library involved.
+
+
+def _rpc_lines(server: Any, lines: list[dict | str | bytes]) -> list[dict]:
+    """Feed raw lines (dicts get JSON-encoded; raw strings and bytes pass
+    through verbatim — for malformed-JSON / undecodable-input cases) into
+    `server.run` and parse the responses off stdout. Bytes stdin is what the
+    real server reads, so any bytes line switches the whole feed to bytes."""
+    encoded = [
+        line if isinstance(line, str | bytes) else json.dumps(line).encode() for line in lines
+    ]
+    if any(isinstance(line, bytes) for line in encoded):
+        stdin: Any = io.BytesIO(
+            b"\n".join(x if isinstance(x, bytes) else x.encode() for x in encoded) + b"\n"
+        )
+    else:
+        stdin = io.StringIO("\n".join(encoded) + "\n")  # type: ignore[arg-type]
+    stdout = io.StringIO()
+    assert server.run(stdin=stdin, stdout=stdout) == 0
+    return [json.loads(out) for out in stdout.getvalue().splitlines()]
+
+
+def _initialize_request(version: str = "2025-11-25") -> dict:
+    return {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": version,
+            "capabilities": {},
+            "clientInfo": {"name": "test-client", "version": "0"},
+        },
+    }
+
+
+def test_initialize_negotiates_the_pinned_protocol_version(strict_server: Any) -> None:
+    (response,) = _rpc_lines(strict_server, [_initialize_request()])
+    assert response["jsonrpc"] == "2.0"
+    assert response["id"] == 1
+    result = response["result"]
+    assert result["protocolVersion"] == mcp_server.PROTOCOL_VERSION
+    assert result["serverInfo"]["name"] == "cppgraph"
+    assert result["serverInfo"]["version"] == mcp_server._server_version()
+    assert "tools" in result["capabilities"]
+    # The client-facing steering text rides the initialize result.
+    assert "cppgraph serves a precomputed, compiler-exact graph" in result["instructions"]
+
+
+@pytest.mark.parametrize("version", ["2024-11-05", "2025-03-26", "2025-06-18"])
+def test_initialize_echoes_a_supported_client_version(strict_server: Any, version: str) -> None:
+    """A client negotiating an older supported revision gets that revision back,
+    not a newer one it never asked for."""
+    (response,) = _rpc_lines(strict_server, [_initialize_request(version)])
+    assert response["result"]["protocolVersion"] == version
+
+
+@pytest.mark.parametrize("version", ["2099-01-01", "", "latest"])
+def test_initialize_unsupported_client_version_gets_the_pinned_newest(
+    strict_server: Any, version: str
+) -> None:
+    (response,) = _rpc_lines(strict_server, [_initialize_request(version)])
+    assert response["result"]["protocolVersion"] == mcp_server.PROTOCOL_VERSION
+
+
+def test_initialize_requires_a_protocol_version_string(strict_server: Any) -> None:
+    (response,) = _rpc_lines(strict_server, [{"jsonrpc": "2.0", "id": 1, "method": "initialize"}])
+    assert response["error"]["code"] == -32602
+    assert "protocolVersion" in response["error"]["message"]
+
+
+def test_initialized_notification_gets_no_reply(strict_server: Any) -> None:
+    responses = _rpc_lines(
+        strict_server,
+        [_initialize_request(), {"jsonrpc": "2.0", "method": "notifications/initialized"}],
+    )
+    assert len(responses) == 1  # the initialize result only
+    assert responses[0]["id"] == 1
+
+
+def test_unknown_method_is_method_not_found(strict_server: Any) -> None:
+    (response,) = _rpc_lines(
+        strict_server, [{"jsonrpc": "2.0", "id": 7, "method": "resources/list"}]
+    )
+    assert response["id"] == 7
+    assert response["error"]["code"] == -32601
+    assert "resources/list" in response["error"]["message"]
+
+
+def test_ping_is_answered_with_an_empty_result(strict_server: Any) -> None:
+    (response,) = _rpc_lines(strict_server, [{"jsonrpc": "2.0", "id": 9, "method": "ping"}])
+    assert response == {"jsonrpc": "2.0", "id": 9, "result": {}}
+
+
+def test_ping_notification_gets_no_reply(strict_server: Any) -> None:
+    assert _rpc_lines(strict_server, [{"jsonrpc": "2.0", "method": "ping"}]) == []
+
+
+def test_malformed_json_line_is_a_parse_error_and_the_loop_continues(
+    strict_server: Any,
+) -> None:
+    responses = _rpc_lines(strict_server, ["{not json", _initialize_request()])
+    assert responses[0]["error"]["code"] == -32700
+    assert responses[0]["id"] is None
+    assert responses[1]["result"]["protocolVersion"] == mcp_server.PROTOCOL_VERSION
+
+
+def test_non_object_json_is_an_invalid_request(strict_server: Any) -> None:
+    (response,) = _rpc_lines(strict_server, ["[1, 2, 3]"])
+    assert response["error"]["code"] == -32600
+
+
+def test_empty_lines_are_skipped(strict_server: Any) -> None:
+    (response,) = _rpc_lines(strict_server, ["", "   ", _initialize_request()])
+    assert response["id"] == 1
+
+
+def test_tools_call_over_stdio_end_to_end(strict_server: Any) -> None:
+    """The full client conversation: initialize → initialized → tools/call —
+    the answer travels as structuredContent mirrored by one JSON text block."""
+    responses = _rpc_lines(
+        strict_server,
+        [
+            _initialize_request(),
+            {"jsonrpc": "2.0", "method": "notifications/initialized"},
+            {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {"name": "who_calls", "arguments": {"symbol": CALLER}},
+            },
+        ],
+    )
+    assert responses[0]["id"] == 1  # initialize
+    (call,) = [r for r in responses if r.get("id") == 2]
+    result = call["result"]
+    assert not result.get("isError")
+    assert result["structuredContent"]["total"] == 1
+    assert json.loads(result["content"][0]["text"]) == result["structuredContent"]
+
+
+def test_tools_call_unknown_tool_is_an_error_result_not_a_crash(strict_server: Any) -> None:
+    (response,) = _rpc_lines(
+        strict_server,
+        [
+            {
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "tools/call",
+                "params": {"name": "no_such_tool", "arguments": {}},
+            }
+        ],
+    )
+    result = response["result"]
+    assert result["isError"] is True
+    assert "Unknown tool" in result["content"][0]["text"]
+
+
+def test_tools_call_unknown_parameter_is_strict_over_the_wire(strict_server: Any) -> None:
+    (response,) = _rpc_lines(
+        strict_server,
+        [
+            {
+                "jsonrpc": "2.0",
+                "id": 4,
+                "method": "tools/call",
+                "params": {"name": "who_calls", "arguments": {"symbol": CALLER, "lvel": 2}},
+            }
+        ],
+    )
+    result = response["result"]
+    assert result["isError"] is True
+    assert "lvel" in result["content"][0]["text"]
+
+
+def test_tools_call_wrong_typed_argument_names_the_parameter(strict_server: Any) -> None:
+    (response,) = _rpc_lines(
+        strict_server,
+        [
+            {
+                "jsonrpc": "2.0",
+                "id": 5,
+                "method": "tools/call",
+                "params": {"name": "who_calls", "arguments": {"symbol": CALLER, "limit": "lots"}},
+            }
+        ],
+    )
+    result = response["result"]
+    assert result["isError"] is True
+    assert "limit" in result["content"][0]["text"]
+
+
+def test_tools_call_wrong_typed_list_item_names_param_and_index(strict_server: Any) -> None:
+    """List ITEMS are validated against the schema's `items` too: a wrong-typed
+    element is an argument-validation error naming the parameter AND the
+    element's index — never a later 'Internal error' from inside the query
+    (or worse, a silently accepted wrong-typed filter)."""
+    result = strict_server.call_tool(
+        "who_calls", {"symbol": CALLER, "include_paths": ["src/mongo", 3]}
+    )
+    assert result.get("isError") is True
+    text = result["content"][0]["text"]
+    assert "include_paths[1]" in text
+    assert "3" in text
+
+
+def test_tools_call_wrong_typed_nested_list_item_names_the_path(strict_server: Any) -> None:
+    """Nested array schemas (`rules: list[list[str]]`) validate recursively:
+    the error names the full index path into the element."""
+    result = strict_server.call_tool("boundary_violations", {"rules": [["common/", 5]]})
+    assert result.get("isError") is True
+    assert "rules[0][1]" in result["content"][0]["text"]
+
+
+def test_tools_call_explicit_null_for_a_nullable_param_is_accepted(strict_server: Any) -> None:
+    """A nullable (`X | None`) parameter is advertised as an anyOf union with
+    null — so an explicit null is a valid argument (the schema says so), passed
+    through to the handler's default handling."""
+    result = strict_server.call_tool("who_calls", {"symbol": CALLER, "include_paths": None})
+    assert not result.get("isError"), result
+    assert json.loads(result["content"][0]["text"])["total"] == 1
+
+
+def test_tools_call_missing_required_argument_names_it(strict_server: Any) -> None:
+    (response,) = _rpc_lines(
+        strict_server,
+        [
+            {
+                "jsonrpc": "2.0",
+                "id": 6,
+                "method": "tools/call",
+                "params": {"name": "who_calls", "arguments": {}},
+            }
+        ],
+    )
+    result = response["result"]
+    assert result["isError"] is True
+    assert "symbol" in result["content"][0]["text"]
+
+
+def test_registration_refuses_a_non_dict_items_schema() -> None:
+    """The registration guard behind argument validation: a schema fragment
+    whose `items` is not a schema object would make element validation fail
+    open (elements passed unchecked) — registration refuses it instead. The
+    generated fragments always satisfy it (all 26 tools register on every
+    build); the guard exists for future hand-written ones."""
+    with pytest.raises(ValueError, match="'items' must be a schema object"):
+        mcp_server._assert_items_are_schemas("p", {"type": "array", "items": ["not-a-schema"]})
+
+
+def test_tools_list_golden_matches_the_pre_hand_rolled_wire_shape(strict_server: Any) -> None:
+    """GOLDEN — the 26 tools' names, descriptions, input/output schemas and
+    their order must stay exactly what clients saw; a deliberate change
+    updates the fixture and says so in the CHANGELOG.
+
+    Provenance of the fixture (tests/fixtures/mcp_tools_list_old_fastmcp.json):
+    captured 2026-10-30 by driving the PREVIOUS library-generated server
+    (FastMCP from mcp 1.30.0) over real stdio at working-tree commit
+    fba9dfb8cfa0c1f086b9d534fce5242702102026 — the last commit before the
+    hand-rolled rewrite — with an mcp-client initialize + tools/list
+    conversation, the `result.tools` array saved verbatim (JSON, so key order
+    inside objects is not pinned; list order is). Compared here through the
+    WIRE path (`tools/list` served over injected stdio), not the internal
+    `list_tools()`, so the golden pins what a client actually receives."""
+    with open(Path(__file__).parent / "fixtures" / "mcp_tools_list_old_fastmcp.json") as f:
+        fixture = json.load(f)
+    responses = _rpc_lines(
+        strict_server,
+        [_initialize_request(), {"jsonrpc": "2.0", "id": 2, "method": "tools/list"}],
+    )
+    (tools_list,) = [r for r in responses if r.get("id") == 2]
+    assert tools_list["result"]["tools"] == fixture
+    assert len(strict_server.tools) == 26
+
+
+# --- the loop survives anything: a bad line never stops `run` -------------------
+
+
+def _call_line(msg_id: int, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "jsonrpc": "2.0",
+        "id": msg_id,
+        "method": "tools/call",
+        "params": {"name": name, "arguments": arguments},
+    }
+
+
+def test_tools_call_unicode_digit_integer_is_an_argument_error_not_a_crash(
+    strict_server: Any,
+) -> None:
+    """`"²".isdigit()` is True yet `int("²")` raises — the narrow digit-string
+    coercion must turn that into the normal validation error, and the next
+    line is still served."""
+    responses = _rpc_lines(
+        strict_server,
+        [_call_line(1, "who_calls", {"symbol": CALLER, "limit": "²"}), _initialize_request()],
+    )
+    result = responses[0]["result"]
+    assert result["isError"] is True
+    assert "limit" in result["content"][0]["text"]
+    assert responses[1]["id"] == 1  # the initialize after it was served
+
+
+def test_tools_call_unserializable_payload_is_an_error_not_a_crash(
+    strict_server: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(strict_server.tools["who_calls"], "fn", lambda **_: {"bad": {1}})
+    responses = _rpc_lines(
+        strict_server,
+        [_call_line(2, "who_calls", {"symbol": CALLER}), _initialize_request()],
+    )
+    assert responses[0]["id"] == 2
+    assert responses[0]["result"]["isError"] is True
+    assert responses[1]["result"]["protocolVersion"] == mcp_server.PROTOCOL_VERSION
+
+
+@pytest.mark.parametrize("bad", [b"\xff\xfe", b"\xc3\x28"])
+def test_undecodable_bytes_line_is_a_parse_error_and_the_loop_continues(
+    strict_server: Any, bad: bytes
+) -> None:
+    responses = _rpc_lines(strict_server, [bad, _initialize_request()])
+    assert responses[0]["error"]["code"] == -32700
+    assert responses[0]["id"] is None
+    assert responses[1]["result"]["protocolVersion"] == mcp_server.PROTOCOL_VERSION
+
+
+def test_unexpected_exception_in_dispatch_is_an_internal_error_and_the_loop_continues(
+    strict_server: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The per-line guard: a bug anywhere past the tool boundary answers the
+    request (its id recovered from the line) with -32603 instead of killing
+    the server."""
+
+    def boom() -> list[dict[str, Any]]:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(strict_server, "list_tools", boom)
+    responses = _rpc_lines(
+        strict_server,
+        [
+            {"jsonrpc": "2.0", "id": 5, "method": "tools/list"},
+            {"jsonrpc": "2.0", "method": "tools/list"},  # notification: no reply
+            _initialize_request(),
+        ],
+    )
+    assert len(responses) == 2
+    assert responses[0]["id"] == 5
+    assert responses[0]["error"]["code"] == -32603
+    assert responses[1]["id"] == 1
+
+
+def test_real_stdin_undecodable_line_does_not_stop_the_server(tmp_path: Path) -> None:
+    """End to end over a real process pipe — the path `cppgraph-mcp` takes:
+    invalid UTF-8 on one line, a valid request on the next, both served."""
+    payload = b"\xc3\x28\n" + json.dumps(_initialize_request()).encode() + b"\n"
+    proc = subprocess.run(
+        [sys.executable, "-m", "cppgraph.mcp_server"],
+        input=payload,
+        capture_output=True,
+        cwd=tmp_path,
+        timeout=60,
+    )
+    assert proc.returncode == 0, proc.stderr
+    first, second = [json.loads(x) for x in proc.stdout.decode().splitlines()]
+    assert first["error"]["code"] == -32700
+    assert second["result"]["protocolVersion"] == mcp_server.PROTOCOL_VERSION
