@@ -9,18 +9,22 @@ in `CHANGELOG.md`, releases in `versions.json`.
 
 ## Other
 
-- **Migrate the MCP server to mcp 2.x (next minor).** Scoped 2026-10-30 (throwaway-venv
-  probe): exactly four breaking points, one root chain — `FastMCP` → `MCPServer`
-  (mcp_server.py:1721; the old module only raises), `ToolError` import path
-  (mcp_server.py:1722 + test import), our `call_tool` override signature (2.x passes
-  a `context` positionally), and the result shape (`CallToolResult` vs the v1 tuple;
-  dict tools yield `structured_content=None`). No lifecycle change — a 2-only
-  migration is ~25–40 lines (pin `>=2,<3`); dual 1.x/2.x support is possible (~60–80
-  lines) but buys nothing given the dedicated per-machine venv. Two decisions to
-  fold in: whether to declare output annotations for the 26 dict-returning tools
-  (`structured_content=None` otherwise), and the OTel-by-default dependency
-  footprint in setup.sh's venv. No user-visible difference (clients read the text
-  block). Pinned `mcp>=1.2,<2` in the meantime (pyproject, rationale in place).
+- **Drop the `mcp` dependency — hand-rolled stdio server (DECIDED 2026-10-30,
+  replaces the mcp 2.x migration).** The FastMCP surface actually used reduces to
+  the import, the `@mcp.tool()` decorator, `run()` stdio, and error codes — so
+  little that the repo already subclasses it (`_StrictArgsFastMCP`) to re-add
+  strict unknown-parameter gating, i.e. re-implementing what the lib should do.
+  Scope (scoped 2026-10-30 via a throwaway-venv probe): JSON-RPC 2.0 over
+  newline-delimited stdio, exactly the four methods the protocol needs here
+  (`initialize` with a pinned PROTOCOL_VERSION, `notifications/initialized`,
+  `tools/list`, `tools/call`) — the pattern masora proved at 12 tools
+  (hand-rolled, zero deps, fail-closed: a malformed line never stops the loop).
+  The 26 tools' queries are already unit-tested without a transport (DESIGN.md
+  "thin wiring"), so the decorators are replaced by hand-declared schemas +
+  a dispatch table. Kills the `mcp<2` pin, the mcp 2.x migration, and the OTel
+  footprint in one move; protocol-level failures stay JSON-RPC errors
+  (-32700/-32600/-32601/-32602/-32603), tool failures stay `isError: true`
+  results — wire shape unchanged, clients notice nothing.
 
 - **Attributed references as first-class `uses` edges.** `impact_of`/`path` traverse
   `calls`/`inherits` only, so a *type* has no reachable callers — "what breaks if I
