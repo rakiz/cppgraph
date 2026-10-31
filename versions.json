@@ -11,7 +11,7 @@
       "scip-clang-x86_64-linux": "06fd18c576f979a726c651594644ec4a35db4f471f2160b3f72eb89fa6001784"
     }
   },
-  "latest": "0.4.11",
+  "latest": "0.5.0",
   "releases": [
     {
       "version": "0.1.0",
@@ -104,10 +104,10 @@
       "url": "https://github.com/rakiz/cppgraph/releases/tag/v0.4.10"
     },
     {
-      "version": "0.4.11",
+      "version": "0.5.0",
       "rebuild": "store",
       "notes": "Store schema v6: a new `log_ids` table (+ index) backing the redwood `log_id_lookup` connector (log-id → enclosing symbol, contract v2 with mongo's `LOGV2` form). The table shape is optional at read time — readers gate on table presence AND the `log_ids_extracted` meta marker — so v5 graphs keep working, degrading to a reasoned `found: false`; store-level migration only, no re-index: rebuild from the existing `.scip` (`cppgraph build`) to get the new table (a re-index is only needed to pick up `LOGV2` extraction on graphs built before this release). Also: zero-dependency MCP stdio server (the `mcp` library dependency is gone — transport-level, no graph impact), `--json` versioned schema:1 contracts on every query command, `cppgraph fingerprints` (masora fingerprint contract v1), masora facts contract v4 reader, module scoping by file/glob entries. Full detail in `CHANGELOG.md`.",
-      "url": "https://github.com/rakiz/cppgraph/releases/tag/v0.4.11"
+      "url": "https://github.com/rakiz/cppgraph/releases/tag/v0.5.0"
     }
   ]
 }
