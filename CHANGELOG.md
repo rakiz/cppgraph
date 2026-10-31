@@ -4,7 +4,7 @@ All notable changes to cppgraph. The format follows
 [Keep a Changelog](https://keepachangelog.com/). This project is pre-1.0; the
 on-disk store also carries its own `schema_version` for forward-compatibility.
 
-## [Unreleased]
+## [0.4.11] - 2026-10-30
 
 ### Changed
 
